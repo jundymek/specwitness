@@ -54,7 +54,17 @@ describe('the DeclaredCommand mint cannot be reached from outside src/config', (
     // wholesale is stronger than naming individual files: `schema.ts` exports
     // `configSchema`, whose `.parse()` also mints, and a future internal module
     // might do the same without anyone remembering to extend this list.
-    const deepImport = /from\s+['"][^'"]*\/config\/(?!index\.js['"])[^'"]+['"]/;
+    //
+    // Matches the module SPECIFIER rather than the `from` clause, so it catches a
+    // dynamic `await import('../config/schema.js')` as well as a static import —
+    // the dynamic form was a real gap in the first version of this test. Anchored
+    // on the `.js` extension so prose mentioning `src/config/schema.ts` in a doc
+    // comment is not a false positive.
+    //
+    // Honest limit: a computed specifier (`import(someVariable)`) cannot be caught
+    // by any static scan. That is a deliberate act of circumvention rather than an
+    // accident, and code review is the backstop for it.
+    const deepImport = /['"][^'"]*\/config\/(?!index\.js['"])[^'"]*\.js['"]/;
 
     const offenders = filesOutsideConfig().filter((file) =>
       deepImport.test(readFileSync(file, 'utf8')),
