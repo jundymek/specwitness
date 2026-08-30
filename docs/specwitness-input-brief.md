@@ -6,7 +6,7 @@
 > NOTE: The original message was truncated by the client at Section 58 (mid-"Reasons").
 > Sections 59+ (if any existed) were not received and must be re-supplied by the author.
 > This document is the authoritative product input for the BMAD planning artifacts under
-> `_bmad-output/planning-artifacts/`.
+> `docs/planning-artifacts/`.
 
 ======================================================================
 0. FIRST ACTIONS

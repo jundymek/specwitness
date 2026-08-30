@@ -9,12 +9,12 @@ SpecWitness is an independent verification gate for agentic software development
 ## Authoritative documents (read in this order)
 
 1. `docs/specwitness-input-brief.md` + `docs/specwitness-input-brief-part2.md` — founder brief, verbatim (part 2 = §59–75, re-supplied after truncation). The product source of truth.
-2. `_bmad-output/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md` — PRD: glossary, FR-1..FR-34, NFRs, MVP scope. `addendum.md` beside it holds integration facts (first-client harness survey, verified CLI capabilities, config/CLI sketches).
-3. `_bmad-output/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md` — binding architecture: paradigm, AD-1..AD-13 invariants, conventions, stack, structural seed. `architecture-questions.md` beside it answers the brief's 70 architectural questions explicitly; reviews live there too.
+2. `docs/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md` — PRD: glossary, FR-1..FR-34, NFRs, MVP scope. `addendum.md` beside it holds integration facts (first-client harness survey, verified CLI capabilities, config/CLI sketches).
+3. `docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md` — binding architecture: paradigm, AD-1..AD-13 invariants, conventions, stack, structural seed. `architecture-questions.md` beside it answers the brief's 70 architectural questions explicitly; reviews live there too.
 4. `docs/adr/` — ADR-001..006 + `ADR-INDEX.md` (decision log mapping every required topic to its home).
-5. `_bmad-output/planning-artifacts/epics.md` — 7 epics / 43 stories with acceptance criteria.
-6. `_bmad-output/planning-artifacts/roadmap.md` — cohort execution order, per-epic parallelization waves, exit criteria, MVP-ready checklist, first dogfooding procedure.
-7. `_bmad-output/implementation-artifacts/sprint-status.yaml` — story tracking.
+5. `docs/planning-artifacts/epics.md` — 7 epics / 43 stories with acceptance criteria.
+6. `docs/planning-artifacts/roadmap.md` — cohort execution order, per-epic parallelization waves, exit criteria, MVP-ready checklist, first dogfooding procedure.
+7. `docs/implementation-artifacts/sprint-status.yaml` — story tracking.
 
 ## Non-negotiable product rules (from the brief — do not silently overturn)
 

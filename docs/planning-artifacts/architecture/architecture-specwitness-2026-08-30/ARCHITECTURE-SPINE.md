@@ -11,8 +11,8 @@ updated: '2026-08-30'
 binds: [FR-1..FR-34, NFR (PRD §5, §7)]
 sources:
   - 'docs/specwitness-input-brief.md'
-  - '_bmad-output/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md'
-  - '_bmad-output/planning-artifacts/prds/prd-specwitness-2026-08-30/addendum.md'
+  - 'docs/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md'
+  - 'docs/planning-artifacts/prds/prd-specwitness-2026-08-30/addendum.md'
 companions:
   - 'docs/adr/ (ADR-001..005)'
 ---

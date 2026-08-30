@@ -7,11 +7,11 @@ You are working in the SpecWitness repo (`/Users/jundymek/dev/specwitness`). The
 ## Step 1 — Load context (in this order)
 
 1. `CLAUDE.md` — project rules and document map.
-2. `_bmad-output/planning-artifacts/epics.md` — Epic 1 section: the 6 stories with their Given/When/Then acceptance criteria (authoritative; expand, never weaken).
-3. `_bmad-output/planning-artifacts/roadmap.md` — EPIC 1 block: wave order (1.1 first → wave B: 1.2+1.3 → wave C: 1.4+1.5+1.6), module ownership, shared contracts, exit criteria.
-4. `_bmad-output/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md` — binding: paradigm, AD-1..AD-13, Consistency Conventions, Stack table (Node >=22.12, TypeScript 6.0.x, pnpm 11, commander 15, zod 4.5, execa 10, yaml 2.9, vitest 4.1, tsup 8.5, dependency-cruiser 18), Structural Seed (source tree).
+2. `docs/planning-artifacts/epics.md` — Epic 1 section: the 6 stories with their Given/When/Then acceptance criteria (authoritative; expand, never weaken).
+3. `docs/planning-artifacts/roadmap.md` — EPIC 1 block: wave order (1.1 first → wave B: 1.2+1.3 → wave C: 1.4+1.5+1.6), module ownership, shared contracts, exit criteria.
+4. `docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md` — binding: paradigm, AD-1..AD-13, Consistency Conventions, Stack table (Node >=22.12, TypeScript 6.0.x, pnpm 11, commander 15, zod 4.5, execa 10, yaml 2.9, vitest 4.1, tsup 8.5, dependency-cruiser 18), Structural Seed (source tree).
 5. `docs/adr/ADR-INDEX.md`, plus ADR-002 (exit codes 0/1/2/3/64) and ADR-003 (gate failure ⇒ FAIL + gateFailed) directly — Epic 1 implements the exit table.
-6. Use `_bmad-output/planning-artifacts/architecture/architecture-specwitness-2026-08-30/architecture-questions.md` as a lookup for any "how exactly?" question before inventing an answer.
+6. Use `docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/architecture-questions.md` as a lookup for any "how exactly?" question before inventing an answer.
 
 ## Step 2 — Generate the six story files
 
@@ -24,7 +24,7 @@ Invoke the installed BMAD skill **`bmad-create-story`** explicitly by name (it i
 1.5 `specwitness doctor` — runtime & project diagnostics
 1.6 Run storage foundation & run identifiers
 
-Output location: `_bmad-output/implementation-artifacts/` per `_bmad/bmm/config.yaml` (the skill resolves this itself — let it). Story file names/keys must line up with the entries already in `_bmad-output/implementation-artifacts/sprint-status.yaml` (e.g. `1-1-cli-package-skeleton-with-exit-code-contract`).
+Output location: `docs/implementation-artifacts/` per `_bmad/bmm/config.yaml` (the skill resolves this itself — let it). Story file names/keys must line up with the entries already in `docs/implementation-artifacts/sprint-status.yaml` (e.g. `1-1-cli-package-skeleton-with-exit-code-contract`).
 
 ## Step 3 — Quality bar for every story (founder brief §63)
 

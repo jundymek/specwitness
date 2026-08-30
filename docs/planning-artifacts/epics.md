@@ -3,9 +3,9 @@ stepsCompleted: [step-01-validate-prerequisites, step-02-design-epics, step-03-c
 inputDocuments:
   - docs/specwitness-input-brief.md
   - docs/specwitness-input-brief-part2.md
-  - _bmad-output/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md
-  - _bmad-output/planning-artifacts/prds/prd-specwitness-2026-08-30/addendum.md
-  - _bmad-output/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md
+  - docs/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md
+  - docs/planning-artifacts/prds/prd-specwitness-2026-08-30/addendum.md
+  - docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md
   - docs/adr/ADR-001..006 + ADR-INDEX
 generatedBy: headless autonomous planning session 2026-08-30 (approval gates recorded as pending author review)
 ---
@@ -294,7 +294,7 @@ So that contract generation is isolated from planning-artifact formats (FR-5, FR
 
 **Acceptance Criteria:**
 
-**Given** configurable artifact roots (defaults `_bmad-output/planning-artifacts`; first-client override `docs/planning-artifacts` + `docs/implementation-artifacts`)
+**Given** configurable artifact roots (defaults `docs/planning-artifacts`; first-client override `docs/planning-artifacts` + `docs/implementation-artifacts`)
 **When** I ingest `epic-7` (input accepted as `7`, `epic-7`, or `epic-07`)
 **Then** the EpicSpec contains the epic id/title/goal and every story with its numbered acceptance criteria verbatim, with source file references.
 
