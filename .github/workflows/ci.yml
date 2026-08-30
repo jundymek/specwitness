@@ -61,7 +61,17 @@ jobs:
       - name: Enable corepack
         # pnpm's version comes from packageManager in package.json, so CI and
         # every developer machine resolve to the same pnpm.
-        run: corepack enable
+        #
+        # Corepack is upgraded first: the release bundled with Node 22.12
+        # predates pnpm's current signing key, so activating pnpm@11.24.0 with
+        # it can fail with "Cannot find matching keyid". Installing a current
+        # corepack sidesteps a failure that would otherwise look like a broken
+        # lockfile rather than a stale signature list.
+        run: |
+          npm install --global corepack@latest
+          corepack enable
+          corepack --version
+          pnpm --version
 
       # setup-node's `cache: pnpm` cannot be used here: it resolves the store
       # by running `pnpm` during its own step, which is before corepack has
