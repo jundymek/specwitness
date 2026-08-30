@@ -49,11 +49,16 @@ function filesOutsideConfig(): string[] {
 }
 
 describe('the DeclaredCommand mint cannot be reached from outside src/config', () => {
-  it('no module outside src/config imports declared-command.ts or its schema', () => {
-    const offenders = filesOutsideConfig().filter((file) => {
-      const source = readFileSync(file, 'utf8');
-      return source.includes('declared-command') || source.includes('declaredCommandSchema');
-    });
+  it('no module outside src/config deep-imports past the public surface', () => {
+    // Only `config/index.js` may be imported from outside. Banning deep imports
+    // wholesale is stronger than naming individual files: `schema.ts` exports
+    // `configSchema`, whose `.parse()` also mints, and a future internal module
+    // might do the same without anyone remembering to extend this list.
+    const deepImport = /from\s+['"][^'"]*\/config\/(?!index\.js['"])[^'"]+['"]/;
+
+    const offenders = filesOutsideConfig().filter((file) =>
+      deepImport.test(readFileSync(file, 'utf8')),
+    );
 
     expect(offenders.map((file) => relative(process.cwd(), file))).toEqual([]);
   });
@@ -74,6 +79,7 @@ describe('the DeclaredCommand mint cannot be reached from outside src/config', (
 
     expect(Object.keys(surface)).not.toContain('declaredCommandSchema');
     expect(Object.keys(surface)).not.toContain('declareCommand');
+    expect(Object.keys(surface)).not.toContain('configSchema');
   });
 
   it('scans a non-trivial number of files (the scan itself cannot silently no-op)', () => {

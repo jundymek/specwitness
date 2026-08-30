@@ -12,56 +12,45 @@
  *
  * HOW IT IS ENFORCED:
  *
- *   `DeclaredCommand` is a branded string. The brand symbol is module-private and
- *   `declareCommand` is never exported — not from this module's public surface and
- *   not from `src/config/index.ts`. Validation (`declaredCommandSchema`, used by
- *   `schema.ts`) is the ONE place a raw string is promoted, and it only ever runs
- *   over bytes read from the project's own config file.
+ *   `DeclaredCommand` is a string carrying a brand whose symbol is declared here
+ *   and never exported. Because the symbol is unreachable, no code outside this
+ *   package can produce a value of this type by construction — the only remaining
+ *   route is a deliberate `as` cast, which TypeScript cannot prevent in any
+ *   design and which `tests/unit/config/boundary-scan.test.ts` rejects mechanically.
+ *
+ *   The single promotion from `string` to `DeclaredCommand` lives in `schema.ts`,
+ *   inside the config schema itself, and is a module-private function there. This
+ *   module deliberately exports NO callable that mints: an exported
+ *   `declaredCommandSchema` would have been a `.parse(anyString)` bypass, because
+ *   application layers (`pipeline`, `authoring`, `ingest`, `report`) are permitted
+ *   to import `src/config`.
  *
  *   The direction matters and is deliberate:
  *     - `DeclaredCommand -> string` is FREE. Reading a declared command is safe:
  *       story 1.5's doctor resolves its first token on PATH, and renderers print
  *       commands into evidence. `commandText()` makes that intent explicit.
- *     - `string -> DeclaredCommand` is IMPOSSIBLE outside this module. Minting is
- *       the hazard, not reading.
+ *     - `string -> DeclaredCommand` is unavailable outside `src/config/`. Minting
+ *       is the hazard, not reading.
  *
- * DO NOT add an `asDeclaredCommand()` / `unsafeDeclaredCommand()` escape hatch. If
- * a later story needs a command this module does not expose, add a config accessor
- * instead. `tests/unit/config/declared-command.type.test.ts` fails the build if a
- * plain string ever becomes assignable to `DeclaredCommand`, or if a constructor
- * leaks into the public surface.
+ * DO NOT add an `asDeclaredCommand()` / `unsafeDeclaredCommand()` escape hatch, and
+ * do not export a schema or helper that mints. If a later story needs a command
+ * this module does not expose, add a config accessor instead.
  */
-import { z } from 'zod'
 
-declare const declaredCommandBrand: unique symbol
+declare const declaredCommandBrand: unique symbol;
 
 /**
  * A shell command string that provably came from the project's Project Config.
  *
  * Assignable TO `string` (reading is safe); a `string` is NOT assignable to it
- * (minting is not). Constructible only inside this module.
+ * (minting is not). Produced only inside `src/config/schema.ts` during validation.
  */
-export type DeclaredCommand = string & { readonly [declaredCommandBrand]: 'DeclaredCommand' }
-
-/**
- * The single promotion point from raw string to `DeclaredCommand`.
- * Module-private on purpose — see the header. Never export this.
- */
-const declareCommand = (raw: string): DeclaredCommand => raw as DeclaredCommand
-
-/**
- * The zod schema every command-valued config field must go through, so that all
- * promotion flows through `declareCommand` above.
- */
-export const declaredCommandSchema: z.ZodType<DeclaredCommand, string> = z
-  .string()
-  .min(1, 'command must not be empty')
-  .transform(declareCommand)
+export type DeclaredCommand = string & { readonly [declaredCommandBrand]: 'DeclaredCommand' };
 
 /**
  * Read a declared command back as a plain string, for display, logging and PATH
  * resolution. This does not execute anything and never will.
  */
 export function commandText(command: DeclaredCommand): string {
-  return command
+  return command;
 }

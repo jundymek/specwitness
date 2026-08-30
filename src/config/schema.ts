@@ -31,13 +31,30 @@
 
 import { z } from 'zod';
 
-import { declaredCommandSchema } from './declared-command.js';
+import type { DeclaredCommand } from './declared-command.js';
 
 const DEFAULT_PLANNING_ARTIFACTS = 'docs/planning-artifacts';
 const DEFAULT_IMPLEMENTATION_ARTIFACTS = 'docs/implementation-artifacts';
 const DEFAULT_READY_TIMEOUT_SEC = 60;
 
 const nonEmptyString = z.string().min(1);
+
+/**
+ * The ONE promotion point from a raw string to a `DeclaredCommand` (AD-3).
+ *
+ * Module-private on purpose, and deliberately NOT exported as a zod schema: an
+ * exported `declaredCommandSchema` would be a callable `.parse(anyString)` mint,
+ * and the application layers (`pipeline`, `authoring`, `ingest`, `report`) may
+ * legitimately import `src/config`. Keeping it here means the only remaining
+ * route to a `DeclaredCommand` outside this file is a deliberate cast, which
+ * TypeScript cannot prevent in any design and which
+ * `tests/unit/config/boundary-scan.test.ts` rejects mechanically.
+ */
+const declaredCommand = (): z.ZodType<DeclaredCommand, string> =>
+  z
+    .string()
+    .min(1, 'command must not be empty')
+    .transform((raw): DeclaredCommand => raw as DeclaredCommand);
 
 const projectSchema = z.strictObject({
   /** No default: the base branch is never assumed (addendum section D). */
@@ -52,12 +69,12 @@ const planningSchema = z.strictObject({
 });
 
 const setupSchema = z.strictObject({
-  install: declaredCommandSchema.optional(),
+  install: declaredCommand().optional(),
 });
 
 const gateSchema = z.strictObject({
   id: nonEmptyString,
-  run: declaredCommandSchema,
+  run: declaredCommand(),
 });
 
 /**
@@ -74,7 +91,7 @@ const gateSchema = z.strictObject({
 const readinessSchema = z
   .strictObject({
     url: nonEmptyString.optional(),
-    command: declaredCommandSchema.optional(),
+    command: declaredCommand().optional(),
     timeoutSec: z.number().int().positive().default(DEFAULT_READY_TIMEOUT_SEC),
   })
   .superRefine((ready, ctx) => {
@@ -92,10 +109,18 @@ const readinessSchema = z
   });
 
 const serviceSchema = z.strictObject({
-  run: declaredCommandSchema,
+  run: declaredCommand(),
   /** Explicit per-service ports; V0 does not auto-allocate (questions doc Q26). */
   port: z.number().int().min(1).max(65535).optional(),
-  ready: readinessSchema.optional(),
+  /**
+   * Required, not optional. The spec's service shape marks `port?` and `env?`
+   * optional and writes `ready:` without the `?` — the same notation that makes
+   * `project.baseBranch` required — and AC1 says services carry "command +
+   * readiness". A service with no declared readiness has no defined moment at
+   * which the pipeline may proceed, so accepting one would defer a config error
+   * into a race at run time.
+   */
+  ready: readinessSchema,
   env: z.record(z.string(), z.string()).optional(),
 });
 
@@ -119,7 +144,7 @@ const aiSchema = z.strictObject({
 });
 
 const observationSchema = z.strictObject({
-  run: declaredCommandSchema,
+  run: declaredCommand(),
 });
 
 const baseConfigSchema = z.strictObject({
@@ -139,7 +164,7 @@ const baseConfigSchema = z.strictObject({
   gates: z.array(gateSchema).default([]),
   services: z.record(nonEmptyString, serviceSchema).default({}),
   /** Free-form command map keyed by name; `reset` is the conventional key. */
-  data: z.record(nonEmptyString, declaredCommandSchema).default({}),
+  data: z.record(nonEmptyString, declaredCommand()).default({}),
   observations: z.record(nonEmptyString, observationSchema).default({}),
   ai: aiSchema.default({}),
 });

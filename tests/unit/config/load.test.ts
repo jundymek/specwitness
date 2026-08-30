@@ -110,6 +110,7 @@ describe('loadConfig — invalid configs name the YAML path (AC2)', () => {
     ['invalid-bad-role-ref.yaml', 'ai.roles.contract-author'],
     ['invalid-duplicate-gate-id.yaml', 'gates[1].id'],
     ['invalid-bad-version.yaml', 'version'],
+    ['invalid-service-without-ready.yaml', 'services.worker.ready'],
   ])('%s reports the path %s with a hint', (fixture, expectedPath) => {
     const error = loadExpectingError(fixture)
 
