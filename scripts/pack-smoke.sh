@@ -32,7 +32,15 @@ CONSUMER="$WORKDIR/consumer"
 mkdir -p "$CONSUMER"
 cd "$CONSUMER"
 npm init -y >/dev/null 2>&1
-npm install --no-audit --no-fund "$TARBALL" >/dev/null 2>&1
+# Output is kept on failure only: the install resolves this package's four
+# runtime dependencies from the registry, so a network-restricted environment
+# fails here, and swallowing npm's message would make that undiagnosable.
+if ! install_log="$(npm install --no-audit --no-fund "$TARBALL" 2>&1)"; then
+  echo "ERROR: installing the packed tarball failed" >&2
+  echo "$install_log" >&2
+  echo "HINT: this step needs registry access to resolve runtime dependencies" >&2
+  exit 1
+fi
 
 CLI="$CONSUMER/node_modules/.bin/specwitness"
 if [ ! -x "$CLI" ]; then
