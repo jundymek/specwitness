@@ -75,7 +75,7 @@ graph TD
 
 - **Binds:** FR-8..FR-10, FR-16, FR-30, FR-31
 - **Prevents:** incompatible serialization between stories; unverifiable freeze; schema drift breaking the harness.
-- **Rule:** Contracts and Plans are human-readable YAML in the target project (`.specwitness/contracts/<epic>.yaml`, `.specwitness/plans/<epic>.yaml`); Runs are JSON under `.specwitness/runs/<run-id>/`. Every artifact — run manifest included — carries `schemaVersion` (integer, additive evolution; breaking change ⇒ bump + migration note). A contract file has exactly two top-level keys: `spec` (criteria + epic ref + version — the fingerprinted content) and `meta` (fingerprint, frozen flag, timestamps, version history — **never** fingerprinted); freeze and integrity-validation both hash only `spec`, via the one shared `schemas/canonical.ts` implementation (stable key order, LF endings, trimmed strings). The `Criterion`, `Kind`, `Severity`, `Verifiability` types are defined once in `domain/contract.ts`; Plans reference criteria **by id only** and never embed criterion statements. Timestamps are ISO-8601 UTC everywhere.
+- **Rule:** Contracts and Plans are human-readable YAML in the target project (`.specwitness/contracts/<epic>.yaml`, `.specwitness/plans/<epic>.yaml`); Runs are JSON under `.specwitness/runs/<run-id>/`. Every artifact — run manifest included — carries `schemaVersion` (integer, additive evolution; breaking change ⇒ bump + migration note). A contract file has exactly two top-level keys: `spec` (criteria + epic ref + version — the fingerprinted content) and `meta` (fingerprint, frozen flag, timestamps, version history — **never** fingerprinted); freeze and integrity-validation both hash only `spec`, via the one shared `schemas/canonical.ts` implementation (stable key order, LF endings, trimmed strings). The `Criterion`, `Kind`, `Severity`, `Verifiability` types are defined once in `domain/contract.ts`; Plans reference criteria **by id only** and never embed criterion statements. Contract and Plan `meta` record generation provenance (provider, model as reported by the CLI, CLI version, timestamp) for reproducibility. A criterion the plan-author cannot map to a safe probe is compiled as `needs_human` with reason `not-safely-automatable` — never dropped, never guessed. Timestamps are ISO-8601 UTC everywhere.
 
 ### AD-6 — Result taxonomy & exit mapping
 
@@ -136,6 +136,8 @@ graph TD
 | State & config | no global mutable state; config loaded once, validated with zod, passed down; env vars read only in `cli/` and `infra/`; never mutate parent env |
 | Logging | structured logger port; `--verbose` for debug; default output is the report, not logs |
 | Non-interactive first | no code path may block on TTY input except commands documented interactive (`init` confirm, `contract --amend`); all agent-callable commands (`verify`, `plan`, `report`, `doctor`, `contract --status`) are prompt-free |
+| Ports | service ports are config-declared and explicit (no auto-allocation in V0); doctor and the services stage pre-check they are free; an occupied port ⇒ InfraError naming the port — never FAIL |
+| Git vs local | `.specwitness/config.yaml`, `contracts/`, `plans/` are committed; `runs/` and `scorecard.jsonl` are local-only (`init` writes the ignore entries); V0 keeps all runs — `clean` reaps resources, never results |
 
 ## Stack
 

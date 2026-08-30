@@ -820,5 +820,4 @@ Preferred: TypeScript + Node.js
 
 Reasons
 
-[ORIGINAL MESSAGE TRUNCATED HERE — exceeded the client's 50,000 character limit.
- Sections beyond this point were not received. Author: please re-supply if more existed.]
+[Sections 59–75 were truncated in the original message and re-supplied verbatim by the author on 2026-08-30 — see docs/specwitness-input-brief-part2.md. The header note about truncation is retained for historical accuracy.]

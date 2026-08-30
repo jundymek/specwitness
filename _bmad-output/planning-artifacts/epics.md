@@ -2,10 +2,11 @@
 stepsCompleted: [step-01-validate-prerequisites, step-02-design-epics, step-03-create-stories, step-04-final-validation]
 inputDocuments:
   - docs/specwitness-input-brief.md
+  - docs/specwitness-input-brief-part2.md
   - _bmad-output/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md
   - _bmad-output/planning-artifacts/prds/prd-specwitness-2026-08-30/addendum.md
   - _bmad-output/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md
-  - docs/adr/ADR-001..005
+  - docs/adr/ADR-001..006 + ADR-INDEX
 generatedBy: headless autonomous planning session 2026-08-30 (approval gates recorded as pending author review)
 ---
 
@@ -13,7 +14,7 @@ generatedBy: headless autonomous planning session 2026-08-30 (approval gates rec
 
 ## Overview
 
-Complete epic and story breakdown for SpecWitness V0, decomposing the PRD (FR-1..FR-34), the Architecture Spine (AD-1..AD-12), and ADR-001..005 into implementable stories. Sized for the author's harness: max 7 stories per epic, one story per coding agent, epics standalone with backward-only dependencies.
+Complete epic and story breakdown for SpecWitness V0, decomposing the PRD (FR-1..FR-34), the Architecture Spine (AD-1..AD-13), and ADR-001..006 into implementable stories. Sized for the author's harness: max 7 stories per epic, one story per coding agent, epics standalone with backward-only dependencies.
 
 ## Requirements Inventory
 
@@ -113,8 +114,8 @@ FR-29: Epic 3 — terminal report
 FR-30: Epic 3 — JSON output
 FR-31: Epic 3 — run storage & report command
 FR-32: Epic 5 — flakiness semantics
-FR-33: Epic 6 — scorecard recording
-FR-34: Epic 6 — attribution & summary
+FR-33: Epic 6 — scorecard recording; Epic 7 — real-usage data
+FR-34: Epic 6 — attribution & summary; Epic 7 — hypothesis verdict
 
 ## Epic List
 
@@ -142,7 +143,11 @@ Criteria needing a real browser run through standard Playwright with traces as e
 SpecWitness proves its own classification integrity against hand-written expected outcomes (including a non-Node target) and measures its product hypothesis locally — ready for real dogfooding.
 **FRs covered:** FR-4 (proof), FR-33, FR-34; NFR-10
 
-**Dependencies:** strictly backward: E2 uses E1's config/CLI; E3 uses E2's contracts; E4 uses E3's pipeline; E5 uses E4's probe framework; E6 exercises everything. No epic requires a later epic to function.
+### Epic 7: Real Dogfooding & Value Measurement
+SpecWitness gates at least one real epic produced by the author's harness end-to-end (contract before cohort, verify before merge, repair loop if needed) and produces the first evidence-based answer to the product hypothesis. Operator-led epic — brief §66–67: MVP is not complete on synthetic tests alone.
+**FRs covered:** exercises FR-1..FR-32 in production conditions; FR-33/FR-34 with real data
+
+**Dependencies:** strictly backward: E2 uses E1's config/CLI; E3 uses E2's contracts; E4 uses E3's pipeline; E5 uses E4's probe framework; E6 exercises everything; E7 uses the shipped tool on real harness work. No epic requires a later epic to function.
 
 ---
 
@@ -940,3 +945,57 @@ So that SpecWitness can gate a real epic in the author's harness next (UJ-4; add
 **Given** `npm pack` / `npm publish --dry-run`
 **When** run in CI
 **Then** the tarball contains the built CLI and templates only (no fixtures/tests), `npx specwitness --help` works from the packed tarball, and the version is semver with a `next` dist-tag plan documented.
+
+---
+
+## Epic 7: Real Dogfooding & Value Measurement
+
+SpecWitness leaves the lab: the author runs it as the actual merge gate for at least one real epic produced by the terminal-agents harness, completes a full contract → cohort → verify → (repair →) merge cycle, and records whether SpecWitness found defects the earlier gates missed. Operator-led: these stories are executed by the author with SpecWitness, not by coding agents writing SpecWitness code (small docs/fix PRs may fall out of them).
+
+### Story 7.1: Harness integration & first real contract
+
+As the author,
+I want SpecWitness installed and configured in a real harness-managed project, with a frozen contract created before the cohort starts,
+So that the first production use follows the intended contract-before-implementation flow (UJ-1; brief §66).
+
+**Acceptance Criteria:**
+
+**Given** a real target project managed by terminal-agents
+**When** I run `specwitness init`, edit `.specwitness/config.yaml` (gates, services, observations, provider roles), and `specwitness doctor`
+**Then** doctor is green (or every warning consciously accepted and noted), and `Bash(specwitness *)` is allowlisted in the harness's agent settings.
+
+**Given** the next planned BMAD epic in that project
+**When** I run `specwitness contract <epic>`, review the draft, and `--freeze` it **before launching the cohort**
+**Then** the frozen contract + fingerprint are committed to the project alongside the plan (`specwitness plan <epic>`), and the cohort starts only after freeze.
+
+### Story 7.2: First real epic verification & repair loop
+
+As the author,
+I want to gate the assembled epic branch with `specwitness verify`, inspect the evidence, and drive any repair loop to completion,
+So that the full production workflow (verify → repair → re-verify → merge) is exercised on real work (UJ-2/UJ-3; brief §67.17).
+
+**Acceptance Criteria:**
+
+**Given** all story PRs supervisor-approved and merged into the epic branch
+**When** I run `specwitness verify <epic> --json` from the supervisor terminal
+**Then** a complete run with evidence exists under `.specwitness/runs/`, the exit code drives the merge decision, and any FAIL criteria are handed to repair tasks with their expected/actual/evidence.
+
+**Given** repairs merged (if any)
+**When** I re-run verify (AI-free — plan already compiled)
+**Then** the epic reaches PASS or an explicitly accepted NEEDS_HUMAN state before merging to base — and every friction point encountered is captured as a GitHub issue on specwitness.
+
+### Story 7.3: Hypothesis verdict report
+
+As the product owner,
+I want attributions recorded for every finding and a written value-measurement summary,
+So that the product hypothesis gets an evidence-based first answer (brief §54, §67.18).
+
+**Acceptance Criteria:**
+
+**Given** the completed real-epic run(s)
+**When** I record `specwitness scorecard add` attributions for each finding and run `specwitness scorecard summary`
+**Then** the summary answers: unique real defects found after earlier gates passed, duplicates, false positives, NEEDS_HUMAN rate, durations, AI-free share.
+
+**Given** the summary
+**When** I write `docs/dogfooding-report-001.md`
+**Then** it states what SpecWitness caught/missed, verification cost, and a continue/adjust/stop recommendation against the hypothesis — the input for deciding V0.x priorities and repeat dogfooding toward the ~30–50-task window.

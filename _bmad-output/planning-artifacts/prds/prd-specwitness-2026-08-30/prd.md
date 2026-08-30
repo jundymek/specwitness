@@ -342,7 +342,7 @@ Developer can annotate a run's findings (`specwitness scorecard` or equivalent):
 
 ## 8. Open Questions
 
-1. The founder brief was truncated at its §58 ("TECHNOLOGY … Reasons") — were there sections beyond 58? Any content there must be reconciled into this PRD.
+1. ~~The founder brief was truncated at its §58 — were there sections beyond 58?~~ **Resolved 2026-08-30:** the author re-supplied §59–75 (`docs/specwitness-input-brief-part2.md`); reconciled via the 70-question answers doc, ADR-006 + ADR-INDEX, Epic 7 (dogfooding in MVP), and `roadmap.md`.
 2. FR-20 gate-failure verdict mapping (`FAIL` + `gate_failed` marker vs. a fourth top-level outcome) — author confirmation wanted (see ADR-003 discussion).
 3. Amendment confirmation strength (FR-10): is documented policy + explicit flag acceptable for V0, or is a stronger human-presence check required from day one? Note: a TTY-only prompt conflicts with the first client's invocation context (the supervisor runs tools from inside a Claude REPL turn, no TTY) — but that may be a feature, since the supervisor should arguably *not* be able to amend contracts at all.
 4. Should `verify` auto-generate a missing Contract (convenience) or hard-require the pre-implementation freeze workflow (discipline)? Current position: hard-require, to protect the product's core boundary.
