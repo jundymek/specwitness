@@ -1,0 +1,38 @@
+# Mirrors PRD addendum section D, the config sketch this schema is derived from.
+version: 1
+project:
+  baseBranch: master
+  epicBranchPattern: "epic/{n}-{slug}"
+planning:
+  format: bmad-v6
+  planningArtifacts: docs/planning-artifacts
+  implementationArtifacts: docs/implementation-artifacts
+setup:
+  install: pnpm install
+gates:
+  - { id: lint, run: pnpm lint }
+  - { id: typecheck, run: pnpm typecheck }
+  - { id: unit, run: pnpm test }
+  - { id: build, run: pnpm build }
+services:
+  backend:
+    run: python manage.py runserver 8000
+    port: 8000
+    ready: { url: "http://localhost:8000/health", timeoutSec: 60 }
+    env: { DJANGO_SETTINGS_MODULE: config.settings.test }
+  frontend:
+    run: pnpm dev
+    port: 3000
+    ready: { url: "http://localhost:3000" }
+data:
+  reset: ./scripts/reset-test-db.sh
+observations:
+  company-count: { run: ./scripts/specwitness/company-count.sh }
+ai:
+  providers:
+    claude: { adapter: claude-code-cli, mode: subscription }
+    codex: { adapter: codex-cli, mode: chatgpt }
+  roles:
+    contract-author: codex
+    plan-author: codex
+    explainer: claude

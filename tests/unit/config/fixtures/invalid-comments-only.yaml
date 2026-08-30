@@ -1,0 +1,2 @@
+# nothing but comments, so the parsed document is null
+# this must be a ConfigError, not a crash
