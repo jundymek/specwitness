@@ -1,9 +1,27 @@
 name: CI
 
+# TEMPORARILY DISABLED — 2026-08-30, owner decision.
+#
+# This repository is private and its GitHub Actions minutes are exhausted, so
+# every job is rejected before it starts ("recent account payments have failed
+# or your spending limit needs to be increased") and zero steps execute. That
+# left a red, meaningless check on every PR in the epic — which trains
+# reviewers to ignore CI and would hide a genuine failure when one appears.
+#
+# The pipeline below is unchanged and correct; only its triggers are removed.
+# It can still be started by hand from the Actions tab (workflow_dispatch).
+#
+# TO RE-ENABLE once minutes are available, restore these three lines above
+# workflow_dispatch:
+#   push:
+#     branches: [master]
+#   pull_request:
+#
+# Until then the same six steps are run locally before every PR:
+#   pnpm install --frozen-lockfile && pnpm typecheck && pnpm depcruise \
+#     && pnpm test && pnpm build && ./scripts/pack-smoke.sh
 on:
-  push:
-    branches: [master]
-  pull_request:
+  workflow_dispatch:
 
 # A superseded run proves nothing; let the newer commit take over.
 concurrency:
