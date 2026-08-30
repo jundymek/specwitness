@@ -13,8 +13,12 @@ coverage/
 .env.*
 !.env.example
 
-# Proofgate runtime artifacts (future implementation)
-.proofgate/runs/
+# SpecWitness runtime artifacts — local-only (contracts/ and plans/ ARE committed)
+.specwitness/runs/
+.specwitness/scorecard.jsonl
+
+# Packed tarballs from the pack smoke test
+*.tgz
 
 # OS / editor noise
 .DS_Store
