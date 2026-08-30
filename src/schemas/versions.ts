@@ -34,6 +34,14 @@ export const SCHEMA_VERSIONS = Object.freeze({
    * taxonomy itself changed — which is an ADR, not a routine edit.
    */
   resultTaxonomy: 1,
+
+  /**
+   * The per-run `manifest.json` skeleton written by `RunStore` (story 1.6).
+   * Story 3.2 extends it ADDITIVELY with populated worktree paths and pgids;
+   * story 3.5 adds the `result.json` finalize. Neither bumps this version,
+   * because the reserved arrays are already part of the shape.
+   */
+  runManifest: 1,
 } as const satisfies Record<string, number>);
 
 /** Keys of the registry. Derived — never hand-maintained. */
