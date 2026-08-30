@@ -46,15 +46,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Node is selected FIRST. Enabling corepack beforehand would install its
+      # shims into the runner's preinstalled Node, and setup-node then puts a
+      # different installation ahead of it on PATH — so `pnpm` can go missing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12'
+
       - name: Enable corepack
         # pnpm's version comes from packageManager in package.json, so CI and
         # every developer machine resolve to the same pnpm.
         run: corepack enable
 
-      - uses: actions/setup-node@v4
+      # setup-node's `cache: pnpm` cannot be used here: it resolves the store
+      # by running `pnpm` during its own step, which is before corepack has
+      # provided it. Caching the store explicitly avoids that ordering trap.
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
         with:
-          node-version: '22.12'
-          cache: pnpm
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
 
       - name: Install
         run: pnpm install --frozen-lockfile
