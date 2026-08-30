@@ -170,13 +170,26 @@ export async function scaffold(
   const replaced: string[] = [];
 
   const projectDir = join(projectRoot, PROJECT_DIR);
+  const configRelative = `${PROJECT_DIR}/config.yaml`;
+  const configAbsolute = join(projectDir, 'config.yaml');
+
+  const configPresent = await pathExists(configAbsolute);
+  const configWritten = !configPresent || options.force === true;
+
+  // Rendered BEFORE anything is created: a broken install (missing or
+  // malformed template) must fail while the repository is still untouched,
+  // rather than leaving a half-made `.specwitness/` for the user to clean up.
+  const configContents = configWritten ? await renderConfig(projectRoot) : undefined;
+
   await ensureDirectory(projectDir, PROJECT_DIR, created, skipped);
 
-  const configWritten = await ensureConfig(projectRoot, options.force === true, {
-    created,
-    skipped,
-    replaced,
-  });
+  if (configContents === undefined) {
+    skipped.push(configRelative);
+  } else {
+    await write(configAbsolute, configContents);
+    // Replaced, not created: the user had a file there and now does not.
+    (configPresent ? replaced : created).push(configRelative);
+  }
 
   await ensureFile(
     join(projectDir, '.gitignore'),
@@ -191,32 +204,6 @@ export async function scaffold(
   }
 
   return { created, skipped, replaced, configWritten };
-}
-
-interface Report {
-  readonly created: string[];
-  readonly skipped: string[];
-  readonly replaced: string[];
-}
-
-/** Writes `config.yaml` unless it exists and `force` was not given. */
-async function ensureConfig(
-  projectRoot: string,
-  force: boolean,
-  report: Report,
-): Promise<boolean> {
-  const relative = `${PROJECT_DIR}/config.yaml`;
-  const absolute = join(projectRoot, PROJECT_DIR, 'config.yaml');
-  const present = await pathExists(absolute);
-
-  if (present && !force) {
-    report.skipped.push(relative);
-    return false;
-  }
-
-  await write(absolute, await renderConfig(projectRoot));
-  (present ? report.replaced : report.created).push(relative);
-  return true;
 }
 
 /** The shipped template with the base-branch placeholder resolved (D4/D12). */

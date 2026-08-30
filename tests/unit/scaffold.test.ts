@@ -277,6 +277,20 @@ describe('scaffold with --force (AC2)', () => {
 });
 
 describe('scaffold failure modes', () => {
+  it('creates no partial layout when the project directory cannot be made', async () => {
+    // Half a .specwitness/ is worse than none: the user would have to work out
+    // which parts are real before re-running. Whatever fails, nothing that
+    // failure did not reach should exist.
+    await makeGitDir();
+    await writeFile(join(root, '.specwitness'), 'not a directory\n', 'utf8');
+
+    await expect(scaffold(root)).rejects.toBeInstanceOf(InfraError);
+
+    for (const name of ['contracts', 'plans', 'runs', 'config.yaml', '.gitignore']) {
+      expect(await exists(join(root, '.specwitness', name)), `${name} must not exist`).toBe(false);
+    }
+  });
+
   it('raises InfraError naming the path when the target is not writable', async () => {
     await makeGitDir();
     // A file where the directory must go: the mkdir fails with EEXIST/ENOTDIR,
