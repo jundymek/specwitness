@@ -11,6 +11,7 @@
  */
 
 import { UsageError, isSpecWitnessError } from '../domain/errors.js';
+import type { RunOutcome } from '../domain/run-outcome.js';
 
 /**
  * The frozen contract automations script against:
@@ -63,4 +64,44 @@ export function exitCodeForError(err: unknown): ExitCode {
  */
 export function applyExitCode(code: ExitCode): void {
   process.exitCode = code;
+}
+
+/**
+ * Maps a completed run's outcome to its exit code — the run-outcome half of
+ * the ADR-002 table, alongside `exitCodeForError` above.
+ *
+ * PASS 0 · FAIL 1 · NEEDS_HUMAN 2 · infra 3.
+ *
+ * A gate failure is FAIL and exits 1 like any other FAIL (ADR-003): a branch
+ * that does not build is demonstrably not mergeable, which is a product
+ * problem in the branch, not a SpecWitness malfunction. Exit 3 would wrongly
+ * suggest that rerunning might help. The `gateFailed` marker keeps the
+ * distinction visible to repair automation without adding a sixth code.
+ *
+ * The infra arm never returns 1. Reporting an infrastructure failure as a
+ * product FAIL is a defect of the first order.
+ */
+export function exitCodeForOutcome(outcome: RunOutcome): ExitCode {
+  if (outcome.infraError !== undefined) {
+    return EXIT.INFRA;
+  }
+
+  // Bound to a local rather than switched on in place: `outcome` is a
+  // discriminated union, so exhausting the cases narrows `outcome` itself to
+  // `never` and the default branch could no longer read the property off it.
+  const { verdict } = outcome;
+  switch (verdict) {
+    case 'PASS':
+      return EXIT.PASS;
+    case 'FAIL':
+      return EXIT.FAIL;
+    case 'NEEDS_HUMAN':
+      return EXIT.NEEDS_HUMAN;
+    default: {
+      // Compile-time exhaustiveness: adding a Verdict without giving it an
+      // exit code is a type error, not a silent fallthrough.
+      const unreachable: never = verdict;
+      return unreachable;
+    }
+  }
 }
