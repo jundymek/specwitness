@@ -26,6 +26,11 @@ SpecWitness is an independent verification gate for agentic software development
 - Local-first: no SaaS, no web UI, no cloud telemetry.
 - Disagreement with a recorded decision → write an ADR in `docs/adr/`, don't redesign silently.
 
+## Repo conventions
+
+- Default branch: **`master`** (not main). Epic branches: `epic/<n>-<slug>`; story branches: `story/<task-id>` (harness convention).
+- **Conventional Commits** required for every commit: `feat:`, `fix:`, `docs:`, `test:`, `chore:`, `style:`, `refactor:`, `perf:`, `ci:`, `build:` — with optional scope, e.g. `feat(pipeline): add readiness stage`. Imperative mood, no trailing period in the subject.
+
 ## Conventions
 
 - BMAD v6.11 is installed (`_bmad/`, skills in `.claude/skills/bmad-*`). Planning changes go through BMAD skills (e.g. `bmad-prd` Update intent, `bmad-correct-course`), which log to the run's `.memlog.md` — not by hand-editing finalized artifacts.

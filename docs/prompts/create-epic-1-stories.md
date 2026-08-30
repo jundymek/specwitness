@@ -40,5 +40,5 @@ Hard constraints to carry into every story:
 ## Step 4 — Close out
 
 1. Update `sprint-status.yaml`: set the six Epic 1 stories to `ready-for-dev` (use the `bmad-sprint-planning` skill or its `sprint_plan.py` script — do not hand-edit beyond what the tooling supports).
-2. Commit everything with a clear message.
+2. Commit everything with a Conventional Commits message (e.g. `docs: add Epic 1 implementation-ready story files`); the repo's default branch is `master`.
 3. Report: list of created story files, any ambiguities you hit (as questions at the end, per the skill's SAVE QUESTIONS rule), and confirmation that no planning artifacts were modified and no production code was written.
