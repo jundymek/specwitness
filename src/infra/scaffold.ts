@@ -21,6 +21,8 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { stringify } from 'yaml';
+
 import { InfraError } from '../domain/errors.js';
 
 /** The project directory. Fixed name — Epic 2 and 3 both address it literally. */
@@ -173,7 +175,14 @@ export async function scaffold(
   const configRelative = `${PROJECT_DIR}/config.yaml`;
   const configAbsolute = join(projectDir, 'config.yaml');
 
-  const configPresent = await pathExists(configAbsolute);
+  const existingConfig = await stat(configAbsolute).catch(() => undefined);
+  if (existingConfig?.isDirectory() === true) {
+    throw new InfraError(
+      `${configRelative} exists but is a directory, not a file`,
+      `remove or rename ${configAbsolute}, then run 'specwitness init' again`,
+    );
+  }
+  const configPresent = existingConfig !== undefined;
   const configWritten = !configPresent || options.force === true;
 
   // Rendered BEFORE anything is created: a broken install (missing or
@@ -222,7 +231,16 @@ async function renderConfig(projectRoot: string): Promise<string> {
     );
   }
 
-  return template.replace(pattern, `$1${branch}`);
+  // Serialized as a YAML scalar rather than interpolated raw. Git permits
+  // branch names like `true`, `null` and `123`, which YAML would otherwise
+  // read as a boolean, a null and a number — producing a config that fails
+  // validation on the very first `doctor` run. `yaml` quotes only when it must,
+  // so the ordinary `main` / `master` case stays unquoted.
+  const scalar = stringify(branch).trim();
+
+  // A replacement FUNCTION, not a string: `$&`, `` $` `` and `$'` are special in
+  // a string replacement, and a branch name may legitimately contain `$`.
+  return template.replace(pattern, (_match, indent: string) => `${indent}${scalar}`);
 }
 
 /**
@@ -277,7 +295,17 @@ async function ensureDirectory(
   created: string[],
   skipped: string[],
 ): Promise<void> {
-  if (await pathExists(absolute)) {
+  const existing = await stat(absolute).catch(() => undefined);
+  if (existing !== undefined) {
+    if (!existing.isDirectory()) {
+      // Reporting this as "already there" would exit 0 on a layout that later
+      // commands cannot write into — an infra failure disguised as success,
+      // which is the one thing this product must never do.
+      throw new InfraError(
+        `${relative} exists but is not a directory`,
+        `remove or rename ${absolute}, then run 'specwitness init' again`,
+      );
+    }
     skipped.push(relative);
     return;
   }
@@ -300,7 +328,14 @@ async function ensureFile(
   created: string[],
   skipped: string[],
 ): Promise<void> {
-  if (await pathExists(absolute)) {
+  const existing = await stat(absolute).catch(() => undefined);
+  if (existing !== undefined) {
+    if (existing.isDirectory()) {
+      throw new InfraError(
+        `${relative} exists but is a directory, not a file`,
+        `remove or rename ${absolute}, then run 'specwitness init' again`,
+      );
+    }
     skipped.push(relative);
     return;
   }

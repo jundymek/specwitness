@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import { InfraError } from '../../src/domain/errors.js';
 import { isGitRepository, readHeadBranch, scaffold } from '../../src/infra/scaffold.js';
@@ -276,7 +277,75 @@ describe('scaffold with --force (AC2)', () => {
   });
 });
 
+describe('branch names that are not plain YAML strings', () => {
+  // Git permits these; YAML would read them as a boolean, a null and a number,
+  // so a raw interpolation produces a config that fails validation on the very
+  // first `doctor` run — in a repository whose only sin is its branch name.
+  it.each([['true'], ['false'], ['null'], ['123'], ['1.0'], ['no'], ['y']])(
+    'quotes a branch named %s so it round-trips as a string',
+    async (branch) => {
+      await makeGitDir(`ref: refs/heads/${branch}\n`);
+
+      await scaffold(root);
+
+      const parsed = parse(await readFile(configPath(), 'utf8'), { uniqueKeys: true }) as {
+        project: { baseBranch: unknown };
+      };
+      expect(parsed.project.baseBranch).toBe(branch);
+      expect(typeof parsed.project.baseBranch).toBe('string');
+    },
+  );
+
+  it('handles a branch name containing $ replacement patterns', async () => {
+    // `$&` reinserts the whole match in a string replacement, so a raw
+    // `String.replace` would corrupt the line.
+    await makeGitDir('ref: refs/heads/fix/$&-and-$`\n');
+
+    await scaffold(root);
+
+    const parsed = parse(await readFile(configPath(), 'utf8'), { uniqueKeys: true }) as {
+      project: { baseBranch: unknown };
+    };
+    expect(parsed.project.baseBranch).toBe('fix/$&-and-$`');
+  });
+
+  it('leaves the ordinary case unquoted', async () => {
+    await makeGitDir('ref: refs/heads/main\n');
+
+    await scaffold(root);
+
+    expect(await readFile(configPath(), 'utf8')).toContain('baseBranch: main');
+  });
+});
+
 describe('scaffold failure modes', () => {
+  it.each([['contracts'], ['plans'], ['runs']])(
+    'refuses when %s exists as a file rather than a directory',
+    async (name) => {
+      // Skipping it would exit 0 on a layout later commands cannot write into:
+      // an infra failure disguised as success.
+      await makeGitDir();
+      await mkdir(join(root, '.specwitness'), { recursive: true });
+      await writeFile(join(root, '.specwitness', name), 'not a directory\n', 'utf8');
+
+      const err = await scaffold(root).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(InfraError);
+      expect((err as InfraError).message).toContain(name);
+      expect((err as InfraError).message).toContain('not a directory');
+    },
+  );
+
+  it('refuses when config.yaml exists as a directory', async () => {
+    await makeGitDir();
+    await mkdir(join(root, '.specwitness', 'config.yaml'), { recursive: true });
+
+    const err = await scaffold(root).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(InfraError);
+    expect((err as InfraError).message).toContain('is a directory');
+  });
+
   it('creates no partial layout when the project directory cannot be made', async () => {
     // Half a .specwitness/ is worse than none: the user would have to work out
     // which parts are real before re-running. Whatever fails, nothing that
