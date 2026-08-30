@@ -68,7 +68,7 @@ export interface CreateRunOptions {
  * part that actually gets broken by a refactor.
  */
 export interface RunStoreHooks {
-  readonly onFsync?: (target: 'file' | 'directory') => void;
+  readonly onFsync?: (target: 'file' | 'directory' | 'runs-root') => void;
 }
 
 export class RunStore {
@@ -150,6 +150,15 @@ export class RunStore {
     const manifest = newRunManifest({ runId, createdAt, epic: options.epic });
     await this.#writeDurably(dir, MANIFEST_FILENAME, `${JSON.stringify(manifest, null, 2)}\n`);
 
+    // Persist the run directory's OWN entry, which lives in the parent.
+    // Syncing `dir` above persists manifest.json's entry within it, but not
+    // the fact that `dir` exists — so without this the entire run directory
+    // can vanish after a crash even though createRun resolved, leaving
+    // `clean` nothing to replay. The whole point of this story is that a
+    // kill -9 leaves a readable record; a synced file inside an unsynced
+    // directory entry does not provide one.
+    await this.#syncDirectory(this.runsRoot, 'runs-root');
+
     return { runId, dir };
   }
 
@@ -219,11 +228,25 @@ export class RunStore {
    * has results to render.
    */
   async hasResult(runId: string): Promise<boolean> {
+    const path = join(this.runDir(runId), RESULT_FILENAME);
     try {
-      await stat(join(this.runDir(runId), RESULT_FILENAME));
+      await stat(path);
       return true;
-    } catch {
-      return false;
+    } catch (cause) {
+      const code = (cause as NodeJS.ErrnoException).code;
+      // ONLY "it is not there" means false. An unreadable directory (EACCES),
+      // an I/O error (EIO), or a run directory that is not a directory
+      // (ENOTDIR) are infrastructure failures — swallowing them would make
+      // `report` exit 0 claiming the run has no result, which is precisely
+      // the kind of infra-failure-as-product-answer this project treats as a
+      // first-order defect.
+      if (code === 'ENOENT') {
+        return false;
+      }
+      throw new InfraError(
+        `could not check for a stored result of ${runId}: ${describe(cause)}`,
+        `check that ${path} and its directory are readable`,
+      );
     }
   }
 
@@ -250,15 +273,7 @@ export class RunStore {
         await file.close();
       }
 
-      // Directories are opened read-only to fsync them; this is a no-op on
-      // filesystems that do not need it and harmless where it is unsupported.
-      const handle = await open(dir, 'r');
-      try {
-        await handle.sync();
-        this.#hooks.onFsync?.('directory');
-      } finally {
-        await handle.close();
-      }
+      await this.#syncDirectory(dir, 'directory');
     } catch (cause) {
       // Never report a durability failure as success: the caller is about to
       // create a worktree on the strength of this manifest existing.
@@ -266,6 +281,44 @@ export class RunStore {
         `could not durably write ${path}: ${describe(cause)}`,
         'check free space and permissions on the run directory',
       );
+    }
+  }
+
+  /**
+   * Fsyncs a directory so its entries are durable.
+   *
+   * Directories are opened read-only to sync them. Some filesystems do not
+   * support the operation and report EINVAL; that is not a durability failure
+   * on those platforms, so it is tolerated rather than turned into an error
+   * that would fail a run for no reason. Every other failure propagates.
+   */
+  async #syncDirectory(path: string, label: 'directory' | 'runs-root'): Promise<void> {
+    let handle;
+    try {
+      handle = await open(path, 'r');
+    } catch (cause) {
+      throw new InfraError(
+        `could not open ${path} to make its contents durable: ${describe(cause)}`,
+        'check permissions on the run directory',
+      );
+    }
+
+    try {
+      await handle.sync();
+      this.#hooks.onFsync?.(label);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'EINVAL') {
+        // Filesystem does not implement directory fsync. Nothing to do, and
+        // nothing gained by failing the run over it.
+        this.#hooks.onFsync?.(label);
+        return;
+      }
+      throw new InfraError(
+        `could not make ${path} durable: ${describe(cause)}`,
+        'check free space and permissions on the run directory',
+      );
+    } finally {
+      await handle.close();
     }
   }
 }

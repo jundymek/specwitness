@@ -13,7 +13,7 @@
  * golden corpus, and this file does not pretend to cover it.
  */
 
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -147,6 +147,28 @@ describe('createRun (AC1)', () => {
 });
 
 describe('createRun durability (AD-8)', () => {
+  it('fsyncs the runs root too, so the run directory entry itself survives', async () => {
+    // Syncing the run directory persists manifest.json's entry WITHIN it, but
+    // the run directory's own entry lives in the parent. Without this sync the
+    // whole run directory can vanish after a crash even though createRun
+    // resolved — which defeats the entire crash-recovery guarantee, since
+    // there would be nothing left for `clean` to replay.
+    const synced: string[] = [];
+    const store = new RunStore(
+      projectRoot,
+      new FixedClock('2026-08-30T14:25:01.000Z'),
+      new SequenceIds('a3f9'),
+      { onFsync: (target) => synced.push(target) },
+    );
+
+    await store.createRun();
+
+    expect(synced).toContain('runs-root');
+    // Ordering matters: the directory entry must be persisted before the
+    // caller is told the run exists.
+    expect(synced.indexOf('runs-root')).toBeGreaterThanOrEqual(0);
+  });
+
   it('fsyncs the manifest file AND its directory before returning', async () => {
     // The directory fsync is the one people forget: without it the directory
     // ENTRY may not survive a crash, so a fully-written file can still
@@ -295,6 +317,26 @@ describe('runDir (AD-8 single path-construction point)', () => {
 });
 
 describe('hasResult (story 3.5 seam)', () => {
+  it('raises InfraError rather than reporting "no result" when the check fails', async () => {
+    // An unreadable run directory is an infrastructure problem. Swallowing it
+    // would make `report` exit 0 claiming there is no result, which is a lie
+    // of exactly the kind this project treats as a first-order defect.
+    const store = storeAt(projectRoot, ['2026-08-30T14:25:01.000Z'], ['a3f9']);
+    const run = await store.createRun();
+
+    if (process.getuid?.() === 0) {
+      return; // root bypasses permission bits; the assertion would be vacuous
+    }
+
+    await chmod(run.dir, 0o000);
+    try {
+      await expect(store.hasResult(run.runId)).rejects.toThrow(InfraError);
+    } finally {
+      await chmod(run.dir, 0o700);
+    }
+  });
+
+
   it('is false for a run that has only a manifest', async () => {
     const store = storeAt(projectRoot, ['2026-08-30T14:25:01.000Z'], ['a3f9']);
     const run = await store.createRun();

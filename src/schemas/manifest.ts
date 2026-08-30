@@ -31,14 +31,61 @@ export const RUN_MANIFEST_VERSION = schemaVersionFor('runManifest');
 /** The file name, so no other module spells it. */
 export const MANIFEST_FILENAME = 'manifest.json';
 
+const ISO_UTC_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/;
+
+/**
+ * True only for a timestamp naming a date that actually exists.
+ *
+ * `Date.parse` is NOT sufficient on its own: it accepts
+ * `2026-02-31T14:25:01.123Z` and silently normalises it to 3 March, and
+ * likewise turns 29 February in a common year into 1 March. A hand-edited or
+ * corrupt crash-recovery manifest would then be accepted while meaning a
+ * different instant than it claims. Round-tripping the components back out of
+ * the parsed `Date` is what rejects those — the same technique the run-id
+ * validator uses, for the same reason.
+ */
+function isRealUtcInstant(value: string): boolean {
+  const m = ISO_UTC_PATTERN.exec(value);
+  if (m === null) {
+    return false;
+  }
+  // Defaults are unreachable: the pattern has no optional groups.
+  const [, year = '', month = '', day = '', hour = '', minute = '', second = '', ms = ''] = m;
+
+  const date = new Date(
+    Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+      Number(ms),
+    ),
+  );
+  if (Number.isNaN(date.getTime())) {
+    return false;
+  }
+
+  return (
+    date.getUTCFullYear() === Number(year) &&
+    date.getUTCMonth() === Number(month) - 1 &&
+    date.getUTCDate() === Number(day) &&
+    date.getUTCHours() === Number(hour) &&
+    date.getUTCMinutes() === Number(minute) &&
+    date.getUTCSeconds() === Number(second) &&
+    date.getUTCMilliseconds() === Number(ms)
+  );
+}
+
 /** ISO-8601 UTC, milliseconds, `Z`-terminated — the house timestamp format. */
 const IsoUtcTimestamp = z
   .string()
-  .refine((value) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value), {
+  .refine((value) => ISO_UTC_PATTERN.test(value), {
     message: 'must be an ISO-8601 UTC timestamp ending in Z',
   })
-  .refine((value) => !Number.isNaN(Date.parse(value)), {
-    message: 'must be a real instant',
+  .refine(isRealUtcInstant, {
+    message: 'must name a date that exists',
   });
 
 /**

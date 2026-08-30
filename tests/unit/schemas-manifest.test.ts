@@ -111,6 +111,11 @@ describe('RunManifestSchema', () => {
   it.each([
     ['a malformed runId', { ...VALID, runId: 'nonsense' }],
     ['a non-UTC createdAt', { ...VALID, createdAt: '2026-08-30T14:25:01+05:30' }],
+    // Date.parse ACCEPTS these and silently normalises them (31 Feb -> 3 Mar,
+    // 29 Feb 2026 -> 1 Mar), so a corrupt crash-recovery manifest would be
+    // read back with a different effective date than it claims.
+    ['a calendar-impossible createdAt', { ...VALID, createdAt: '2026-02-31T14:25:01.123Z' }],
+    ['29 February in a common year', { ...VALID, createdAt: '2026-02-29T14:25:01.123Z' }],
     ['a createdAt that is not a timestamp', { ...VALID, createdAt: 'yesterday' }],
     ['a missing runId', { ...VALID, runId: undefined }],
     ['a missing schemaVersion', { ...VALID, schemaVersion: undefined }],
@@ -120,6 +125,12 @@ describe('RunManifestSchema', () => {
     ['a non-boolean reaped', { ...VALID, reaped: 'no' }],
   ])('rejects %s', (_label, candidate) => {
     expect(RunManifestSchema.safeParse(candidate).success).toBe(false);
+  });
+
+  it('accepts 29 February in a leap year', () => {
+    expect(RunManifestSchema.safeParse({ ...VALID, createdAt: '2024-02-29T14:25:01.123Z' }).success).toBe(
+      true,
+    );
   });
 
   it('rejects unknown keys rather than silently dropping them', () => {
