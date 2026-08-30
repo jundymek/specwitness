@@ -8,8 +8,13 @@ name: CI
 # left a red, meaningless check on every PR in the epic — which trains
 # reviewers to ignore CI and would hide a genuine failure when one appears.
 #
-# The pipeline below is unchanged and correct; only its triggers are removed.
-# It can still be started by hand from the Actions tab (workflow_dispatch).
+# Only the triggers were removed; the job below still does the full check and
+# can be started by hand from the Actions tab (workflow_dispatch).
+#
+# HONEST CAVEAT: because minutes are exhausted, no version of this workflow has
+# ever executed a single step. The steps mirror what is run locally before every
+# PR and the bootstrap order has been reviewed, but treat the first real run as
+# unproven and expect to iterate on it.
 #
 # TO RE-ENABLE once minutes are available, restore these three lines above
 # workflow_dispatch:
