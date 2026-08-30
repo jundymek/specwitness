@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+
 import { execa } from 'execa';
 
 /**
@@ -8,7 +10,10 @@ import { execa } from 'execa';
  */
 export async function setup(): Promise<void> {
   await execa('pnpm', ['exec', 'tsup'], {
-    cwd: new URL('../..', import.meta.url).pathname,
+    // fileURLToPath, not `.pathname`: a checkout path containing a space or `#`
+    // comes back percent-encoded from `.pathname` ("/work/my%20repo"), which is
+    // not a real directory, so global setup would fail for the whole suite.
+    cwd: fileURLToPath(new URL('../..', import.meta.url)),
     stdio: 'pipe',
   });
 }
