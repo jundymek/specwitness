@@ -115,34 +115,6 @@ describe('usage errors exit 64 (AC1)', () => {
   });
 });
 
-// Stories 1.6 and 1.5 removed 'report' and 'doctor' from these lists: both are
-// implemented now and covered by tests/integration/report.test.ts and
-// tests/integration/doctor.test.ts. Story 1.4 removes 'init' the same way, and
-// takes the whole block with it — nothing is left to assert once every command
-// is real.
-describe('stub commands exit 3 (AC2)', () => {
-  it.each([['init']])(
-    '%s reports not-implemented on stderr and exits 3',
-    async (command) => {
-      const { exitCode, stdout, stderr } = await runCli([command]);
-
-      expect(exitCode).toBe(3);
-      expect(stderr).toContain(`ERROR: '${command}' is not implemented yet`);
-      expect(stderr).toContain('HINT: it arrives later in Epic 1');
-      expect(stdout).toBe('');
-    },
-  );
-
-  it.each([['init']])(
-    '%s never exits 0, 1 or 2 (fail closed)',
-    async (command) => {
-      const { exitCode } = await runCli([command]);
-
-      expect([0, 1, 2]).not.toContain(exitCode);
-    },
-  );
-});
-
 describe('prompt-free operation', () => {
   it('does not block on stdin when stdin is closed', async () => {
     // No TTY assumptions anywhere: an agent-callable command that waits for

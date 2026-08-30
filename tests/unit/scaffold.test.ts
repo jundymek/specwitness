@@ -1,0 +1,292 @@
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { InfraError } from '../../src/domain/errors.js';
+import { isGitRepository, readHeadBranch, scaffold } from '../../src/infra/scaffold.js';
+
+/**
+ * Every test works in a throwaway directory: the scaffold's whole job is to
+ * write files, so asserting against fixtures in the repo would either be a lie
+ * (mocked fs) or destructive (real fs). Nothing here touches `src/`.
+ */
+let root: string;
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'specwitness-scaffold-'));
+});
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+/** Makes `root` look like a plain (non-worktree) repository. */
+async function makeGitDir(head = 'ref: refs/heads/master\n'): Promise<void> {
+  await mkdir(join(root, '.git'), { recursive: true });
+  await writeFile(join(root, '.git', 'HEAD'), head, 'utf8');
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function configPath(): string {
+  return join(root, '.specwitness', 'config.yaml');
+}
+
+describe('isGitRepository (AC3, filesystem-only)', () => {
+  it('accepts a .git directory', async () => {
+    await makeGitDir();
+    await expect(isGitRepository(root)).resolves.toBe(true);
+  });
+
+  it('accepts a .git FILE — linked worktrees and submodules use one', async () => {
+    // This is not a hypothetical: every agent in this cohort works inside a
+    // linked worktree, so rejecting it would make init unusable here.
+    await writeFile(join(root, '.git'), 'gitdir: /somewhere/.git/worktrees/wt\n', 'utf8');
+    await expect(isGitRepository(root)).resolves.toBe(true);
+  });
+
+  it('rejects a directory with no .git entry at all', async () => {
+    await expect(isGitRepository(root)).resolves.toBe(false);
+  });
+
+  it('does not search upward for a parent repository', async () => {
+    // Refuse-to-guess: init scaffolds where it is pointed, or refuses. An
+    // upward search would silently write into a directory the user did not name.
+    await makeGitDir();
+    const nested = join(root, 'packages', 'app');
+    await mkdir(nested, { recursive: true });
+
+    await expect(isGitRepository(nested)).resolves.toBe(false);
+  });
+});
+
+describe('readHeadBranch (D4 — placeholder comes from the repo, not a guess)', () => {
+  it('reads the branch name out of .git/HEAD', async () => {
+    await makeGitDir('ref: refs/heads/main\n');
+    await expect(readHeadBranch(root)).resolves.toBe('main');
+  });
+
+  it('handles branch names containing slashes', async () => {
+    await makeGitDir('ref: refs/heads/release/2026-q3\n');
+    await expect(readHeadBranch(root)).resolves.toBe('release/2026-q3');
+  });
+
+  it('falls back to master on a detached HEAD', async () => {
+    await makeGitDir('9fceb02d0ae598e95dc970b74767f19372d61af8\n');
+    await expect(readHeadBranch(root)).resolves.toBe('master');
+  });
+
+  it('falls back to master when HEAD is missing or unreadable', async () => {
+    await mkdir(join(root, '.git'), { recursive: true });
+    await expect(readHeadBranch(root)).resolves.toBe('master');
+  });
+
+  it('follows a .git FILE to the real gitdir', async () => {
+    const gitdir = join(root, 'elsewhere');
+    await mkdir(gitdir, { recursive: true });
+    await writeFile(join(gitdir, 'HEAD'), 'ref: refs/heads/develop\n', 'utf8');
+    await writeFile(join(root, '.git'), `gitdir: ${gitdir}\n`, 'utf8');
+
+    await expect(readHeadBranch(root)).resolves.toBe('develop');
+  });
+
+  it('falls back to master when the .git file points nowhere useful', async () => {
+    await writeFile(join(root, '.git'), 'gitdir: /nonexistent/path/.git\n', 'utf8');
+    await expect(readHeadBranch(root)).resolves.toBe('master');
+  });
+});
+
+describe('scaffold on a fresh repository (AC1)', () => {
+  it('creates every path and reports each one as created', async () => {
+    await makeGitDir();
+
+    const result = await scaffold(root);
+
+    // Directory names are contract: Epic 2 commits into contracts/ and plans/,
+    // Epic 3 writes runs/. Renaming one breaks stories that are not written yet.
+    expect(result.created).toEqual([
+      '.specwitness',
+      '.specwitness/config.yaml',
+      '.specwitness/.gitignore',
+      '.specwitness/contracts',
+      '.specwitness/plans',
+      '.specwitness/runs',
+    ]);
+    expect(result.skipped).toEqual([]);
+    expect(result.replaced).toEqual([]);
+    expect(result.configWritten).toBe(true);
+
+    for (const path of result.created) {
+      expect(await exists(join(root, path))).toBe(true);
+    }
+  });
+
+  it('writes the git-ignore entries into .specwitness/.gitignore, not the project root', async () => {
+    // Q11 outcome via the spec's chosen mechanism (D1): runs/ and scorecard
+    // are local-only, and SpecWitness never edits a file the user owns.
+    await makeGitDir();
+    await writeFile(join(root, '.gitignore'), 'node_modules/\n', 'utf8');
+
+    await scaffold(root);
+
+    const nested = await readFile(join(root, '.specwitness', '.gitignore'), 'utf8');
+    expect(nested).toContain('runs/');
+    expect(nested).toContain('scorecard.jsonl');
+
+    // The project's own .gitignore is untouched, byte for byte.
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('node_modules/\n');
+  });
+
+  it('writes the branch read from HEAD into project.baseBranch', async () => {
+    await makeGitDir('ref: refs/heads/main\n');
+
+    await scaffold(root);
+
+    const config = await readFile(configPath(), 'utf8');
+    expect(config).toContain('baseBranch: main');
+    expect(config).not.toContain('baseBranch: master');
+  });
+
+  it('leaves the commented examples commented (D5)', async () => {
+    await makeGitDir();
+
+    await scaffold(root);
+
+    const config = await readFile(configPath(), 'utf8');
+    // Every command-bearing section must stay inert, or a fresh init would
+    // declare commands that do not resolve on the user's machine.
+    for (const key of ['gates:', 'services:', 'observations:', 'data:', 'setup:', 'ai:']) {
+      const active = config
+        .split('\n')
+        .filter((line) => line.startsWith(key))
+        .length;
+      expect(active, `${key} must not be active in the skeleton`).toBe(0);
+    }
+  });
+
+  it('writes only inside .specwitness/', async () => {
+    await makeGitDir();
+    await writeFile(join(root, 'README.md'), 'untouched\n', 'utf8');
+
+    await scaffold(root);
+
+    expect(await readFile(join(root, 'README.md'), 'utf8')).toBe('untouched\n');
+  });
+});
+
+describe('scaffold re-run without --force (AC2)', () => {
+  it('skips everything and reports the config as left alone', async () => {
+    await makeGitDir();
+    await scaffold(root);
+    await writeFile(configPath(), 'version: 1\n# user edits\n', 'utf8');
+
+    const result = await scaffold(root);
+
+    expect(result.created).toEqual([]);
+    expect(result.skipped).toContain('.specwitness/config.yaml');
+    expect(result.configWritten).toBe(false);
+    // The whole point of AC2: an existing config survives byte for byte.
+    expect(await readFile(configPath(), 'utf8')).toBe('version: 1\n# user edits\n');
+  });
+
+  it('completes a partial layout without touching what already exists', async () => {
+    await makeGitDir();
+    await mkdir(join(root, '.specwitness', 'contracts'), { recursive: true });
+    await writeFile(configPath(), 'version: 1\n', 'utf8');
+
+    const result = await scaffold(root);
+
+    expect(result.created).toEqual([
+      '.specwitness/.gitignore',
+      '.specwitness/plans',
+      '.specwitness/runs',
+    ]);
+    expect(result.skipped).toEqual(['.specwitness', '.specwitness/config.yaml', '.specwitness/contracts']);
+    expect(await readFile(configPath(), 'utf8')).toBe('version: 1\n');
+  });
+
+  it('leaves an existing .gitignore alone — the user may have added entries', async () => {
+    await makeGitDir();
+    await scaffold(root);
+    const ignorePath = join(root, '.specwitness', '.gitignore');
+    await writeFile(ignorePath, 'runs/\nscorecard.jsonl\nmy-scratch/\n', 'utf8');
+
+    await scaffold(root);
+
+    expect(await readFile(ignorePath, 'utf8')).toBe('runs/\nscorecard.jsonl\nmy-scratch/\n');
+  });
+});
+
+describe('scaffold with --force (AC2)', () => {
+  it('replaces config.yaml', async () => {
+    await makeGitDir();
+    await scaffold(root);
+    await writeFile(configPath(), 'version: 1\n# stale\n', 'utf8');
+
+    const result = await scaffold(root, { force: true });
+
+    expect(result.configWritten).toBe(true);
+    // Replaced, not created: the user had a file there and now does not.
+    expect(result.replaced).toEqual(['.specwitness/config.yaml']);
+    expect(result.created).toEqual([]);
+
+    const config = await readFile(configPath(), 'utf8');
+    expect(config).not.toContain('# stale');
+    expect(config).toContain('version: 1');
+  });
+
+  it('never touches the contents of contracts/, plans/ or runs/', async () => {
+    // These hold committed product artifacts (Epic 2) and run evidence
+    // (Epic 3+). A scaffolding command has no business deleting either.
+    await makeGitDir();
+    await scaffold(root);
+
+    const sentinels = ['contracts', 'plans', 'runs'].map((dir) =>
+      join(root, '.specwitness', dir, 'sentinel.txt'),
+    );
+    for (const sentinel of sentinels) {
+      await writeFile(sentinel, 'precious\n', 'utf8');
+    }
+
+    await scaffold(root, { force: true });
+
+    for (const sentinel of sentinels) {
+      expect(await readFile(sentinel, 'utf8')).toBe('precious\n');
+    }
+  });
+
+  it('does not rewrite an existing .gitignore — only config.yaml is in scope', async () => {
+    await makeGitDir();
+    await scaffold(root);
+    const ignorePath = join(root, '.specwitness', '.gitignore');
+    await writeFile(ignorePath, 'runs/\nscorecard.jsonl\nmine/\n', 'utf8');
+
+    await scaffold(root, { force: true });
+
+    expect(await readFile(ignorePath, 'utf8')).toBe('runs/\nscorecard.jsonl\nmine/\n');
+  });
+});
+
+describe('scaffold failure modes', () => {
+  it('raises InfraError naming the path when the target is not writable', async () => {
+    await makeGitDir();
+    // A file where the directory must go: the mkdir fails with EEXIST/ENOTDIR,
+    // and the user needs the path, not a raw errno stack.
+    await writeFile(join(root, '.specwitness'), 'not a directory\n', 'utf8');
+
+    const err = await scaffold(root).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(InfraError);
+    expect((err as InfraError).message).toContain('.specwitness');
+    expect((err as InfraError).hint).toBeDefined();
+  });
+});

@@ -1,0 +1,85 @@
+# SpecWitness project configuration.
+#
+# This file is how SpecWitness learns your project. It is also a security
+# boundary: ONLY commands declared in this file are ever executed. Nothing an AI
+# provider produces can introduce a command — if it is not written here, it does
+# not run.
+#
+# Committed to Git:  config.yaml, contracts/, plans/
+# Local-only:        runs/, scorecard.jsonl  (see .specwitness/.gitignore)
+#
+# Uncomment the sections you need. Everything below `project` is optional, so a
+# valid config can stay this short. Run `specwitness doctor` after editing to
+# check that what you declared actually resolves on this machine.
+
+version: 1
+
+project:
+  # The branch an epic is verified against. Never guessed at verification time.
+  # Detected from this repository's HEAD when `specwitness init` ran — change it
+  # if that is not the branch you merge into.
+  baseBranch: master
+
+  # Optional helper for locating an epic's branch; `--head` always wins over it.
+  # epicBranchPattern: "epic/{n}-{slug}"
+
+# Where your planning and implementation artifacts live. The whole block is
+# optional; these are the defaults SpecWitness applies when it is absent.
+# planning:
+#   format: bmad-v6                                  # the only supported format in V0
+#   planningArtifacts: docs/planning-artifacts       # PRD, architecture, epics
+#   implementationArtifacts: docs/implementation-artifacts  # story files
+
+# One-time preparation run inside the isolated worktree before any gate.
+# setup:
+#   install: pnpm install
+
+# Deterministic quality gates, run in the order written. The first failure stops
+# the run — put the cheapest, fastest gate first. Every `id` must be unique.
+# gates:
+#   - { id: lint,      run: pnpm lint }
+#   - { id: typecheck, run: pnpm typecheck }
+#   - { id: unit,      run: pnpm test }
+#   - { id: build,     run: pnpm build }
+
+# Long-running processes started for behavioral verification and stopped
+# afterwards. `ready` is how SpecWitness knows the service has finished booting:
+# give it either a `url` to poll or a `command` to run until it succeeds.
+# `timeoutSec` defaults to 60. Declare `port` so `doctor` can warn you when
+# something else already holds it.
+# services:
+#   backend:
+#     run: python manage.py runserver 8000
+#     port: 8000
+#     ready: { url: "http://localhost:8000/health", timeoutSec: 60 }
+#     env: { DJANGO_SETTINGS_MODULE: config.settings.test }
+#   frontend:
+#     run: pnpm dev
+#     port: 3000
+#     ready: { url: "http://localhost:3000" }
+
+# Commands that put test data into a known state before verification.
+# data:
+#   reset: ./scripts/reset-test-db.sh
+
+# Commands that measure something about the running system. Each must print a
+# single JSON object to stdout; SpecWitness compares before/after values rather
+# than trusting a narrative claim that something changed.
+# observations:
+#   company-count: { run: ./scripts/specwitness/company-count.sh }
+
+# Local AI CLIs used to AUTHOR verification artifacts. Verdicts are always
+# computed mechanically — no model is ever asked whether your epic passes.
+# SpecWitness shells out to CLIs you already have installed and never talks to
+# a model API directly.
+# ai:
+#   providers:
+#     claude: { adapter: claude-code-cli, mode: subscription }
+#     codex:  { adapter: codex-cli,       mode: chatgpt }
+#   roles:
+#     # Each role names one of the providers declared above. Assigning the
+#     # authoring roles to a different model family than your coding agents is
+#     # the point: an independent reader catches what the author missed.
+#     contract-author: codex
+#     plan-author: codex
+#     explainer: claude
