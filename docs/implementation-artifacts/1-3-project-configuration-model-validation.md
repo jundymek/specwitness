@@ -1,0 +1,122 @@
+# Story 1.3: Project configuration model & validation
+
+Status: ready-for-dev
+
+## Story
+
+As a developer on any stack,
+I want to declare setup, gates, services, data, observations, and AI roles in `.specwitness/config.yaml` and get actionable validation errors,
+so that SpecWitness learns my project only through trusted configuration (AD-3).
+
+## Goal & Context
+
+Project Config is the product's **security boundary**: it is the ONLY source of strings that ever reach a shell (AD-3, NFR-2). This story builds the typed config model, zod validation with actionable YAML-path errors, and — critically — the API shape that makes arbitrary-string execution impossible by construction. It also encodes stack independence (FR-4): everything project-specific (install command, gates, service start commands, observation commands, provider roles) enters only through this file, so SpecWitness never hardcodes a framework, package manager, or database.
+
+Wave B story: runs in parallel with 1.2 (`src/domain` + `src/schemas`) on top of merged 1.1. **You own `src/config` exclusively; do not touch `src/domain`, `src/schemas`, or `src/cli/exit.ts`** (1.2 owns those this wave). The AD-7 error classes you need (`ConfigError`) already exist from story 1.1.
+
+## Acceptance Criteria
+
+From `docs/planning-artifacts/epics.md` (authoritative — expand, never weaken):
+
+1. **Given** a valid config file
+   **When** it loads
+   **Then** a typed, zod-validated config object is produced carrying declared gates (ordered), services (command + readiness), observation commands by id, and provider role assignments.
+2. **Given** an invalid config (unknown key, missing field, wrong type)
+   **When** any command loads it
+   **Then** the command exits 3 with `ERROR:` naming the YAML path and reason plus a `HINT:`, before executing anything.
+3. **Given** config values that are command strings
+   **When** any component wants to execute a command
+   **Then** the only API available requires a config-declared entry (no arbitrary string execution path exists in the codebase).
+
+Clarifications (detail only, no weakening):
+
+- AC1: gate order = declaration order in the YAML sequence and must be preserved in the typed object.
+- AC2: within this story, "exits 3" is delivered by throwing `ConfigError` (which 1.1's exit table maps to 3); the first real CLI consumer is `doctor` (story 1.5, next wave). Your tests assert the thrown `ConfigError` carries: the YAML path (e.g. `services.backend.ready.timeoutSec`), the reason (zod issue message), and a `hint`. Multiple issues: report at least the first with a count of the rest (all issues in the message is better).
+- AC3: implement via a branded type — e.g. `DeclaredCommand` (branded string) constructible ONLY inside `src/config` (constructor not exported). Config accessors return `DeclaredCommand`s (`config.setup.install`, `config.gates[n].run`, `getObservation(config, id)`); Epic 3's ProcessRunner will accept only `DeclaredCommand`, so no call site can ever pass a raw/LLM-produced string to a shell. Document this contract prominently in the module.
+
+## Tasks / Subtasks
+
+- [ ] Task 1 (TDD): zod schema (AC: 1, 2)
+  - [ ] `src/config/schema.ts`: zod 4 schema, `.strict()` at every object level (unknown key ⇒ error naming the key's path), config `version: 1` literal required
+  - [ ] Shape (from addendum §D sketch + Q26, camelCase keys): `project{baseBranch: string, epicBranchPattern?: string}`, `planning{format: 'bmad-v6', planningArtifacts: string, implementationArtifacts?: string}` (defaults: `docs/planning-artifacts`), `setup{install?: string}`, `gates: [{id, run}]` (ids unique, order significant), `services: {<name>: {run, port?: number, ready: {url: string, timeoutSec?: number} | {command: string, timeoutSec?: number}, env?: Record<string,string>}}`, `data{reset?: string, ...}` (string commands by key), `observations: {<id>: {run}}`, `ai{providers?: {<name>: {adapter: 'claude-code-cli'|'codex-cli', mode: string}}, roles?: {contract-author?, plan-author?, explainer?}}` — role values must reference a declared provider name (cross-field refinement)
+  - [ ] Everything beyond `version` is optional-with-safe-defaults where the sketch allows (a minimal valid config is small); required fields fail with actionable messages
+- [ ] Task 2 (TDD): load + validate (AC: 2)
+  - [ ] `src/config/load.ts`: `loadConfig(projectRoot: string): SpecwitnessConfig` — reads `.specwitness/config.yaml` via `yaml` 2.9 parse, validates, maps every failure (missing file, unreadable, YAML syntax error, schema violation) to `ConfigError` with path + reason + hint (`HINT: run 'specwitness init' to scaffold config` for missing file; YAML syntax errors include line/col from the yaml lib)
+  - [ ] Zod issues → dotted YAML path in the message (zod's issue `path` array joined)
+- [ ] Task 3 (TDD): trusted-command API (AC: 1, 3)
+  - [ ] `src/config/types.ts` (or in schema.ts via z.infer): exported `SpecwitnessConfig` type; `DeclaredCommand` branded type with module-private constructor; validation is the only place raw strings become `DeclaredCommand`
+  - [ ] Accessors: ordered `gates` list, `services` map, `getObservationCommand(config, id)` (undefined/error for unknown id — never a fallback), role→provider resolution helper
+  - [ ] Test proving the boundary: a compile-time test (expect-error type test) that a plain string is not assignable to `DeclaredCommand`, plus runtime test that unknown observation ids are rejected
+- [ ] Task 4: fixtures + docs
+  - [ ] Test fixtures: minimal valid config, full config (addendum-§D-like), and invalid variants (unknown key, missing required field, wrong type, bad role reference, duplicate gate id)
+  - [ ] Module-level doc comment stating the AD-3 contract for later stories (ProcessRunner accepts only `DeclaredCommand`)
+
+## Dev Notes
+
+### Exact scope
+
+- `src/config/`: `schema.ts`, `load.ts`, `types.ts` + unit tests + fixtures under `tests/` (or `src/config/__fixtures__`). Nothing else.
+
+### Out of scope (do NOT build)
+
+- Executing anything (ProcessRunner is Epic 3 story 3.2). This story only models and validates.
+- The `init` config template (story 1.4 — but coordinate shape: the template must validate against your schema; 1.4 runs next wave and will test against your merged schema).
+- Doctor checks (1.5), domain/schemas files (1.2 — same wave, zero file overlap), provider adapters (Epic 2).
+- Config file migration/versioning machinery — `version: 1` literal is enough for V0.
+
+### Dependencies & upstream contracts
+
+- Requires story 1.1 merged (`ConfigError` in `src/domain/errors.ts`, exit table, test rig).
+- Binding: AD-3 (trusted-command boundary — normative rule text), FR-2, FR-4, NFR-2, addendum §D (config sketch — starting point, roadmap: "config key shapes (addendum §D as starting point)"), questions doc Q13–Q16 (YAML camelCase zod-validated with version; commands only from config; env handling), Q26 (explicit config-declared ports), Consistency Conventions (config loaded once, validated, passed down; no global mutable state).
+
+### Architecture compliance
+
+- AD-1: `src/config` is an adapter layer — it may import `src/domain` (errors) and `src/schemas`, plus `fs`/`path`/`yaml` (it is NOT domain). It must not import `cli`, `infra`, `pipeline`, etc.
+- Config is loaded once by the CLI edge and passed down — export a loader, not a singleton/global cache.
+- No env-var reads here (env is read only in `cli/` and `infra/` per conventions).
+
+### Testing requirements
+
+- Unit tests: valid configs parse to expected typed objects (incl. gate ordering, defaults); each invalid fixture produces `ConfigError` with the exact offending path in the message; role-reference refinement; type-level `DeclaredCommand` test.
+- No integration tests needed (pure file-read + parse; use tmp dirs or fixture paths).
+
+### Integration expectations
+
+- 1.5 (`doctor`) calls `loadConfig` and renders your `ConfigError` as a failing check; 1.4 (`init`) writes a skeleton that MUST validate against this schema — keep the minimal-valid-config surface small and document it.
+- Epic 2 extends `ai` (provider modes/checks) and Epic 3/4 consume gates/services/data/observations — additive evolution only; renaming keys after merge breaks parallel stories.
+
+### Failure modes to consider
+
+- zod default/optional interactions silently filling values the user didn't write — be deliberate about which defaults exist (document them).
+- Non-strict nested objects letting typos through (e.g. `readyness:`) — `.strict()` everywhere.
+- YAML anchors/merge keys and duplicate keys — the `yaml` package's defaults are acceptable; ensure duplicate mapping keys error rather than last-wins (set `uniqueKeys` strict option).
+- Empty file / null document → treat as invalid with a clear hint, not a crash.
+
+### Security
+
+- This story IS the security boundary (NFR-2). No code path may execute anything. The `DeclaredCommand` brand must be impossible to forge outside `src/config` (no exported constructor, no type assertion helpers).
+- Blanket NFR-1 applies (never read credential stores).
+
+### Project Structure Notes
+
+- Structural seed: `config/ # project config load + validation`. Kebab-case files.
+- Story branch `story/1-3-project-configuration-model-validation`; Conventional Commits (e.g. `feat(config): add zod-validated project config model`).
+
+### References
+
+- [Source: docs/planning-artifacts/epics.md#Story 1.3] — acceptance criteria (verbatim above)
+- [Source: docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md#AD-3] — trusted-command boundary (normative)
+- [Source: docs/planning-artifacts/prds/prd-specwitness-2026-08-30/addendum.md#D] — config sketch (starting shape)
+- [Source: docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/architecture-questions.md#Q13-Q17] and [#Q26-Q27] — config/execution/ports decisions
+- [Source: docs/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md#FR-2] and [#FR-4]
+- [Source: docs/planning-artifacts/roadmap.md#EPIC 1] — wave B ownership
+
+## Dev Agent Record
+
+### Agent Model Used
+
+### Debug Log References
+
+### Completion Notes List
+
+### File List

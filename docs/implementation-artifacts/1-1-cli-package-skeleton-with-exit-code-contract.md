@@ -1,0 +1,134 @@
+# Story 1.1: CLI package skeleton with exit-code contract
+
+Status: ready-for-dev
+
+## Story
+
+As a developer,
+I want an installable `specwitness` CLI with command routing, house-style errors, and the single exit-code table,
+so that every later feature ships inside a consistent, scriptable binary.
+
+## Goal & Context
+
+Bootstrap story for the whole product: it creates the npm package, build/test/CI toolchain, the commander-based CLI edge, the single exit-code table (`src/cli/exit.ts`), the AD-7 error-class seed, and the architecture guardrail (dependency-cruiser). Every other story in every epic merges into the structure this story establishes, so **structure and contracts matter more than feature count here**. This story runs ALONE (wave A of Epic 1); waves B (1.2, 1.3) and C (1.4, 1.5, 1.6) build on its merged result. Your PR must leave the repository fully coherent: installable, buildable, tested, CI-green (founder brief §64).
+
+SpecWitness itself is an independent verification gate for agentic development — a local-first CLI (`specwitness`) that later gains `init`, `doctor`, `contract`, `plan`, `verify`, `report`, `clean`, `scorecard` commands. This story ships the skeleton those commands plug into.
+
+## Acceptance Criteria
+
+From `docs/planning-artifacts/epics.md` (authoritative — expand, never weaken):
+
+1. **Given** the package is built and linked
+   **When** I run `specwitness --help` or an unknown command/flag
+   **Then** help renders, and the unknown invocation prints `ERROR: <what>` plus `HINT: <how to fix>` on stderr and exits 64
+   **And** no code path outside `cli/exit.ts` defines a process exit code (verified by test).
+2. **Given** any command throws an unclassified exception
+   **When** the CLI terminates
+   **Then** it exits 3 (infrastructure), never 0/1/2 (fail closed per AD-7).
+3. **Given** the repo's CI
+   **When** the build runs
+   **Then** tsup produces an executable `bin` entry, vitest runs green, and the `engines` field enforces Node >=22.12 (Node 20 is EOL and commander 15/execa 10/dependency-cruiser 18 all require >=22.12 — spine review finding).
+4. **Given** the pinned dependency majors (commander 15, execa 10, zod 4)
+   **When** this story's dev notes are written
+   **Then** a short breaking-change review against the previous majors (commander 14→15, execa 9→10) is recorded, per the spine version-reality review.
+
+Clarifications (detail only, no weakening):
+
+- AC1 "no code path outside `cli/exit.ts` defines a process exit code": implement as a test that greps/scans `src/**` for `process.exit(` and `process.exitCode` and asserts the only occurrences are in `src/cli/exit.ts` (and, if needed, the bin entry delegating to it). Commander's own exit behavior must be intercepted with `program.exitOverride()` and routed through the table.
+- AC1 exit 64 covers: unknown command, unknown flag, missing required argument — every commander parse error.
+- AC2: the top-level handler classifies errors via the AD-7 hierarchy; anything not an instance of a known class maps to exit 3. `--help`/`--version` exit 0.
+- AC3: CI must also run the dependency-cruiser AD-1 check (see epics.md 1.2/1.6 note: "dependency-cruiser enforcement is part of story 1.1/1.6 CI") and a packed-tarball smoke test (`npm pack` → run `specwitness --help` from the tarball install).
+
+## Tasks / Subtasks
+
+- [ ] Task 1: Package scaffold (AC: 3)
+  - [ ] `package.json`: name `specwitness`, `type: module`, `bin: {"specwitness": "dist/cli.js"}`, `engines: {"node": ">=22.12"}`, `packageManager: pnpm@11.x`, `files` limited to `dist/` and `templates/` (templates dir may be empty placeholder; story 1.4 fills it)
+  - [ ] Pin deps per spine Stack table: commander 15.x, zod 4.5.x, execa 10.x, yaml 2.9.x; dev: typescript 6.0.x, tsup 8.5.x, vitest 4.1.x, dependency-cruiser 18.x
+  - [ ] `tsconfig.json` (strict, NodeNext/ESM), `tsup.config.ts` (entry `src/cli/main.ts` → `dist/cli.js`, shebang, node22 target)
+- [ ] Task 2 (TDD): exit-code table + error seed (AC: 1, 2)
+  - [ ] Tests first: exit table maps PASS→0, FAIL→1, NEEDS_HUMAN→2, each AD-7 error class→3 (UsageError→64), unclassified Error→3
+  - [ ] `src/domain/errors.ts`: the six AD-7 classes exactly — `UsageError`, `ConfigError`, `IngestError`, `IntegrityError`, `ProviderError`, `InfraError` — each carrying `message` and optional `hint`. Pure TS, zero imports with side effects. (Seeded here because 1.1's fail-closed handler needs them; story 1.2 builds the rest of `src/domain` on top and must NOT redefine these.)
+  - [ ] `src/cli/exit.ts`: the ONLY module defining exit codes — constants `{PASS: 0, FAIL: 1, NEEDS_HUMAN: 2, INFRA: 3, USAGE: 64}` (ADR-002) plus `exitCodeForError(err: unknown): number` (UsageError→64, other AD-7 classes→3, unknown→3). Story 1.2 later adds the run-outcome mapping to this same table.
+- [ ] Task 3 (TDD): CLI edge (AC: 1, 2)
+  - [ ] `src/cli/print-error.ts`: house-style printer — `ERROR: <what>` and `HINT: <how to fix>` lines on **stderr** only
+  - [ ] `src/cli/main.ts`: commander program, `.exitOverride()`, global try/catch routing every failure through `print-error` + `exit.ts`; `--version` from package.json; help text working
+  - [ ] Stub command modules `src/cli/commands/init.ts`, `doctor.ts`, `report.ts`: each exports a `register(program)` that adds the command; stub action prints `ERROR: '<cmd>' is not implemented yet` + `HINT: it arrives later in Epic 1` on stderr and exits 3. Wave-C stories (1.4/1.5/1.6) each replace ONLY their own file — this is the file-ownership seam that keeps wave C parallel-safe.
+  - [ ] Integration tests spawning the built CLI: `--help` → 0; unknown command → stderr ERROR+HINT, exit 64; unknown flag → 64; stub command → 3
+- [ ] Task 4: guardrails in CI (AC: 3)
+  - [ ] `.dependency-cruiser.cjs`: AD-1 rules — forbid `src/domain/**` and `src/schemas/**` from importing any other `src/**` layer or side-effectful Node built-ins (`child_process`, `fs`, `net`, `http`, `os`, `process` via import); forbid any layer importing `src/cli/**`; adapters (`config|infra|providers|surfaces`) may import only `domain`/`schemas`
+  - [ ] Test asserting `process.exit` appears only in `src/cli/exit.ts` (AC1 mechanical check)
+  - [ ] GitHub Actions workflow: pnpm install → build → vitest → depcruise → pack-tarball smoke (`specwitness --help` exits 0 from packed install), on macOS + Linux
+- [ ] Task 5: breaking-change review note (AC: 4)
+  - [ ] Record in this file's Dev Agent Record → Completion Notes: commander 14→15 breaking changes (verify against the shipped major's changelog: Node floor >=22.12; check error/exitCode handling and any `Option`/parsing API changes actually used) and execa 9→10 (Node floor; verify process-group/`detached`/`cleanup` option semantics — Epic 3 story 3.2 depends on them; note anything affecting how we plan to spawn). Zod 4 is adopted fresh (no 3→4 migration burden, but note that zod 4 API is what all schemas must target).
+
+## Dev Notes
+
+### Exact scope
+
+- npm package skeleton, build (tsup), test (vitest), CI, dependency-cruiser guardrail.
+- `src/cli/`: `main.ts`, `exit.ts`, `print-error.ts`, `commands/{init,doctor,report}.ts` stubs.
+- `src/domain/errors.ts` seed (six AD-7 classes only — nothing else in domain).
+
+### Out of scope (do NOT build)
+
+- Any real command behavior (init/doctor/report bodies — stories 1.4/1.5/1.6).
+- Result taxonomy, verdict aggregation, run-outcome types (story 1.2).
+- Config loading (1.3), run storage (1.6), any provider/pipeline/surface code (Epics 2+).
+- Epic-id normalization (`domain/ids.ts` — story 1.2). No `contract`/`plan`/`verify`/`clean`/`scorecard` stubs — later epics register their own commands.
+- No eslint/prettier setup unless trivially needed — the pinned stack doesn't include them; dependency-cruiser is the mandated guardrail.
+
+### Dependencies & upstream contracts
+
+- No story dependencies (greenfield, wave A). Binding contracts: ADR-002 (exit codes 0/1/2/3/64, single table), AD-1 (dependency direction), AD-6/AD-7 (error hierarchy semantics; gate failure is NOT an error class — do not add one), spine Stack table (exact versions), spine Consistency Conventions (kebab-case files, `ERROR:`/`HINT:` stderr house style, no TTY assumptions), FR-27 partial.
+- Node >=22.12 floor is a reviewed decision — do not lower it.
+
+### Architecture compliance
+
+- AD-1: `src/domain/errors.ts` imports nothing side-effectful. The depcruise rules you write here are the enforcement all later stories inherit — get the layer map right (see spine "Design Paradigm" layer list).
+- AD-7 fail-closed: unclassified exception → exit 3, never 0/1/2. The global handler is the only place that catches broadly.
+- Conventions: all commands prompt-free (no TTY reads anywhere in this story); stdout reserved for command output, human diagnostics on stderr.
+
+### Testing requirements
+
+- Unit: exit table mapping (every class, unknown error, constants match ADR-002 exactly).
+- Integration: spawn the **built** binary (via execa) for help/unknown/stub paths asserting exit codes and stderr shape. No TTY. Keep tests hermetic (no network).
+- The `process.exit`-location scan test.
+
+### Integration expectations
+
+- Stories 1.2–1.6 import `src/domain/errors.ts` and `src/cli/exit.ts` as-is; changing their public shape after this story requires cross-story coordination — design the signatures deliberately (errors carry optional `hint`; `exitCodeForError` accepts `unknown`).
+- Epic exit criteria this story serves: `npx specwitness --help` works from a packed tarball; exit codes 3/64 demonstrated.
+
+### Failure modes to consider
+
+- Commander swallowing errors or calling `process.exit` itself (must use `exitOverride` + route through the table).
+- ESM/bin pitfalls: shebang preserved by tsup, `dist/cli.js` executable bit, package `files` excluding `src`/tests from the tarball.
+- Double-printing errors (commander writes its own message AND ours) — suppress commander's default output (`configureOutput`) so stderr carries exactly one `ERROR:`/`HINT:` pair.
+
+### Security
+
+- NFR-1 (blanket rule for the whole codebase, starts now): no code path may ever read `~/.claude/`, `~/.codex/`, or any credential store. Nothing in this story should touch the filesystem outside the repo/build dirs at runtime.
+
+### Project Structure Notes
+
+- Follow the spine Structural Seed exactly (`src/cli/`, `src/domain/`, …). Files kebab-case, types PascalCase.
+- Repo default branch is `master`; story branch `story/1-1-cli-package-skeleton-with-exit-code-contract`; Conventional Commits required (e.g. `feat(cli): add exit-code table`).
+
+### References
+
+- [Source: docs/planning-artifacts/epics.md#Story 1.1] — acceptance criteria (verbatim above)
+- [Source: docs/planning-artifacts/roadmap.md#EPIC 1] — wave order, module ownership, exit criteria
+- [Source: docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md] — AD-1, AD-6, AD-7, Consistency Conventions, Stack table, Structural Seed
+- [Source: docs/adr/ADR-002-exit-codes.md] — exit-code decision + rationale
+- [Source: docs/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md#FR-27] — exit-code product requirement
+- [Source: docs/planning-artifacts/prds/prd-specwitness-2026-08-30/addendum.md#C] — CLI surface sketch (indicative)
+
+## Dev Agent Record
+
+### Agent Model Used
+
+### Debug Log References
+
+### Completion Notes List
+
+### File List

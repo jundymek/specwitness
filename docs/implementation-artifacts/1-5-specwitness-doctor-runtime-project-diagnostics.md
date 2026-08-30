@@ -1,0 +1,129 @@
+# Story 1.5: `specwitness doctor` — runtime & project diagnostics
+
+Status: ready-for-dev
+
+## Story
+
+As a developer,
+I want `doctor` to check my runtime and project configuration,
+so that I trust failures are diagnosed before they masquerade as verification errors (FR-3).
+
+## Goal & Context
+
+Doctor is the trust-building diagnostic (UJ-4): it separates "your environment isn't ready" from "your product failed verification" BEFORE any verify run exists. This story ships the runtime + project half of FR-3 (Node, Git, Playwright capability, config validity, base branch, command resolvability) built on an extensible **check registry** — the seam Epic 2 story 2.7 uses to plug in provider checks (binary/version/auth/billing-risk) without modifying anything you write. Output is agent-consumable: per-check pass/warn/fail, `--json` with a stable shape, prompt-free.
+
+Wave C story: runs in parallel with 1.4 (init) and 1.6 (run storage). **You own `src/cli/commands/doctor.ts` (replacing the 1.1 stub) and the new `src/cli/doctor/` module; do not touch `init.ts`, `report.ts`, `src/infra/run-store*`, `templates/`, or anything 1.4/1.6 own this wave.**
+
+## Acceptance Criteria
+
+From `docs/planning-artifacts/epics.md` (authoritative — expand, never weaken):
+
+1. **Given** a project with config
+   **When** I run `specwitness doctor`
+   **Then** it reports pass/warn/fail per check: Node version, Git present, Playwright capability, config validity, base branch exists, declared gate/service/observation commands resolvable — and exits non-zero iff a required check fails.
+2. **Given** `--json`
+   **When** doctor runs
+   **Then** a stable JSON checks array (id, status, detail) is emitted with an ISO-8601 UTC timestamp.
+3. **Given** doctor's check registry
+   **When** Epic 2 adds provider checks
+   **Then** they plug into the same registry without modifying existing checks (extension seam demonstrated by test).
+
+Clarifications (detail only, no weakening):
+
+- AC1 required vs optional: required (fail ⇒ non-zero exit) = node-version (>=22.12), git-present, config-valid (when `.specwitness/config.yaml` exists — a missing config file is itself a required failure with `HINT: run specwitness init`), base-branch-exists, commands-resolvable. Optional (⇒ warn, exit stays 0) = playwright-capability (only browser probes need it — Epic 5), ports-free (added per Q27: declared service ports currently bindable; warn naming port + likely PID hint).
+- AC1 exit code: required-check failure ⇒ exit **3** (environment/config = infra class per ADR-002; never 1 — that's a product FAIL, and never 2). All checks still run and are all reported (no early stop on a failed check).
+- AC1 "commands resolvable": resolve the FIRST token of each declared gate/service/observation/setup/data command — on PATH (`which` semantics implemented via PATH scan, not a shell) or as an existing file relative to project root. **Never execute the commands** — resolution only (AD-3: execution paths arrive in Epic 3).
+- AC1 "base branch exists": `git rev-parse --verify --quiet <baseBranch>` (accept local or `origin/<baseBranch>`) via execa — git is trusted tooling, not a project-config command, so invoking it is allowed.
+- AC2 stable JSON: `{schemaVersion: 1, timestamp: <ISO-8601 UTC>, status: 'pass'|'warn'|'fail', checks: [{id, status: 'pass'|'warn'|'fail', required, detail}]}` on **stdout** with nothing else on stdout; human rendering goes to stderr in `--json` mode. Check order deterministic (registration order). Snapshot-test the shape.
+- AC3 seam: registry accepts `DoctorCheck` objects `{id, required, run(ctx): Promise<CheckResult>}` where `ctx` carries project root + loaded-config-or-error; test registers a fake extra check and asserts it runs and reports without any existing file changing.
+
+## Tasks / Subtasks
+
+- [ ] Task 1 (TDD): registry + check contract (AC: 3)
+  - [ ] `src/cli/doctor/registry.ts`: `DoctorCheck`/`CheckResult` types, ordered registration, `runAll(ctx)` → results (checks isolated: one check throwing ⇒ that check reports `fail` with the error detail, others still run)
+  - [ ] `src/cli/doctor/context.ts`: build ctx — project root (CWD), attempt `loadConfig` (1.3) capturing `ConfigError` instead of throwing (config-valid check consumes it; downstream checks needing config skip gracefully with `warn`/`fail` detail "config invalid")
+  - [ ] Extension-seam test (fake check)
+- [ ] Task 2 (TDD): built-in checks (AC: 1)
+  - [ ] `src/cli/doctor/checks/node-version.ts` — `process.version` >= 22.12, required
+  - [ ] `checks/git-present.ts` — `git --version` succeeds, required
+  - [ ] `checks/config-valid.ts` — required; detail = the `ConfigError` message (YAML path + reason) on failure
+  - [ ] `checks/base-branch.ts` — required; skips-to-fail with clear detail when config invalid/missing
+  - [ ] `checks/commands-resolvable.ts` — required; lists every unresolvable command id + token in detail
+  - [ ] `checks/playwright-capability.ts` — optional/warn; detect project-local `@playwright/test` (node_modules resolution from project root) else warn `HINT:`-style detail that browser probes (Epic 5) will need provisioning; do not download anything
+  - [ ] `checks/ports-free.ts` — optional/warn; for each declared service `port`, attempt a localhost bind+release
+- [ ] Task 3 (TDD): command + renderers (AC: 1, 2)
+  - [ ] Replace stub `src/cli/commands/doctor.ts`: run registry, render human report (one line per check: ✓/⚠/✗, id, detail) to stdout in normal mode, summary line, then exit via the 1.1/1.2 table: all-required-pass ⇒ 0, any required fail ⇒ throw `InfraError`-mapped path or return code 3 through `cli/exit.ts` (never a literal `process.exit` here)
+  - [ ] `--json` mode per AC2 (stdout = JSON only) + snapshot test
+- [ ] Task 4: integration tests
+  - [ ] Spawn built CLI against fixture projects in tmp dirs: healthy config (exit 0), broken config (exit 3, config-valid fail names YAML path), missing base branch (exit 3), unresolvable gate command (exit 3), no config file (exit 3 with init hint), `--json` parseable with `JSON.parse` and ISO-8601 UTC timestamp
+
+## Dev Notes
+
+### Exact scope
+
+- `src/cli/commands/doctor.ts` (stub replacement), `src/cli/doctor/` (registry, context, checks), tests + fixtures.
+
+### Out of scope (do NOT build)
+
+- Provider checks: claude/codex binary discovery, version/capability probe, auth readiness, billing-risk env-var warnings — ALL Epic 2 (story 2.7) via your registry seam. Do not pre-build placeholders for them.
+- Executing any config-declared command (resolution only). Playwright provisioning/downloads (Epic 5 story 5.1). Fixing anything (doctor diagnoses only). `--verbose` logging infrastructure (later).
+
+### Dependencies & upstream contracts
+
+- Requires merged: 1.1 (CLI skeleton, stub, exit table, `InfraError`), 1.2 (nothing direct beyond exit-table completion), 1.3 (`loadConfig`, `ConfigError`, config shape incl. service `port`).
+- Binding: FR-3 (+ consequences: doctor never reads `~/.claude`/`~/.codex`; non-zero iff required check fails; pass/warn/fail per check), NFR-1, Q27 (port pre-check), NFR-8/Conventions (prompt-free, bounded output, ISO-8601 UTC), ADR-002 (exit 3 class).
+
+### Architecture compliance
+
+- AD-1: `src/cli/doctor/**` is edge code — may import `config/`, use `execa`/`net`/`fs`. Keep checks small and single-purpose; the registry is the only orchestrator.
+- Exit codes only via `cli/exit.ts` (1.1's scan test will catch violations).
+- Env vars: this story needs no env reads beyond PATH (allowed in `cli/`).
+
+### Testing requirements
+
+- Unit: registry semantics (ordering, isolation, extension), each check against fake ctx (inject fakes for fs/exec where practical — checks should take their effects via ctx or small injectable fns so unit tests don't need real git).
+- Integration: real spawns per Task 4 (macOS + Linux CI). Snapshot: `--json` shape (schemaVersion 1 — future changes must be additive per NFR-7 discipline).
+
+### Integration expectations
+
+- Story 2.7 registers provider checks into your registry and doctor gains billing warnings — your `DoctorCheck`/`CheckResult`/ctx types become public contract at merge; design them for that consumer (ctx must be extensible without breaking existing checks — e.g. a single ctx object, not positional args).
+- Epic exit criteria served: "Doctor reports runtime + config checks with `--json`; config validation errors name YAML paths."
+- UJ-4 edge case (no agent CLI installed → generation unavailable but execution works) lands with 2.7 — your required/optional split must not make a missing provider fatal.
+
+### Failure modes to consider
+
+- Config invalid ⇒ dependent checks (base-branch, commands-resolvable, ports-free) must degrade with informative detail, not throw or silently pass.
+- git installed but CWD not a repo ⇒ base-branch check fails with detail (distinct from git-absent).
+- PATH resolution on macOS vs Linux CI images; commands declared as relative paths (`./scripts/x.sh`) resolve against project root.
+- Port check race (bind/release) — treat any bind failure as "occupied" warn; never leave the socket open.
+- A check hanging (e.g. git on a weird repo) — put a timeout on subprocess checks; timeout ⇒ fail with detail.
+
+### Security
+
+- NFR-1 is a TESTED property here: doctor must never read `~/.claude/`, `~/.codex/`, or any credential store — auth probing (Epic 2) will use only official CLI public behavior. Nothing in this story touches the home directory at all.
+- Never execute declared project commands (AD-3 — resolution only).
+
+### Project Structure Notes
+
+- New `src/cli/doctor/` module (edge layer — allowed; spine's seed lists top-level layers, cli-internal structure is free). Kebab-case files.
+- Story branch `story/1-5-specwitness-doctor-runtime-project-diagnostics`; Conventional Commits (e.g. `feat(cli): implement doctor runtime and project checks`).
+
+### References
+
+- [Source: docs/planning-artifacts/epics.md#Story 1.5] — acceptance criteria (verbatim above)
+- [Source: docs/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md#FR-3] — doctor requirement + credential/billing consequences
+- [Source: docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/architecture-questions.md#Q26-Q27] — ports explicit; doctor pre-checks ports free
+- [Source: docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md#Consistency Conventions] — non-interactive first, ports row, error style
+- [Source: docs/adr/ADR-002-exit-codes.md] — exit 3 = environment/SpecWitness class
+- [Source: docs/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md#UJ-4] — doctor user journey
+- [Source: docs/planning-artifacts/roadmap.md#EPIC 1] — wave C ownership; Epic 2 dependency on "doctor registry"
+
+## Dev Agent Record
+
+### Agent Model Used
+
+### Debug Log References
+
+### Completion Notes List
+
+### File List

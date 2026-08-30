@@ -1,0 +1,117 @@
+# Story 1.4: `specwitness init`
+
+Status: ready-for-dev
+
+## Story
+
+As a developer adopting SpecWitness,
+I want `specwitness init` to scaffold `.specwitness/` with a commented config skeleton,
+so that onboarding is one command in any Git repository (FR-1).
+
+## Goal & Context
+
+First real command: one-command onboarding in ANY repository — explicitly including non-Node stacks (FR-4; the target repo needs no package.json). Init scaffolds `.specwitness/` (config skeleton + `contracts/`, `plans/`, `runs/` directories), writes the git-ignore entries for local-only data (questions doc Q11), never destroys existing configuration, and refuses politely outside a Git repository. It realizes the first half of UJ-4 (install → init → doctor).
+
+Wave C story: runs in parallel with 1.5 (doctor) and 1.6 (run storage) on top of merged waves A+B. **You own `src/cli/commands/init.ts` (replacing the 1.1 stub), the `templates/` content, and any new scaffold helper file; do not touch `doctor.ts`, `report.ts`, `src/infra/run-store*`, or anything 1.5/1.6 own this wave.**
+
+## Acceptance Criteria
+
+From `docs/planning-artifacts/epics.md` (authoritative — expand, never weaken):
+
+1. **Given** a Git repository without SpecWitness (any stack, no Node project required)
+   **When** I run `specwitness init`
+   **Then** `.specwitness/` is created with `config.yaml` skeleton (commented examples for gates/services/observations/ai) and `contracts/`, `plans/`, `runs/` directories, and the command reports what was created.
+2. **Given** an existing `.specwitness/config.yaml`
+   **When** I run `specwitness init` again
+   **Then** nothing is overwritten without explicit `--force`, and the command says so with exit 0.
+3. **Given** a directory that is not a Git repository
+   **When** I run `specwitness init`
+   **Then** it refuses with a named error and `HINT:` (exit 3).
+
+Clarifications (detail only, no weakening):
+
+- AC1: also write `.specwitness/.gitignore` containing `runs/` and `scorecard.jsonl` — this satisfies Q11 ("committed: config/contracts/plans; local-only: runs/scorecard; init writes the ignore entries") without mutating the project's own root `.gitignore`. Report it among created items.
+- AC1 "reports what was created": one line per created path on stdout; ISO-8601 UTC timestamps if any are printed.
+- AC2: `--force` overwrites ONLY `config.yaml` (never deletes `contracts/`/`plans/`/`runs/` contents); re-run without `--force` still creates any MISSING directories/files (idempotent completion) and clearly says config was left untouched; exit 0.
+- AC3: "named error" = message identifying the checked directory and that it is not a Git repository; classify as `InfraError` (environment precondition — NOT `UsageError`: the invocation is well-formed; epics pins exit 3). `HINT: run inside a Git repository or 'git init' first.`
+- Prompt-free: init in V0 never prompts (agent-callable; the conventions' "init confirm" TTY allowance is unused — `--force` is the only overwrite path). No TTY reads.
+
+## Tasks / Subtasks
+
+- [ ] Task 1: config skeleton template (AC: 1)
+  - [ ] `templates/config.yaml`: commented skeleton based on addendum §D — a minimal ACTIVE part that validates against story 1.3's schema (e.g. `version: 1` + `project.baseBranch` placeholder), plus commented-out examples for `setup`, `gates`, `services` (with `port`/`ready`), `data`, `observations`, `ai.providers`/`ai.roles`; comments explain each section in one line
+  - [ ] Ensure `templates/` ships in the npm package (`files` in package.json — placeholder dir came from 1.1) and resolve the template path robustly from the installed package location (`import.meta.url`-relative, works from packed tarball and from dev)
+  - [ ] Test: the skeleton's active content passes `loadConfig` validation from story 1.3
+- [ ] Task 2 (TDD): scaffold logic (AC: 1, 2)
+  - [ ] `src/infra/scaffold.ts` (or keep logic inside the command module if small): create `.specwitness/`, `contracts/`, `plans/`, `runs/`, `.specwitness/.gitignore`, copy template → `config.yaml`; return the list of created vs skipped paths
+  - [ ] Overwrite rules per AC2; pure-ish function taking project root, testable against tmp dirs
+- [ ] Task 3 (TDD): command (AC: 1, 2, 3)
+  - [ ] Replace stub `src/cli/commands/init.ts`: `specwitness init [--force]`; git-repo detection = presence of a `.git` entry (directory OR file — worktrees/submodules use a `.git` file) at the project root, no `git` subprocess needed; on failure throw `InfraError` (1.1's handler renders `ERROR:`/`HINT:` + exit 3)
+  - [ ] Report created/skipped items on stdout; human-friendly summary; exit 0 on success and on the nothing-overwritten path
+- [ ] Task 4: integration tests
+  - [ ] Spawn the built CLI in tmp dirs: fresh git repo (init succeeds, all paths created incl. `.gitignore`, reported); non-git dir (exit 3, ERROR+HINT on stderr); re-run (exit 0, config untouched, says so); re-run `--force` (config replaced, dirs/contents preserved); non-Node repo fixture (no package.json — works identically)
+
+## Dev Notes
+
+### Exact scope
+
+- `src/cli/commands/init.ts` (stub replacement), `src/infra/scaffold.ts` (optional helper), `templates/config.yaml`, tests.
+
+### Out of scope (do NOT build)
+
+- Interactive prompts of any kind. Doctor checks (1.5). Run-id/manifest logic for `runs/` (1.6 owns run storage; init only creates the empty directory). Any git subprocess usage (detection is filesystem-only). Project root resolution flags (`--root` is Epic 3); init operates on CWD.
+- Do not append to the project's root `.gitignore` (the nested `.specwitness/.gitignore` is the chosen mechanism).
+
+### Dependencies & upstream contracts
+
+- Requires merged: 1.1 (CLI skeleton, stub file to replace, `InfraError`, exit table), 1.3 (config schema — the template must validate against it).
+- Binding: FR-1 (+ testable consequences), FR-4 (no Node required in target), Q11 (git vs local artifacts), AD-8 spirit (SpecWitness writes only into `.specwitness/`), Consistency Conventions (prompt-free agent-callable commands, `ERROR:`/`HINT:` stderr, ISO-8601 UTC).
+
+### Architecture compliance
+
+- AD-1: command module lives in `cli/` (edge — may import config/infra); scaffold helper in `infra/` may use `fs`. Nothing here touches `src/domain` beyond importing error classes.
+- All filesystem writes are confined to `.specwitness/` inside the target project — nothing else in the user's repo is modified.
+
+### Testing requirements
+
+- Unit: scaffold function (created/skipped/force matrix) against tmp dirs; template-validates-against-schema test.
+- Integration: built-CLI spawns per Task 4 (this story's behavior is primarily CLI-observable; integration coverage is the priority). Hermetic — tmp dirs only.
+
+### Integration expectations
+
+- `doctor` (1.5) will validate the config your template writes — a fresh `init` followed by `doctor` should produce warnings at most, not required-check failures, for the config-validity check (placeholder `baseBranch` may legitimately warn/fail the base-branch-exists check; that's doctor's concern, not yours).
+- Epic 2 commits `contracts/`/`plans/` content into these directories; Epic 3+ writes runs. Directory names are contract — exactly `contracts`, `plans`, `runs`.
+
+### Failure modes to consider
+
+- Running from a subdirectory of the repo: V0 scaffolds at CWD — document in help text that init should run at the project root (refuse-to-guess house rule; no upward search).
+- Partially existing layout (dirs exist, config missing or vice versa) — complete the missing pieces, never clobber.
+- Template file missing from a broken install → `InfraError` with a reinstall hint (don't crash with a raw ENOENT).
+- Read-only filesystem / permission errors → `InfraError` with the failing path.
+
+### Security
+
+- Init writes files with normal permissions inside the target repo only. No secrets, no env reads, no subprocesses, no network. Blanket NFR-1 applies.
+
+### Project Structure Notes
+
+- Story branch `story/1-4-specwitness-init`; Conventional Commits (e.g. `feat(cli): implement specwitness init scaffolding`).
+
+### References
+
+- [Source: docs/planning-artifacts/epics.md#Story 1.4] — acceptance criteria (verbatim above)
+- [Source: docs/planning-artifacts/prds/prd-specwitness-2026-08-30/prd.md#FR-1] — init requirement + consequences
+- [Source: docs/planning-artifacts/prds/prd-specwitness-2026-08-30/addendum.md#D] — config sketch the template is built from
+- [Source: docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/architecture-questions.md#Q11-Q12] — committed vs local-only artifacts; init writes ignore entries
+- [Source: docs/planning-artifacts/architecture/architecture-specwitness-2026-08-30/ARCHITECTURE-SPINE.md#Consistency Conventions] — prompt-free, house error style
+- [Source: docs/planning-artifacts/roadmap.md#EPIC 1] — wave C ownership
+
+## Dev Agent Record
+
+### Agent Model Used
+
+### Debug Log References
+
+### Completion Notes List
+
+### File List
