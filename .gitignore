@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test output
+coverage/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Proofgate runtime artifacts (future implementation)
+.proofgate/runs/
+
+# OS / editor noise
+.DS_Store
+*.log
+
+# Local-only agent settings
+.claude/settings.local.json

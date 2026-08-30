@@ -1,0 +1,94 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: '2026-08-30'
+last_updated: '2026-08-30'
+project: specwitness
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+development_status:
+  epic-1: backlog
+  1-1-cli-package-skeleton-with-exit-code-contract: backlog
+  1-2-domain-core-result-taxonomy-errors-verdict-aggregation: backlog
+  1-3-project-configuration-model-validation: backlog
+  1-4-specwitness-init: backlog
+  1-5-specwitness-doctor-runtime-project-diagnostics: backlog
+  1-6-run-storage-foundation-run-identifiers: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-bmad-v6-ingestion-to-epicspec: backlog
+  2-2-contract-model-canonical-serialization-fingerprint: backlog
+  2-3-agentprovider-port-roles-structured-output-gate: backlog
+  2-4-claude-code-cli-adapter: backlog
+  2-5-codex-cli-adapter: backlog
+  2-6-specwitness-contract-epic-generate-review-freeze-status: backlog
+  2-7-amendment-flow-runtime-integrity-provider-doctor-checks: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-revision-resolution-isolated-worktree: backlog
+  3-2-process-groups-run-manifest-specwitness-clean: backlog
+  3-3-staged-pipeline-state-machine: backlog
+  3-4-deterministic-gates-execution: backlog
+  3-5-runresult-persistence-specwitness-report: backlog
+  3-6-terminal-json-renderers: backlog
+  3-7-end-to-end-gates-only-verify: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-service-lifecycle-readiness: backlog
+  4-2-plan-model-compilation-via-plan-author-provider: backlog
+  4-3-deterministic-test-data: backlog
+  4-4-http-probe-executor: backlog
+  4-5-observation-probes-before-after-invariants: backlog
+  4-6-shell-probes: backlog
+  4-7-ai-free-behavioral-verify-end-to-end: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-playwright-integration-environment-resolution: backlog
+  5-2-browser-probe-executor-with-trace-evidence: backlog
+  5-3-human-judgment-criteria-flow: backlog
+  5-4-flakiness-retry-semantics: backlog
+  5-5-failure-explanation-explainer-role-optional: backlog
+  5-6-mechanics-adaptation-boundary-optional: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog
+  6-1-corpus-infrastructure-hermetic-e2e-runner: backlog
+  6-2-behavioral-corpus-fixtures-pass-fail-classes: backlog
+  6-3-classification-corpus-fixtures: backlog
+  6-4-non-node-target-fixture: backlog
+  6-5-scorecard-recording: backlog
+  6-6-defect-attribution-summary: backlog
+  6-7-dogfooding-readiness-docs-packaging: backlog
+  epic-6-retrospective: optional
