@@ -49,6 +49,16 @@ export function normalizeEpicId(input: string): string {
   if (epicNumber < 1) {
     throw new UsageError(`invalid epic id: '${input}' — epic numbers start at 1`, EPIC_ID_HINT);
   }
+  // Beyond 2^53-1 `parseInt` silently loses precision — 9007199254740993 and
+  // 9007199254740992 both parse to the same number, and a long enough digit
+  // string becomes Infinity. Either would let two DIFFERENT epics share one
+  // canonical id, i.e. verify the wrong epic's contract. Refuse instead.
+  if (!Number.isSafeInteger(epicNumber)) {
+    throw new UsageError(
+      `invalid epic id: '${input}' — epic number is too large to represent exactly`,
+      EPIC_ID_HINT,
+    );
+  }
 
   return `epic-${epicNumber}`;
 }
@@ -81,8 +91,12 @@ export function isCriterionId(value: string): boolean {
   if (match === null) {
     return false;
   }
-  // Reject 'E7-00' and any other zero sequence: sequences are 1-based.
-  return Number.parseInt(match[2] as string, 10) >= 1;
+  const epicNumber = Number.parseInt(match[1] as string, 10);
+  const sequence = Number.parseInt(match[2] as string, 10);
+  // Reject 'E7-00' and any other zero sequence: sequences are 1-based. Reject
+  // values past 2^53-1 for the same precision reason as `normalizeEpicId` —
+  // beyond it, `parseCriterionId` would not round-trip.
+  return sequence >= 1 && Number.isSafeInteger(epicNumber) && Number.isSafeInteger(sequence);
 }
 
 /** The two components of a canonical criterion id. */
@@ -112,14 +126,22 @@ export function parseCriterionId(value: string): CriterionIdParts {
       CRITERION_ID_HINT,
     );
   }
+  if (!Number.isSafeInteger(epicNumber) || !Number.isSafeInteger(sequence)) {
+    throw new UsageError(
+      `invalid criterion id: '${value}' — component too large to represent exactly`,
+      CRITERION_ID_HINT,
+    );
+  }
 
   return { epicNumber, sequence };
 }
 
 function assertPositiveInteger(value: number, label: string): void {
-  if (!Number.isInteger(value) || value < 1) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    // isSafeInteger, not isInteger: 2^53 is an integer but cannot round-trip,
+    // so an id built from it would not parse back to the same components.
     throw new UsageError(
-      `invalid ${label}: ${value} — expected a positive integer`,
+      `invalid ${label}: ${value} — expected a positive integer below 2^53`,
       CRITERION_ID_HINT,
     );
   }

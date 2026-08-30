@@ -70,6 +70,39 @@ describe('normalizeEpicId — the single implementation (Consistency Conventions
   it('is pure: repeated calls return the same value', () => {
     expect(normalizeEpicId('epic-07')).toBe(normalizeEpicId('epic-07'));
   });
+
+  it('rejects epic numbers beyond the safe integer range rather than colliding', () => {
+    // 2^53 and 2^53+1 both parse to 9007199254740992. Silently normalising two
+    // DIFFERENT epics to one canonical id would make the gate verify the wrong
+    // epic's contract — the one failure this module exists to prevent.
+    expect(() => normalizeEpicId('9007199254740993')).toThrow(UsageError);
+    expect(() => normalizeEpicId('epic-9007199254740993')).toThrow(UsageError);
+  });
+
+  it('never emits a canonical id containing Infinity', () => {
+    // A long digit string overflows to Infinity, yielding the malformed id
+    // 'epic-Infinity'.
+    expect(() => normalizeEpicId('9'.repeat(1000))).toThrow(UsageError);
+    for (const input of ['9007199254740993', '9'.repeat(1000), '1'.repeat(40)]) {
+      let normalized: string | undefined;
+      try {
+        normalized = normalizeEpicId(input);
+      } catch {
+        continue; // rejected, which is the point
+      }
+      expect(normalized).not.toContain('Infinity');
+    }
+  });
+
+  it('still accepts the largest safe epic number', () => {
+    expect(normalizeEpicId('9007199254740991')).toBe('epic-9007199254740991');
+  });
+
+  it('normalizes distinct inputs to distinct canonical ids', () => {
+    const inputs = ['1', '2', '7', '42', '9007199254740991'];
+    const canonical = inputs.map((input) => normalizeEpicId(input));
+    expect(new Set(canonical).size).toBe(inputs.length);
+  });
 });
 
 describe('criterion ids — canonical format E<n>-<NN>', () => {
@@ -140,5 +173,21 @@ describe('criterion ids — canonical format E<n>-<NN>', () => {
     expect(() => buildCriterionId(7, 0)).toThrow(UsageError);
     expect(() => buildCriterionId(-1, 1)).toThrow(UsageError);
     expect(() => buildCriterionId(7.5, 1)).toThrow(UsageError);
+  });
+
+  it('rejects unsafe integers in build, validate and parse alike', () => {
+    // Same precision hazard as epic ids: without this, parse would not
+    // round-trip and two distinct criteria could share a canonical id.
+    expect(() => buildCriterionId(9007199254740993, 1)).toThrow(UsageError);
+    expect(() => buildCriterionId(7, 9007199254740993)).toThrow(UsageError);
+    expect(isCriterionId('E9007199254740993-01')).toBe(false);
+    expect(isCriterionId(`E7-${'9'.repeat(1000)}`)).toBe(false);
+    expect(() => parseCriterionId('E9007199254740993-01')).toThrow(UsageError);
+    expect(() => parseCriterionId(`E7-${'9'.repeat(1000)}`)).toThrow(UsageError);
+  });
+
+  it('round-trips at the safe-integer boundary', () => {
+    const id = buildCriterionId(9007199254740991, 99);
+    expect(parseCriterionId(id)).toEqual({ epicNumber: 9007199254740991, sequence: 99 });
   });
 });
