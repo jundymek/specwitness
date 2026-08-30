@@ -1,13 +1,13 @@
 # ADR-003: Deterministic gate failure maps to Verdict FAIL with a gateFailed marker
 
-- **Status:** Proposed (open question 2 in the PRD — author confirmation wanted)
+- **Status:** Accepted (author confirmed option A, 2026-08-30)
 - **Date:** 2026-08-30
 
 ## Context
 
 The brief (§30–31) requires deterministic gate failures to be reported distinctly and to stop the pipeline early, and requires infra failures never to be labeled product FAIL. It does not say which *top-level verdict* a failing gate produces.
 
-## Decision (proposed)
+## Decision (accepted)
 
 A failing Deterministic Gate ends the run with **Verdict FAIL**, `gateFailed: true`, the failing gate identified, zero criteria executed (all reported `skipped`), and the gate's output as evidence. Exit code 1.
 

@@ -17,6 +17,6 @@ A sufficiently capable local agent could re-run the freeze itself (edit contract
 - Git-level: contract files owned by a protected path / CODEOWNERS on public repos.
 - Tool-level: optional signing key held outside agent reach (v2+).
 
-## Recorded concern
+## Amendment policy (author-confirmed 2026-08-30)
 
-The PRD's open question 3: an interactive TTY confirmation for amendments would be strong, but the first client invokes tools from a no-TTY REPL context. Current position: amendments are an *operator* action performed in a human terminal — no-TTY contexts get refusal-with-hint, which is arguably correct behavior, since agents should never amend contracts.
+`contract --amend` requires an interactive terminal (TTY) and an in-prompt confirmation. Invoked without a TTY (the agent/REPL context of the first client) it refuses with `ERROR:` + `HINT: amendment is an operator action`. There is deliberately **no non-interactive escape hatch** (no `--yes`/`--confirm` bypass) — amendments cannot be scripted, by anyone. Second defense layer lives in the client harness: deny `specwitness contract*` in coding/supervisor agent allowlists (same mechanism the first client uses for `gh pr merge`). Git review of contract-file changes remains the final tamper-evidence backstop.

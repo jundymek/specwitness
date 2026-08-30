@@ -213,7 +213,7 @@ Stories:
 - 7.3 Hypothesis verdict report
 
 Dependencies:
-Epic 6 (shipped, corpus-proven tool); a real harness project with a planned BMAD epic.
+Epic 6 (shipped, corpus-proven tool); a real harness project with a planned BMAD epic. **Author-selected target (2026-08-30): a new test feature in `/Users/jundymek/dev/gitnebula`** (pnpm monorepo, BMAD already installed, harness-style `docs/planning-artifacts` layout, ready-made lint/typecheck/test/build gates). When picking the feature, prefer one with an observable surface (something that runs and can be probed); a pure-CLI feature exercises shell/observation probes only.
 
 Can run in parallel:
 Nothing — single operator thread.
