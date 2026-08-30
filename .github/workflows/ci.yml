@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# A superseded run proves nothing; let the newer commit take over.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # SpecWitness is a local-first developer tool; both host platforms its
+        # users run on are checked. Node is pinned at the engines floor so a
+        # feature newer than >=22.12 cannot creep in unnoticed.
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack
+        # pnpm's version comes from packageManager in package.json, so CI and
+        # every developer machine resolve to the same pnpm.
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Architecture guardrail (AD-1)
+        run: pnpm depcruise
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Packed-tarball smoke test
+        # Proves the published artifact works, not just the working tree:
+        # bin mapping, shebang, executable bit, and the exit-code contract.
+        run: ./scripts/pack-smoke.sh

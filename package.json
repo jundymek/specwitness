@@ -1,0 +1,46 @@
+{
+  "name": "specwitness",
+  "version": "0.1.0",
+  "description": "Independent verification gate for agentic software development: proves, with reproducible evidence, whether an assembled epic satisfies its frozen specification.",
+  "keywords": [
+    "verification",
+    "agentic",
+    "cli",
+    "bmad",
+    "quality-gate"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "specwitness": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "packageManager": "pnpm@11.24.0",
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "depcruise": "depcruise src --config .dependency-cruiser.cjs",
+    "lint": "pnpm run depcruise"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "execa": "^10.0.1",
+    "yaml": "^2.9.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "dependency-cruiser": "^18.2.0",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

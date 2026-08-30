@@ -1,0 +1,4 @@
+# pnpm 11 reads settings from here; the `pnpm` field in package.json is ignored.
+# esbuild is tsup's bundler and needs its postinstall to place the platform binary.
+allowBuilds:
+  esbuild: true
