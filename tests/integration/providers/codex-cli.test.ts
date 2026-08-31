@@ -27,8 +27,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { SystemClock } from '../../../src/infra/clock.js';
+import { createProvider } from '../../../src/providers/index.js';
+import { invoke } from '../../../src/providers/invoke.js';
 import { createProcessRunner } from '../../../src/infra/process-runner.js';
 import { ProviderError } from '../../../src/domain/errors.js';
 import {
@@ -378,6 +381,57 @@ describe('billing safety against a real child process (AC2, FR-15)', () => {
  * the other outside config-driven resolution.
  */
 describe('AC3 — a Codex-only configuration completes generation', () => {
+  it('resolves each role through config and completes THROUGH THE GATE', async () => {
+    // The end-to-end the AC actually asks for: config → role resolution →
+    // `createProvider` → the shared gate → a validated draft. Nothing here names
+    // an adapter in code; `adapter: 'codex-cli'` is a config VALUE, which is what
+    // "no hardcoded dependency on any specific provider" means.
+    const shim = await withShim('capable', '{"criteria":[{"id":"E7-01"}]}');
+
+    const config = {
+      ai: {
+        providers: { codex: { adapter: 'codex-cli', mode: 'chatgpt' } },
+        roles: {
+          'contract-author': 'codex',
+          'plan-author': 'codex',
+          explainer: 'codex',
+        },
+      },
+    } as const;
+
+    const responseSchema = z.object({
+      criteria: z.array(z.object({ id: z.string() })),
+    });
+
+    for (const role of ['contract-author', 'plan-author', 'explainer'] as const) {
+      // Resolve exactly as the application layer would: role → provider NAME →
+      // declared adapter. No Claude adapter is configured, installed, or needed.
+      const providerName = config.ai.roles[role];
+      const declared = config.ai.providers[providerName];
+      const provider = createProvider(
+        { name: providerName, adapter: declared.adapter, mode: declared.mode },
+        { processRunner: runner, clock: new SystemClock(), warn: vi.fn() },
+      );
+
+      expect(provider.adapter).toBe('codex-cli');
+
+      const response = await invoke(
+        { role, prompt: `work for ${role}`, responseSchema },
+        { provider, clock: new SystemClock() },
+      );
+
+      // `parsed` exists only because the GATE validated it — the adapter
+      // returned raw text and never touched a schema (AD-2).
+      expect(response.ok).toBe(true);
+      expect(response.parsed).toEqual({ criteria: [{ id: 'E7-01' }] });
+      expect(response.attempts).toHaveLength(1);
+    }
+
+    // Three invocations, one capability probe for the session:
+    // `--version` + `exec --help` + three execs = 5.
+    expect(await shim.invocations()).toBe(5);
+  });
+
   it('resolves every role to codex and invokes it', async () => {
     const shim = await withShim('capable', '{"criteria":[]}');
 
