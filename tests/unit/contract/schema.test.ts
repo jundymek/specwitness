@@ -8,6 +8,9 @@ import { fingerprint } from '../../../src/schemas/canonical.js';
 import {
   CONTRACT_SCHEMA_VERSION,
   ContractSchema,
+  contractState,
+  freeze,
+  isFrozen,
   parseContract,
   serializeContract,
 } from '../../../src/schemas/contract.js';
@@ -247,6 +250,60 @@ describe('parseContract — criterion ids are identities, so they must be unique
     const text = fixture('epic-7-frozen.yaml').replace('id: E7-03', 'id: E7-030');
 
     expect(parseContract(text, 'p').spec.criteria).toHaveLength(3);
+  });
+});
+
+describe("parseContract — story 2.7's amend output is a legitimate draft", () => {
+  // Confirmed for chuck (2.6) rather than assumed, after dolph (2.7) reversed
+  // his amend flow to stop at an unfrozen draft instead of re-freezing in-call.
+  // This is the one shape where "is a draft" and "has been frozen before" are
+  // both true: frozen false, fingerprint null, frozenAt null, history NON-empty,
+  // version >= 2. Rejecting it would break the only sanctioned way a contract
+  // legitimately changes.
+  const amended = (): string => fixture('epic-7-amended-draft.yaml');
+
+  it('parses without complaint', () => {
+    const contract = parseContract(amended(), 'contracts/epic-7.yaml');
+
+    expect(contract.meta.frozen).toBe(false);
+    expect(contract.meta.fingerprint).toBeNull();
+    expect(contract.meta.frozenAt).toBeNull();
+    expect(contract.meta.history).toHaveLength(1);
+    expect(contract.spec.version).toBe(2);
+  });
+
+  it('records the superseded version and ITS fingerprint, not the new one', () => {
+    const entry = parseContract(amended(), 'p').meta.history[0];
+
+    expect(entry?.version).toBe(1);
+    expect(entry?.fingerprint).toBe(FROZEN_FINGERPRINT);
+    expect(entry?.reason).toContain('onboarding now emails the owner');
+  });
+
+  it('reports as a draft, not as tampered', () => {
+    // A history entry is `meta`, so it is outside the hash entirely. An amended
+    // draft has no fingerprint to mismatch against.
+    expect(contractState(parseContract(amended(), 'p'))).toBe('draft');
+    expect(isFrozen(parseContract(amended(), 'p'))).toBe(false);
+  });
+
+  it('round-trips with its history intact and readable', () => {
+    const contract = parseContract(amended(), 'p');
+    const text = serializeContract(contract);
+
+    expect(parseContract(text, 'p')).toEqual(contract);
+    expect(text).toContain('history:');
+    expect(text).toContain('reason: onboarding now emails the owner');
+  });
+
+  it('freezes by the ordinary path, leaving history untouched', () => {
+    const contract = parseContract(amended(), 'p');
+    const result = freeze(contract, new Date('2026-09-14T12:30:00.000Z'));
+
+    expect(result.meta.frozen).toBe(true);
+    expect(result.meta.history).toEqual(contract.meta.history);
+    expect(result.spec.version).toBe(2);
+    expect(contractState(result)).toBe('frozen');
   });
 });
 

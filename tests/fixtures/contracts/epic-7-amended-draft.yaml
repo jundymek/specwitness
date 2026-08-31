@@ -1,0 +1,48 @@
+# Story 2.7's amend output, and a legitimate DRAFT.
+#
+# `--amend` bumps the version, appends the superseded version to history, and
+# sets frozen / fingerprint / frozenAt to false / null / null together — then
+# stops. The operator edits the criteria and runs `--freeze` separately, so the
+# review window stays open and version N+1 cannot end up byte-identical to N.
+#
+# This file therefore has to parse cleanly: frozen false, fingerprint null,
+# frozenAt null, history NON-empty, version >= 2. It is the one shape where
+# "draft" and "has been frozen before" are both true, and rejecting it would
+# break the only sanctioned way a contract legitimately changes.
+spec:
+  epic: epic-7
+  version: 2
+  criteria:
+    - id: E7-01
+      statement: A new company appears in the companies list after onboarding completes.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+    - id: E7-02
+      statement: |-
+        Only an owner may invite a member.
+        A member who tries receives 403 and no invitation is created.
+      kind: security
+      severity: critical
+      verifiability: automated
+    - id: E7-03
+      statement: The onboarding confirmation copy reads naturally to a native speaker — café, ☕.
+      kind: human
+      severity: normal
+      verifiability: human
+meta:
+  schemaVersion: 1
+  frozen: false
+  fingerprint: null
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: null
+  provenance:
+    provider: codex
+    model: null
+    providerCliVersion: 0.144.4
+    generatedAt: 2026-08-31T09:00:00.000Z
+  history:
+    - version: 1
+      fingerprint: 4f7f9292551ac1cf01d2b77d4e845561b6e6f4331d34ae5c07e7730312d1f184
+      timestamp: 2026-09-14T12:00:00.000Z
+      reason: onboarding now emails the owner, so the confirmation criterion needs rewording
