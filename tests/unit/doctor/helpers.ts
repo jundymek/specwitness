@@ -94,6 +94,12 @@ export interface TestContextOptions extends FakeEffectOptions {
   readonly config?: string;
   readonly nodeVersion?: string;
   readonly pathVar?: string;
+  /**
+   * Billing-risk variable NAMES (story 2.7). Injected rather than set on
+   * `process.env`, because mutating the parent environment is what AD-4 forbids
+   * the product from doing and would leak across test files besides.
+   */
+  readonly billingRiskEnv?: readonly string[];
 }
 
 export async function testContext(
@@ -105,6 +111,9 @@ export async function testContext(
     effects: fakeEffects(options),
     nodeVersion: options.nodeVersion ?? 'v22.20.0',
     pathVar: options.pathVar ?? '',
+    // Default empty, never the real environment: a developer with a key
+    // exported must not get different test results from one without.
+    billingRiskEnv: options.billingRiskEnv ?? [],
   });
   return { ctx, projectRoot };
 }

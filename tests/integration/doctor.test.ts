@@ -89,11 +89,27 @@ async function tryListen(): Promise<HeldPort | undefined> {
   });
 }
 
-async function doctor(cwd: string, args: string[] = []) {
+/**
+ * Runs the built CLI. `input: ''` means the child gets no TTY, which is how the
+ * harness invokes it.
+ *
+ * Story 2.7 note on `env`: the billing-risk variables are UNSET by default, so a
+ * developer who happens to export `OPENAI_API_KEY` gets the same results as CI.
+ * Without this the `billing-risk-env` check would report differently on
+ * different machines and the failure would look like a flake rather than an
+ * inherited environment.
+ */
+async function doctor(
+  cwd: string,
+  args: string[] = [],
+  env: Record<string, string | undefined> = {},
+) {
   const result = await execa(process.execPath, [CLI, 'doctor', ...args], {
     cwd,
     reject: false,
     input: '',
+    env: { ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined, ...env },
+    extendEnv: true,
   });
   return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
 }
@@ -272,6 +288,11 @@ describe('doctor --json', () => {
       'commands-resolvable',
       'playwright-capability',
       'ports-free',
+      // ── appended by story 2.7 ──
+      // Extended in registration order, and deliberately still an EXACT list:
+      // loosening this to `toContain` would delete the only guarantee that the
+      // `--json` check order is stable for the consumers that parse it.
+      'billing-risk-env',
     ]);
     // The human rendering is still available, on the other stream.
     expect(stderr).toContain('node-version');
@@ -285,5 +306,85 @@ describe('doctor --json', () => {
     expect(exitCode).toBe(3);
     const parsed = JSON.parse(stdout) as { status: string };
     expect(parsed.status).toBe('fail');
+  });
+});
+
+/**
+ * FR-15 / UJ-4 through the built binary (story 2.7).
+ *
+ * The variable is set in the CHILD's environment only. `process.env` in this
+ * test process is never mutated: AD-4 forbids the product from touching the
+ * parent environment, and a suite that did it would leak into every file that
+ * ran after it.
+ */
+describe('doctor and billing-risk environment variables', () => {
+  const WITH_PROVIDER = [
+    'version: 1',
+    'project:',
+    '  baseBranch: master',
+    'ai:',
+    '  providers:',
+    '    codex:',
+    '      adapter: codex-cli',
+    '      mode: chatgpt',
+    '  roles:',
+    '    contract-author: codex',
+    '',
+  ].join('\n');
+
+  it('names the variable and still exits 0', async () => {
+    const root = await project(WITH_PROVIDER);
+
+    const { exitCode, stdout } = await doctor(root, [], {
+      OPENAI_API_KEY: 'sk-not-a-real-key-000',
+    });
+
+    // The warning is a thing to know, not a broken environment. Exiting
+    // non-zero here would train an operator to stop reading doctor's output.
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('OPENAI_API_KEY present in environment');
+    expect(stdout).toContain('could bill your API account');
+  });
+
+  it('prints the name and never the value', async () => {
+    const root = await project(WITH_PROVIDER);
+    const secret = 'sk-not-a-real-key-000';
+
+    const { stdout, stderr } = await doctor(root, [], { OPENAI_API_KEY: secret });
+
+    // The whole point of the check: a warning that echoed the key would leak a
+    // credential into terminal scrollback, CI logs and PR bodies.
+    expect(stdout).not.toContain(secret);
+    expect(stderr).not.toContain(secret);
+  });
+
+  it('keeps the value out of --json too', async () => {
+    const root = await project(WITH_PROVIDER);
+    const secret = 'sk-not-a-real-key-000';
+
+    const { exitCode, stdout } = await doctor(root, ['--json'], { OPENAI_API_KEY: secret });
+
+    expect(exitCode).toBe(0);
+    expect(stdout).not.toContain(secret);
+
+    // stdout still carries the JSON document and nothing else.
+    const parsed = JSON.parse(stdout) as {
+      checks: { id: string; status: string; required: boolean; detail: string }[];
+    };
+    const billing = parsed.checks.find((check) => check.id === 'billing-risk-env');
+    expect(billing?.status).toBe('warn');
+    expect(billing?.required).toBe(false);
+    expect(billing?.detail).toContain('OPENAI_API_KEY');
+  });
+
+  it('says nothing when no provider is configured, even with a key exported', async () => {
+    // A normal project state, not a diagnosis: SpecWitness will spawn no
+    // provider here, so no provider call can bill anything (UJ-4 edge case).
+    const root = await project(HEALTHY);
+
+    const { exitCode, stdout } = await doctor(root, [], { OPENAI_API_KEY: 'sk-not-a-real-key-000' });
+
+    expect(exitCode).toBe(0);
+    expect(stdout).not.toContain('could bill your API account');
   });
 });

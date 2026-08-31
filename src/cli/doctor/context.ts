@@ -39,6 +39,16 @@ export interface DoctorContext {
   readonly nodeVersion: string;
   /** `PATH` as the process sees it; `''` when unset. */
   readonly pathVar: string;
+  /**
+   * NAMES of the billing-risk environment variables present in this process's
+   * environment — never their values (FR-15, story 2.7).
+   *
+   * Values are deliberately not carried. A warning that printed a key would
+   * leak a credential into terminal scrollback, CI logs and PR bodies, which is
+   * a worse outcome than the surprise bill it was warning about; keeping the
+   * value out of the context means no check can print one even by accident.
+   */
+  readonly billingRiskEnv: readonly string[];
   readonly effects: DoctorEffects;
 }
 
@@ -48,6 +58,35 @@ export interface DoctorContextOptions {
   readonly effects?: DoctorEffects;
   readonly nodeVersion?: string;
   readonly pathVar?: string;
+  readonly billingRiskEnv?: readonly string[];
+}
+
+/**
+ * The billing-risk variables doctor knows about, read by NAME at the edge.
+ *
+ * WRITTEN AS LITERAL READS ON PURPOSE. A loop over an array of names would read
+ * exactly the same two variables while making
+ * `tests/unit/doctor/credential-boundary.test.ts` blind to them — that guard can
+ * only see a name that is written down, and it says so in its own header
+ * ("a fully computed access cannot be resolved by any static scan"). Spelling
+ * them out keeps doctor's env reads an auditable, closed list of three: `PATH`
+ * here and in `createDoctorContext`, plus these two.
+ *
+ * PRESENCE, NOT EMPTINESS. An exported-but-empty key still names a variable the
+ * provider CLIs will see, and stories 2.4/2.5 withhold it on the same rule, so
+ * the two halves of the product agree on what "present" means.
+ *
+ * The value is read and immediately discarded — only the name travels onward.
+ */
+function presentBillingRiskVariables(): readonly string[] {
+  const present: string[] = [];
+  if (process.env['ANTHROPIC_API_KEY'] !== undefined) {
+    present.push('ANTHROPIC_API_KEY');
+  }
+  if (process.env['OPENAI_API_KEY'] !== undefined) {
+    present.push('OPENAI_API_KEY');
+  }
+  return present;
 }
 
 /**
@@ -81,9 +120,14 @@ export function createDoctorContext(options: DoctorContextOptions): DoctorContex
     projectRoot: options.projectRoot,
     config: attemptLoad(options.projectRoot),
     nodeVersion: options.nodeVersion ?? process.version,
-    // Env is read at the CLI edge only (spine "State & config"), and PATH is the
-    // only variable doctor reads at all.
+    // Env is read at the CLI edge only (spine "State & config"). PATH was once
+    // the only variable doctor read; story 2.7 added exactly two more, by NAME
+    // and never by value, so that FR-15 can warn about a billing risk before
+    // anything is spawned. The closed list of three is asserted in
+    // `tests/unit/doctor/credential-boundary.test.ts`, with a justification per
+    // name — widening it is a deliberate act, which is the point of the guard.
     pathVar: options.pathVar ?? process.env['PATH'] ?? '',
+    billingRiskEnv: options.billingRiskEnv ?? presentBillingRiskVariables(),
     effects: options.effects ?? createDoctorEffects(),
   };
 }

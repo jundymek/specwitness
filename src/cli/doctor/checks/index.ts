@@ -16,10 +16,16 @@
  * mode, auth readiness, billing-risk env vars) by registering them alongside
  * these — no file in this directory changes. Deliberately, none of them is
  * stubbed here: a placeholder would be a contract nobody agreed to.
+ *
+ * 2.7 has now done exactly that: the entries BELOW the original seven are
+ * appended, never interleaved, so the `--json` check order the harness reads is
+ * the same seven ids followed by the new ones. Anything appended later goes at
+ * the bottom for the same reason.
  */
 
 import type { DoctorCheck } from '../registry.js';
 import { baseBranchCheck } from './base-branch.js';
+import { billingRiskEnvCheck } from './billing-risk-env.js';
 import { commandsResolvableCheck } from './commands-resolvable.js';
 import { configValidCheck } from './config-valid.js';
 import { gitPresentCheck } from './git-present.js';
@@ -35,4 +41,9 @@ export const BUILTIN_CHECKS: readonly DoctorCheck[] = Object.freeze([
   commandsResolvableCheck,
   playwrightCapabilityCheck,
   portsFreeCheck,
+  // ── appended by story 2.7 ──────────────────────────────────────────────────
+  // Billing safety runs before the provider probes: it needs no subprocess, and
+  // an operator scanning top to bottom should learn that a key is exported
+  // before reading which CLI is about to be invoked.
+  billingRiskEnvCheck,
 ]);
