@@ -74,6 +74,26 @@ const DEFAULT_INVOKE_TIMEOUT_MS = 600_000;
  * environment name this module knows, and it is named here in order to WITHHOLD
  * it — the categorical opposite of reading a credential, which is why the NFR-1
  * guard's provider allow-list admits it with that justification attached.
+ *
+ * AD-4 says "provider equivalents", plural, so the obvious question is whether
+ * this list is too short. It was checked against the CLI's own help rather than
+ * guessed at, and the answer is no:
+ *
+ * - `OPENAI_API_KEY` is the one variable that authenticates an OpenAI account
+ *   and therefore BILLS it. `codex login --with-api-key` documents it by name.
+ * - `CODEX_ACCESS_TOKEN` also appears in `codex login --help`, but it is a
+ *   ChatGPT *access token*, not an API key: withholding it would not prevent a
+ *   charge, and could break a legitimately signed-in subscription user. Adding
+ *   it would trade a real regression for no billing benefit.
+ * - The remaining `OPENAI_*` variables in common use (`OPENAI_BASE_URL`,
+ *   `OPENAI_ORG_ID`) select a route or attribute usage; neither authenticates,
+ *   so neither can bill on its own.
+ *
+ * Story 2.4 widened its Anthropic list to include `ANTHROPIC_AUTH_TOKEN`, which
+ * is correct there — that is a documented alternative credential that bills.
+ * The OpenAI side has no equivalent, so mirroring the change for symmetry's sake
+ * would be cargo-culting. A project needing more declares them via
+ * `billingEnvVars`, which EXTENDS this list and can never shrink it.
  */
 const DEFAULT_BILLING_ENV_VARS: readonly string[] = ['OPENAI_API_KEY'];
 
@@ -555,7 +575,13 @@ async function generate(
     if (result.outcome === 'timed-out') {
       throw new ProviderError(
         `${BINARY} did not finish within ${String(options.timeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS)}ms`,
-        'raise the provider timeout, or reduce the size of the epic being authored',
+        // Deliberately does NOT say "raise the timeout": there is no
+        // configuration surface for it (`ai.providers.<name>` carries only
+        // `adapter` and `mode`), so that would send an operator looking for a
+        // knob that does not exist. Under the ERROR/HINT contract an
+        // unactionable hint is worse than none. Every step below is something
+        // they can actually run.
+        `check the Codex CLI responds — run 'codex doctor', then try the same prompt with 'codex exec' directly; a smaller epic authors faster`,
       );
     }
     // `spawn-failed` is kept separate from a non-zero exit rather than folded in

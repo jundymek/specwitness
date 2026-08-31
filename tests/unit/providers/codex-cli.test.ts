@@ -526,6 +526,43 @@ describe('generate — billing safety (AC2, FR-15)', () => {
     expect(runner.calls[2]?.env).toEqual({ inherit: true, withhold: ['OPENAI_API_KEY'] });
   });
 
+  it('EXTENDS the defaults rather than replacing them', async () => {
+    // Story 2.4 shipped this as a P1: a caller-supplied list REPLACED the
+    // defaults, so declaring one extra variable silently stopped withholding
+    // the built-in one. The direction of that failure is what makes it nasty —
+    // an operator adding a variable is being MORE careful, and the result was
+    // exactly the exposure the adapter exists to prevent.
+    //
+    // Asserted with a custom name ONLY, and deliberately not including the
+    // default: 2.4's test passed through the bug because it happened to list
+    // the defaults explicitly, so a test that does that proves nothing here.
+    vi.stubEnv('OPENAI_API_KEY', 'FAKE-BILLING-VALUE');
+    const runner = recordingRunner([VERSION_OK, HELP_OK, writesAnswer('{}')]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() }, {
+      billingEnvVars: ['MY_ORG_OPENAI_TOKEN'],
+    });
+
+    await provider.generate({ role: 'contract-author', prompt: 'p', jsonSchema: {} });
+
+    // The default MUST survive. There is deliberately no API for withholding
+    // FEWER variables than the defaults.
+    expect(runner.calls[2]?.env).toEqual({
+      inherit: true,
+      withhold: ['OPENAI_API_KEY', 'MY_ORG_OPENAI_TOKEN'],
+    });
+  });
+
+  it('does not duplicate a caller-supplied name that is already a default', async () => {
+    const runner = recordingRunner([VERSION_OK, HELP_OK, writesAnswer('{}')]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() }, {
+      billingEnvVars: ['OPENAI_API_KEY'],
+    });
+
+    await provider.generate({ role: 'contract-author', prompt: 'p', jsonSchema: {} });
+
+    expect(runner.calls[2]?.env).toEqual({ inherit: true, withhold: ['OPENAI_API_KEY'] });
+  });
+
   it('withholds project-declared billing variables too', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'a');
     vi.stubEnv('OPENAI_ORG_KEY', 'b');
