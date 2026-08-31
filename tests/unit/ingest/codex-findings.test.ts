@@ -394,6 +394,61 @@ describe('P2 (round 4) — markdown inside a fenced block is not document struct
   });
 });
 
+describe('P2 (round 5) — a shorter fence does not close a longer one', () => {
+  it('keeps a nested example fenced, so it cannot become a story or a section', () => {
+    // CommonMark: a closing fence must be at least as long as the opener. A
+    // check that compares only the fence character lets the inner ``` close the
+    // outer ````, reopening the rest of the file to structural parsing.
+    const spec = ingestEpic({
+      projectRoot: join(FIXTURES, 'nested-fence'),
+      epicId: '7',
+      planningArtifacts: 'docs/planning-artifacts',
+      implementationArtifacts: 'docs/implementation-artifacts',
+    });
+
+    expect(spec.stories.map((story) => story.id)).toEqual(['7.1']);
+
+    const criteria = spec.stories[0]?.acceptanceCriteria ?? [];
+    expect(criteria).toHaveLength(2);
+    // Assert what they SAY, not just how many: truncation yields two as well.
+    expect(criteria[0]?.text.startsWith('**Given** an outer fence of four backticks')).toBe(true);
+    expect(
+      criteria[1]?.text.startsWith('**Given** a second real criterion after the outer fence'),
+    ).toBe(true);
+    // The nested example survives inside the criterion, verbatim.
+    expect(criteria[0]?.text).toContain('### Story 7.9: Phantom from a nested fence');
+  });
+});
+
+describe('P2 (round 5) — an H1 claiming to be a story with no parseable id', () => {
+  it('refuses rather than borrowing the id from the filename', () => {
+    // `# Story 8.x: Copied` is not `# Story <epic>.<story>`. Treating it as an
+    // ordinary title skipped the filename cross-check entirely and attributed
+    // these criteria to 7.1 — the same fail-open branch, a third time.
+    expect(() =>
+      ingestEpic({
+        projectRoot: join(FIXTURES, 'malformed-h1'),
+        epicId: '7',
+        planningArtifacts: 'docs/planning-artifacts',
+        implementationArtifacts: 'docs/implementation-artifacts',
+      }),
+    ).toThrow(/looks like a story heading/);
+  });
+
+  it('still accepts an ordinary H1 that makes no claim about a story', () => {
+    // A file titled `# Ingestion notes` is not claiming to be story 8.x, so the
+    // filename remains the authority. Only a CLAIM triggers the refusal.
+    const spec = ingestEpic({
+      projectRoot: join(FIXTURES, 'stories-only'),
+      epicId: '7',
+      planningArtifacts: 'docs/planning-artifacts',
+      implementationArtifacts: 'docs/implementation-artifacts',
+    });
+
+    expect(spec.stories.map((story) => story.id)).toEqual(['7.1', '7.2', '7.10']);
+  });
+});
+
 describe('P2 — containment holds through a symlink inside the root', () => {
   it('refuses a symlinked epics file pointing outside the project', () => {
     // The root-level realpath check passes here: the root itself is fine, and

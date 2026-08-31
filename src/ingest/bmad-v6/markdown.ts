@@ -49,15 +49,22 @@ export function fenceMask(lines: readonly string[]): boolean[] {
 
     if (open === undefined) {
       if (marker !== undefined) {
-        open = marker[0];
+        open = marker;
         mask[index] = true;
       }
       continue;
     }
 
     mask[index] = true;
-    // Only a fence of the same kind closes; a ``` inside a ~~~ block is content.
-    if (marker !== undefined && marker[0] === open) open = undefined;
+    // A fence closes only if it is the same kind AND at least as long as the
+    // opener. Both halves matter: a ``` inside a ~~~ block is content, and so
+    // is a ``` inside a ```` block — which is exactly how one writes
+    // documentation containing a fenced example, as this repository does.
+    // Treating the short one as a close reopens the rest of the file to
+    // structural parsing, turning example headings back into real stories.
+    if (marker !== undefined && marker[0] === open[0] && marker.length >= open.length) {
+      open = undefined;
+    }
   }
 
   return mask;

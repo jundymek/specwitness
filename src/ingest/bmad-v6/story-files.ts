@@ -270,6 +270,11 @@ function readStoryFile(
       `${relativePath}:${heading.line}: file is named for story ${id} but its heading says ` +
         `story ${heading.id}`,
     );
+  } else if (heading?.malformed === true) {
+    problems.push(
+      `${relativePath}:${heading.line}: '# ${heading.title}' looks like a story heading but is ` +
+        `not '# Story <epic>.<story>: <title>', so it cannot be checked against the filename`,
+    );
   }
 
   return {
@@ -283,6 +288,9 @@ function readStoryFile(
   };
 }
 
+/** A heading asserting that a story lives here, however it is then spelled. */
+const CLAIMS_TO_BE_A_STORY = /^Story\b/i;
+
 interface StoryHeading {
   /** Title with the `Story <n>.<m>:` prefix removed when there was one. */
   readonly title: string;
@@ -290,6 +298,8 @@ interface StoryHeading {
   readonly line: number;
   /** The story id the heading claims, when it spells one out. */
   readonly id?: string;
+  /** True when the heading claims to be a story but does not parse as one. */
+  readonly malformed?: boolean;
 }
 
 /** The file's H1, with whatever it claims about which story it is. */
@@ -300,7 +310,19 @@ function findStoryHeading(doc: MarkdownDoc): StoryHeading | undefined {
     if (text === undefined) continue;
 
     const match = STORY_TITLE.exec(text);
-    if (match === null) return { title: text, line: index + 1 };
+    if (match === null) {
+      // `# Story 8.x: Copied` claims to be a story and is not one. Falling back
+      // to "ordinary title" would skip the filename cross-check and attribute
+      // this file's criteria to whatever the filename happens to say.
+      // `# Story 8.x: Copied` claims to be a story and is not one. Falling back
+      // to "ordinary title" would skip the filename cross-check and attribute
+      // this file's criteria to whatever the filename happens to say.
+      return {
+        title: text,
+        line: index + 1,
+        ...(CLAIMS_TO_BE_A_STORY.test(text) ? { malformed: true } : {}),
+      };
+    }
 
     return {
       title: (match[3] ?? '').trim(),
