@@ -83,6 +83,21 @@ describe('git-present (required)', () => {
     expect(result.status).toBe('fail');
     expect(result.detail).toMatch(/timed out/i);
   });
+
+  it('fails when git starts but exits non-zero — spawning is not working', async () => {
+    // A broken install, a missing shared library, a wrapper that errors: the
+    // binary exists, so the spawn succeeds, and reporting pass would send the
+    // user looking at their project instead of their machine.
+    const { ctx } = await testContext({
+      gitDefault: gitFails(127, 'dyld: Library not loaded: libcurl.4.dylib'),
+    });
+
+    const result = await gitPresentCheck.run(ctx);
+
+    expect(result.status).toBe('fail');
+    expect(result.detail).toContain('127');
+    expect(result.detail).toContain('libcurl');
+  });
 });
 
 describe('config-valid (required)', () => {
@@ -232,6 +247,24 @@ describe('commands-resolvable (required)', () => {
       nodeVersion: 'v22.20.0',
       pathVar: '',
       effects: fakeEffects({ executableFiles: [join(projectRoot, 'scripts', 'smoke.sh')] }),
+    });
+
+    expect((await commandsResolvableCheck.run(ctx)).status).toBe('pass');
+  });
+
+  it('treats an empty PATH entry as the working directory, as execvp does', async () => {
+    // `PATH=":/usr/bin"` resolves from the current directory on POSIX. Filtering
+    // the empty entry out would report a command as unresolvable that the Epic 3
+    // runner can execute — the one kind of wrong answer a diagnostic must never
+    // give.
+    const projectRoot = await makeProject(
+      [MINIMAL_CONFIG, 'setup:', '  install: local-tool --setup'].join('\n'),
+    );
+    const ctx = createDoctorContext({
+      projectRoot,
+      nodeVersion: 'v22.20.0',
+      pathVar: `:/usr/bin`,
+      effects: fakeEffects({ executableFiles: [join(projectRoot, 'local-tool')] }),
     });
 
     expect((await commandsResolvableCheck.run(ctx)).status).toBe('pass');

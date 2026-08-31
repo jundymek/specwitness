@@ -3,7 +3,7 @@ import type { Command } from 'commander';
 import { InfraError } from '../../domain/errors.js';
 import { BUILTIN_CHECKS } from '../doctor/checks/index.js';
 import { createDoctorContext } from '../doctor/context.js';
-import { createRegistry, type DoctorCheckReport } from '../doctor/registry.js';
+import { createRegistry, type DoctorCheck, type DoctorCheckReport } from '../doctor/registry.js';
 import { hasRequiredFailure, renderHuman, renderJson } from '../doctor/render.js';
 
 /**
@@ -27,15 +27,19 @@ import { hasRequiredFailure, renderHuman, renderJson } from '../doctor/render.js
  * STREAM DISCIPLINE (AC2). In `--json` mode stdout carries the JSON document and
  * nothing else, so `specwitness doctor --json | jq` works with no filtering; the
  * human rendering goes to stderr, where the `ERROR:`/`HINT:` pair also lands.
+ *
+ * @param checks the checks to run. Defaults to the built-ins; story 2.7 passes
+ *   its provider checks here — the production extension point, so that adding a
+ *   check requires editing neither this command nor any existing check.
  */
-export function register(program: Command): void {
+export function register(program: Command, checks: readonly DoctorCheck[] = BUILTIN_CHECKS): void {
   program
     .command('doctor')
     .description('check the runtime and project configuration')
     .option('--json', 'emit a machine-readable report on stdout (stable schema)')
     .action(async (options: { json?: boolean }) => {
       const ctx = createDoctorContext({ projectRoot: process.cwd() });
-      const registry = createRegistry(BUILTIN_CHECKS);
+      const registry = createRegistry(checks);
       const reports = await registry.runAll(ctx);
 
       // Doctor is not a run: it produces no run record and no run id, so it

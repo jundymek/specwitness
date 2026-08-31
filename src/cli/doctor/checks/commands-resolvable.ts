@@ -103,7 +103,15 @@ async function resolveToken(token: string, ctx: DoctorContext): Promise<Resoluti
     return { ok: false, reason: `no such file: ${path}` };
   }
 
-  const directories = ctx.pathVar.split(delimiter).filter((entry) => entry !== '');
+  // POSIX: an EMPTY PATH component means the current directory, and execvp —
+  // which is what Node's spawn ultimately uses — honours that. Dropping those
+  // entries would make doctor report a command as unresolvable that the runner
+  // can execute perfectly well, which is the one kind of wrong answer a
+  // diagnostic must not give. The project root stands in for the working
+  // directory, since that is where Epic 3 runs declared commands.
+  const rawEntries = ctx.pathVar === '' ? [] : ctx.pathVar.split(delimiter);
+  const directories = rawEntries.map((entry) => (entry === '' ? ctx.projectRoot : entry));
+
   for (const directory of directories) {
     if (await ctx.effects.isExecutableFile(join(directory, token))) {
       return { ok: true };

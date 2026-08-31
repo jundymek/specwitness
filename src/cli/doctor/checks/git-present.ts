@@ -24,6 +24,18 @@ export const gitPresentCheck: DoctorCheck = {
       return { status: 'fail', detail: failure };
     }
 
+    // A git that starts and then fails — a broken install, a missing shared
+    // library, a wrapper script that errors — is not a working git. Spawning
+    // successfully is not the same as working, and reporting `pass` here would
+    // send the user looking at their project instead of their machine.
+    if (outcome.exitCode !== 0) {
+      const reason = outcome.stderr.trim() || outcome.stdout.trim() || 'no output';
+      return {
+        status: 'fail',
+        detail: `git --version exited ${outcome.exitCode ?? 'without a code'}: ${reason}`,
+      };
+    }
+
     const version = outcome.stdout.trim();
     return { status: 'pass', detail: version === '' ? 'git is available' : version };
   },
