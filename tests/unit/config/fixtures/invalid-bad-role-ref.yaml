@@ -1,0 +1,8 @@
+version: 1
+project:
+  baseBranch: master
+ai:
+  providers:
+    claude: { adapter: claude-code-cli, mode: subscription }
+  roles:
+    contract-author: codex

@@ -1,0 +1,4 @@
+# The entire required surface: version + project.baseBranch.
+version: 1
+project:
+  baseBranch: master

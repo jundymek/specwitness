@@ -1,0 +1,6 @@
+version: 1
+project:
+  baseBranch: master
+gates:
+  - { id: lint, run: pnpm lint }
+  - { id: lint, run: pnpm lint --fix }
