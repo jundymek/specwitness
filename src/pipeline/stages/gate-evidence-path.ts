@@ -43,6 +43,19 @@
 export const GATE_EVIDENCE_DIR = 'evidence';
 
 /**
+ * Which captured stream a file holds.
+ *
+ * ONE FILE PER STREAM, never one file for both. `gateEvidence` carries a
+ * separate `stdoutFullPath` and `stderrFullPath` precisely because a single
+ * pointer shared by two truncation markers would have each stream claiming its
+ * own distinct content lives in the same file — worse than no pointer at all,
+ * because someone opens it and reads stderr as stdout. Interleaving the two
+ * into one combined file would reintroduce exactly that ambiguity, so this
+ * module makes the two names structurally distinct instead.
+ */
+export type GateOutputStream = 'stdout' | 'stderr';
+
+/**
  * Characters allowed to survive into a filename.
  *
  * Deliberately narrow — portable across APFS, ext4 and NTFS, and free of every
@@ -107,13 +120,14 @@ function slugify(gateId: string): string {
 }
 
 /**
- * The relative path of one gate's full-output file.
+ * The relative path of one gate's full captured output, for one stream.
  *
- *   `evidence/gate-00-lint.txt`
- *   `evidence/gate-03.txt`        (id normalised to nothing)
+ *   `evidence/gate-00-lint.stdout.txt`
+ *   `evidence/gate-03.stderr.txt`       (id normalised to nothing)
  *
  * @param gateId The gate's declared id, verbatim from the Project Config.
  * @param index  Its position in the declared gate list. Zero-based.
+ * @param stream Which captured stream this file holds.
  *
  * The index is not decoration. It does three things, and the third is the one
  * that is easy to miss: it keeps a run directory sorting in execution order for
@@ -122,11 +136,19 @@ function slugify(gateId: string): string {
  * are unique by schema (cross-field uniqueness enforced at load), so a unique
  * index makes the whole name unique by construction — no collision handling,
  * no counter, no second pass.
+ *
+ * Worst case length is bounded and small: `gate-` + index + `-` + a 64-char
+ * slug drawn only from single-byte characters + `.stdout` + `.txt`, well inside
+ * the 255-BYTE component limit on APFS and ext4 even for a three-digit index.
  */
-export function gateEvidenceRelativePath(gateId: string, index: number): string {
+export function gateEvidenceRelativePath(
+  gateId: string,
+  index: number,
+  stream: GateOutputStream,
+): string {
   const ordinal = String(index).padStart(INDEX_WIDTH, '0');
   const slug = slugify(gateId);
   const stem = slug === '' ? `gate-${ordinal}` : `gate-${ordinal}-${slug}`;
 
-  return `${GATE_EVIDENCE_DIR}/${stem}.txt`;
+  return `${GATE_EVIDENCE_DIR}/${stem}.${stream}.txt`;
 }
