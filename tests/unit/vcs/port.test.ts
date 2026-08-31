@@ -25,6 +25,12 @@
 
 import { describe, expect, it } from 'vitest';
 
+import {
+  MIN_GIT_VERSION,
+  compareVersions,
+  parseGitVersion,
+  revParseCommitArgs,
+} from '../../../src/infra/vcs.js';
 import type {
   CreatedWorktree,
   RefResolution,
@@ -149,6 +155,50 @@ describe('WorktreeEntry', () => {
 
     expect(entry.branch).toBeNull();
     expect(entry.detached).toBe(true);
+  });
+});
+
+describe('the declared minimum git version', () => {
+  it('covers every flag the adapter actually passes', () => {
+    // Guards a real slip caught during this story's security pass. The first
+    // draft declared 2.17 — counting only the worktree features — while
+    // `revParseCommitArgs` passes `--end-of-options`, which is git 2.24.
+    //
+    // That separator is an argument-injection guard rather than a
+    // convenience: `--head` is operator input and a git refname may begin with
+    // a dash, so without it a ref named `--output=…` would be parsed as an
+    // OPTION to `rev-parse` instead of as a revision. Dropping the guard to
+    // support releases from before 2019 would trade a security property for
+    // compatibility, so the floor moved instead.
+    //
+    // If a later change adds a newer flag, this is the line that moves with it.
+    expect(compareVersions(MIN_GIT_VERSION, '2.24.0')).toBeGreaterThanOrEqual(0);
+    expect(revParseCommitArgs('main')).toContain('--end-of-options');
+  });
+
+  it('passes the ref as one argv element, after the separator', () => {
+    // AD-3's actual mechanism: a ref is ONE argument, never interpolated into
+    // a command line. A shell would word-split this; execve does not.
+    const hostile = '--upload-pack=touch /tmp/pwned';
+    const args = revParseCommitArgs(hostile);
+
+    expect(args).toContain(`${hostile}^{commit}`);
+    expect(args.indexOf('--end-of-options')).toBeLessThan(
+      args.indexOf(`${hostile}^{commit}`),
+    );
+  });
+
+  it('orders versions numerically, ignoring vendor trailers', () => {
+    // Apple ships `2.50.1 (Apple Git-155)` and Windows appends `.windows.1`;
+    // neither changes which features are present. A lexical compare would read
+    // 2.9 as newer than 2.24, which is the whole reason this is not `<`.
+    expect(compareVersions('2.24.0', '2.9.0')).toBeGreaterThan(0);
+    expect(compareVersions('2.50.1', '2.24.0')).toBeGreaterThan(0);
+    expect(compareVersions('2.17.0', '2.24.0')).toBeLessThan(0);
+    expect(compareVersions('2.24', '2.24.0')).toBe(0);
+    expect(parseGitVersion('git version 2.50.1 (Apple Git-155)')).toBe('2.50.1');
+    expect(parseGitVersion('git version 2.39.5')).toBe('2.39.5');
+    expect(parseGitVersion('not a version banner')).toBeNull();
   });
 });
 

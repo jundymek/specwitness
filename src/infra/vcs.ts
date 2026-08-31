@@ -83,15 +83,27 @@ export const GIT_WORKTREE_TIMEOUT_MS = 300_000;
 /**
  * The oldest git whose behaviour this module actually relies on.
  *
- * Chosen from the features rather than from a round number: `git worktree
- * remove` (with `--force`) arrived in git 2.17. `worktree list --porcelain` is
- * 2.7 and `worktree add --detach` older still, so 2.17 is the binding
- * constraint. Verified present on the development machine (2.50.1, 2026-08-31)
- * — but PROBED at runtime rather than assumed, because "a wrong answer from a
- * git too old to support the flag" is exactly the failure this story cannot
- * have.
+ * Chosen from the features rather than from a round number, and it moved once
+ * during development, which is worth recording:
+ *
+ *   - `git worktree list --porcelain`   2.7
+ *   - `git worktree remove --force`     2.17
+ *   - **`--end-of-options`**            **2.24**  <- the binding constraint
+ *
+ * The first draft said 2.17, counting only the worktree features. But
+ * `revParseCommitArgs` passes `--end-of-options`, and that is an
+ * argument-injection guard rather than a convenience: `--head` is operator
+ * input, git refnames may begin with a dash, and without the separator a ref
+ * named `--output=…` would be parsed as an OPTION to `rev-parse` instead of as
+ * a revision. Dropping the guard to reach an older git would trade a security
+ * property for compatibility with releases from before 2019, so the floor
+ * moves instead.
+ *
+ * PROBED at runtime, never assumed — "a wrong answer from a git too old to
+ * support the flag" is precisely the failure this story cannot have. Verified
+ * present on the development machine (2.50.1, 2026-08-31).
  */
-export const MIN_GIT_VERSION = '2.17.0';
+export const MIN_GIT_VERSION = '2.24.0';
 
 /** Prefix of the `mkdtemp` container each worktree is created inside. */
 const CONTAINER_PREFIX = 'specwitness-worktree-';
@@ -256,6 +268,17 @@ interface GitCall {
   readonly args: readonly string[];
 }
 
+/**
+ * True for a git object id: 40 hex characters (SHA-1) or 64 (SHA-256).
+ *
+ * Both are current. `git init --object-format=sha256` produces a repository
+ * whose every object id is 64 characters, and it is not exotic enough to
+ * refuse — treating one as malformed would report an existing ref as missing.
+ */
+export function isObjectId(value: string): boolean {
+  return /^[0-9a-f]{40}$/.test(value) || /^[0-9a-f]{64}$/.test(value);
+}
+
 /** True when the path exists and is a directory. */
 async function isDirectory(path: string): Promise<boolean> {
   try {
@@ -391,9 +414,36 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     return call.result.stdout.trim();
   };
 
-  const listWorktreesIn = async (cwd: string): Promise<WorktreeEntry[]> => {
+  /**
+   * The registered worktrees, or `null` when git could not answer.
+   *
+   * The `null` is the whole point, and it replaces an earlier version that
+   * returned `[]` on failure. That was a genuine defect with a nasty shape: a
+   * timed-out or unspawnable `worktree list` made EVERY recorded worktree look
+   * already-absent, so `removeWorktreeAt` returned successfully and story 3.2's
+   * `clean` would report a clean sweep while the checkout and its registration
+   * were still there. An empty list and an unanswerable question are different
+   * facts, and only one of them means "nothing to reap".
+   *
+   * Callers decide what a `null` means for them: a refusal during root
+   * resolution, a thrown `InfraError` during removal. Leaking loudly beats
+   * leaking silently — a reaper that cannot see must say so.
+   */
+  const listWorktreesIn = async (cwd: string): Promise<WorktreeEntry[] | null> => {
     const stdout = await query(cwd, worktreeListArgs());
-    return stdout === null ? [] : parseWorktreeList(stdout);
+    return stdout === null ? null : parseWorktreeList(stdout);
+  };
+
+  /** `listWorktreesIn`, with an unanswerable question raised rather than hidden. */
+  const requireWorktrees = async (root: RepoRoot): Promise<WorktreeEntry[]> => {
+    const entries = await listWorktreesIn(root.worktreeRoot);
+    if (entries === null) {
+      throw new InfraError(
+        `could not list the worktrees of ${root.mainWorktreeRoot}`,
+        'git could not answer; check for a stale index.lock or a hung filesystem, then retry',
+      );
+    }
+    return entries;
   };
 
   const resolveRoot = async (request: RootRequest): Promise<RootResolution> => {
@@ -474,9 +524,13 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // its working tree — true by default, not true with `GIT_DIR` or a
     // separate git dir.
     const entries = await listWorktreesIn(cwd);
-    const first = entries[0];
+    const first = entries?.[0];
     if (first === undefined) {
-      return { outcome: 'not-a-repo', path: cwd, detail: 'git listed no worktrees' };
+      return {
+        outcome: 'not-a-repo',
+        path: cwd,
+        detail: entries === null ? 'git could not list worktrees' : 'git listed no worktrees',
+      };
     }
     const mainWorktreeRoot = await resolveReal(first.path);
 
@@ -509,7 +563,12 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
 
     if (call.result.exitCode === 0) {
       const sha = call.result.stdout.trim();
-      if (!/^[0-9a-f]{40}$/.test(sha)) {
+      // 40 hex for a SHA-1 repository, 64 for one created with
+      // `git init --object-format=sha256`. Accepting only 40 reported an
+      // existing ref in a perfectly valid sha256 repository as `not-found` —
+      // an infra misclassification dressed up as a product answer, which is
+      // the failure this codebase treats as first-order.
+      if (!isObjectId(sha)) {
         // `--verify` should make this unreachable. Refusing rather than
         // trusting it keeps a malformed answer from becoming a worktree at a
         // bogus revision — fail closed, then explain.
@@ -554,6 +613,32 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     }
 
     const stderr = call.result.stderr.trim();
+
+    // A non-zero `rev-parse` USUALLY means "no such ref" — but not always, and
+    // the difference matters because `not-found` carries a `git fetch` hint.
+    // A repository that became unreadable between root resolution and here (a
+    // deleted or corrupted `.git`, a permission change, an unmounted network
+    // filesystem) also exits non-zero, and telling that operator to run
+    // `git fetch` is a confidently wrong diagnosis — worse than a vague one,
+    // and exactly the mistake `isBinaryNotFound` was fixed twice to avoid.
+    //
+    // So the repository is re-probed rather than assumed. This is the only
+    // thing that makes `resolveRef`'s `not-a-repo` arm reachable; an arm no
+    // code path can produce is a sign the classification is wrong, not that
+    // the arm is spare.
+    const stillARepository = await query(root.worktreeRoot, ['rev-parse', '--is-inside-work-tree']);
+    if (stillARepository === null) {
+      return {
+        outcome: 'not-a-repo',
+        role,
+        ref,
+        detail:
+          stderr === ''
+            ? `${root.worktreeRoot} is no longer a readable git repository`
+            : stderr,
+      };
+    }
+
     return {
       outcome: 'not-found',
       role,
@@ -612,12 +697,12 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
         'install git and reopen your shell',
       );
     }
-    return await listWorktreesIn(root.worktreeRoot);
+    return await requireWorktrees(root);
   };
 
   /** True when a worktree at `path` is currently registered in the repository. */
   const isRegistered = async (root: RepoRoot, path: string): Promise<boolean> => {
-    const entries = await listWorktreesIn(root.worktreeRoot);
+    const entries = await requireWorktrees(root);
     const target = await resolveReal(path);
     for (const entry of entries) {
       if ((await resolveReal(entry.path)) === target) {
@@ -687,8 +772,21 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     );
     const unavailable = describeUnavailable(call);
     if (unavailable !== null || call.result.exitCode !== 0) {
+      // A FAILED add may still have REGISTERED. The clearest case is a timeout
+      // arriving after `git worktree add` wrote `.git/worktrees/<name>` but
+      // before it finished; deleting only the container would then leave a
+      // registration whose directory is gone, and the next `worktree add` at
+      // that path fails with a confusing error. So the registration is cleared
+      // first, and the container second.
+      //
+      // Best-effort, deliberately: if this cleanup also fails we still throw
+      // the ORIGINAL error, because it explains what actually went wrong.
+      // Nothing is lost by that — the path was recorded in the run manifest
+      // before any of this ran, so story 3.2's `clean` reaps it. That ordering
+      // is precisely what the manifest is for.
+      await removeWorktreeAt(root, worktreePath).catch(() => undefined);
       await rm(container, { recursive: true, force: true });
-      const detail = unavailable ?? call.result.stderr.trim() ?? '';
+      const detail = unavailable ?? call.result.stderr.trim();
       throw new InfraError(
         `could not create the verification worktree at ${worktreePath}: ${detail || 'git failed without output'}`,
         'check free space and permissions on the OS temp directory',

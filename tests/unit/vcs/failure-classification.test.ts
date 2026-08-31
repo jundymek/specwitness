@@ -1,0 +1,197 @@
+/**
+ * Story 3.1 — what happens when git itself misbehaves.
+ *
+ * Every case here was raised by the story's Codex review pass, and every one is
+ * a way for this adapter to report SUCCESS or the WRONG DIAGNOSIS while the
+ * environment is broken. That is the single failure class this project treats as
+ * first-order: an infra problem surfacing as a product answer.
+ *
+ * The `ProcessRunner` is faked rather than the filesystem sabotaged, because
+ * "git timed out" and "git could not be spawned" are not states a test can
+ * produce reliably against a real binary — and the merged port already gives
+ * them to us as ordinary values.
+ */
+
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { InfraError } from '../../../src/domain/errors.js';
+import type {
+  ProcessResult,
+  ProcessRunOptions,
+  ProcessRunner,
+} from '../../../src/domain/process-runner.js';
+import type { RepoRoot } from '../../../src/domain/vcs.js';
+import { SystemClock } from '../../../src/infra/clock.js';
+import { createProcessRunner } from '../../../src/infra/process-runner.js';
+import { createGitVcs } from '../../../src/infra/vcs.js';
+import { git, makeRepo, type FixtureRepo } from './fixture-repo.js';
+
+const scratches: string[] = [];
+const containers: string[] = [];
+
+afterEach(async () => {
+  await Promise.all([
+    ...scratches.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+    ...containers.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+  ]);
+});
+
+const real = createProcessRunner(new SystemClock());
+
+/**
+ * A runner that delegates to the real one, but rewrites the OUTCOME of calls
+ * matching `match` — so a command that genuinely succeeded can be presented to
+ * the adapter as having timed out.
+ *
+ * Rewriting the outcome rather than skipping the call is what makes the
+ * `worktree add` test meaningful: the worktree really does get registered, and
+ * then the adapter is told the command failed. That is exactly the shape of a
+ * timeout arriving after registration, which is the leak being tested for.
+ */
+function runnerFailing(
+  match: (options: ProcessRunOptions) => boolean,
+  outcome: ProcessResult['outcome'],
+): ProcessRunner {
+  return {
+    async run(options: ProcessRunOptions): Promise<ProcessResult> {
+      const result = await real.run(options);
+      if (!match(options)) {
+        return result;
+      }
+      return { ...result, outcome, exitCode: null, stderr: `simulated ${outcome}` };
+    },
+  };
+}
+
+const isSubcommand = (options: ProcessRunOptions, ...words: string[]): boolean =>
+  words.every((word, index) => options.args[index] === word);
+
+async function repoWithRoot(label: string): Promise<{ repo: FixtureRepo; root: RepoRoot }> {
+  const repo = await makeRepo(label);
+  scratches.push(repo.scratch);
+  const resolved = await createGitVcs({ runner: real }).resolveRoot({
+    explicitRoot: repo.path,
+    cwd: repo.path,
+  });
+  if (resolved.outcome !== 'resolved') {
+    throw new Error(`fixture root did not resolve: ${resolved.outcome}`);
+  }
+  return { repo, root: resolved.root };
+}
+
+describe('a failing `worktree list` must never read as "nothing is registered"', () => {
+  it('makes removeWorktreeAt throw instead of silently reporting success', async () => {
+    const { repo, root } = await repoWithRoot('fail-list-remove');
+    const created = await createGitVcs({ runner: real }).addWorktree(root, repo.headSha);
+    containers.push(created.container);
+
+    const blind = createGitVcs({
+      runner: runnerFailing((o) => isSubcommand(o, 'worktree', 'list'), 'timed-out'),
+    });
+
+    // The bug this guards: an empty list makes every recorded worktree look
+    // already-absent, so `clean` would report a clean sweep while the checkout
+    // and its registration are still there. Leaking loudly beats leaking
+    // silently — a reaper that cannot see is a reaper that must say so.
+    await expect(blind.removeWorktreeAt(root, created.path)).rejects.toThrow(InfraError);
+
+    // And the worktree really is still registered, so the refusal was correct.
+    const entries = await createGitVcs({ runner: real }).listWorktrees(root);
+    expect(entries.map((entry) => entry.path)).toContain(created.path);
+
+    await createGitVcs({ runner: real }).removeWorktree(root, created);
+  });
+
+  it('makes listWorktrees throw rather than return an empty list', async () => {
+    const { root } = await repoWithRoot('fail-list-plain');
+
+    const blind = createGitVcs({
+      runner: runnerFailing((o) => isSubcommand(o, 'worktree', 'list'), 'spawn-failed'),
+    });
+
+    await expect(blind.listWorktrees(root)).rejects.toThrow(InfraError);
+  });
+});
+
+describe('a `worktree add` that fails AFTER registering must not leave the registration', () => {
+  it('removes the registration as well as the container', async () => {
+    const { repo, root } = await repoWithRoot('fail-add-registered');
+
+    // The add genuinely runs and registers; the adapter is then told it timed
+    // out. Without cleanup this leaves a prunable `.git/worktrees/<name>` entry
+    // that survives deleting the checkout, and the NEXT add at that path fails
+    // with a confusing error.
+    const flaky = createGitVcs({
+      runner: runnerFailing((o) => isSubcommand(o, 'worktree', 'add'), 'timed-out'),
+    });
+
+    await expect(flaky.addWorktree(root, repo.headSha)).rejects.toThrow(InfraError);
+
+    const entries = await createGitVcs({ runner: real }).listWorktrees(root);
+    // Only the main worktree should remain.
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.path).toBe(repo.path);
+
+    const admin = await git(repo.path, 'worktree', 'list', '--porcelain');
+    expect(admin).not.toContain('specwitness-worktree-');
+  });
+});
+
+describe('a repository that breaks after root resolution is not a missing ref', () => {
+  it('reports not-a-repo rather than not-found with a "git fetch" hint', async () => {
+    const { repo, root } = await repoWithRoot('fail-corrupt-repo');
+
+    // Root resolution succeeded a moment ago; now the repository is gone.
+    // Classifying this as `not-found` would tell the operator to run
+    // `git fetch` to fix a repository that no longer exists — a confidently
+    // wrong diagnosis, which is worse than a vague one.
+    await rm(join(repo.path, '.git'), { recursive: true, force: true });
+
+    const result = await createGitVcs({ runner: real }).resolveRef(root, 'head', 'main');
+
+    expect(result.outcome).toBe('not-a-repo');
+  });
+
+  it('still reports a genuinely missing ref as not-found', async () => {
+    const { root } = await repoWithRoot('fail-still-not-found');
+
+    // The other half: the re-probe must not turn every missing ref into a
+    // repository error, or the `git fetch` hint would never be shown.
+    const result = await createGitVcs({ runner: real }).resolveRef(root, 'head', 'no-such-ref');
+
+    expect(result.outcome).toBe('not-found');
+  });
+});
+
+describe('SHA-256 repositories', () => {
+  it('resolves a ref whose object id is 64 hex characters', async () => {
+    const repo = await makeRepo('fail-sha256-base');
+    scratches.push(repo.scratch);
+
+    // git supports `--object-format=sha256`, where every object id is 64 hex
+    // chars. A 40-character validator reports an existing ref as not-found —
+    // an infra misclassification on a repository that is entirely valid.
+    const sha256Path = join(repo.scratch, 'sha256-repo');
+    await git(repo.scratch, 'init', '--quiet', '--object-format=sha256', '-b', 'main', 'sha256-repo');
+    await git(sha256Path, 'config', 'user.name', 'SpecWitness Fixture');
+    await git(sha256Path, 'config', 'user.email', 'fixture@specwitness.invalid');
+    await git(sha256Path, 'config', 'commit.gpgsign', 'false');
+    await git(sha256Path, 'commit', '--quiet', '--allow-empty', '-m', 'sha256 root');
+    const expected = (await git(sha256Path, 'rev-parse', 'HEAD')).trim();
+    expect(expected).toHaveLength(64);
+
+    const vcs = createGitVcs({ runner: real });
+    const resolved = await vcs.resolveRoot({ explicitRoot: sha256Path, cwd: sha256Path });
+    expect(resolved.outcome).toBe('resolved');
+    if (resolved.outcome !== 'resolved') return;
+
+    const result = await vcs.resolveRef(resolved.root, 'head', 'main');
+
+    expect(result.outcome).toBe('resolved');
+    if (result.outcome !== 'resolved') return;
+    expect(result.sha).toBe(expected);
+  });
+});
