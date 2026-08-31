@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: '2026-08-30'
-last_updated: '2026-08-31'
+last_updated: '08-31-2026 09:08'
 project: specwitness
 project_key: NOKEY
 tracking_system: file-system
@@ -98,3 +98,53 @@ development_status:
   7-2-first-real-epic-verification-repair-loop: backlog
   7-3-hypothesis-verdict-report: backlog
   epic-7-retrospective: optional
+action_items:
+  - id: "epic-1-retro-item-1-fix-github-actions-billing-restore-push"
+    epic: 1
+    action: "Fix GitHub Actions billing, restore push/pull_request triggers in ci.yml,
+      run the matrix once and record Linux + Node 22.12 results"
+    owner: "owner"
+    status: open
+    ref: "docs/findings/epic-1-retro-2026-08-31.md"
+  - id: "epic-1-retro-item-2-decide-kebab-case-ai-role-keys-contract"
+    epic: 1
+    action: "Decide kebab-case AI role keys (contract-author, plan-author, explainer)
+      before Epic 2 story 2.3 starts; default: keep"
+    owner: "owner"
+    status: open
+    ref: "docs/findings/epic-1-retro-2026-08-31.md"
+  - id: "epic-1-retro-item-3-amend-adr-003-wording-to-gatefailed-stri"
+    epic: 1
+    action: "Amend ADR-003 wording to gateFailed?: string carrying the failing gate
+      id"
+    owner: "owner"
+    status: open
+    ref: "docs/findings/epic-1-retro-2026-08-31.md"
+  - id: "epic-1-retro-item-4-harness-distinguish-review-finished-agen"
+    epic: 1
+    action: "Harness: distinguish review-finished-agent-idle from review-running and
+      poke the agent on the former"
+    owner: "harness maintainer"
+    status: open
+    ref: "docs/findings/epic-1-retro-2026-08-31.md"
+  - id: "epic-1-retro-item-5-harness-clear-rebase_pending-as-soon-as"
+    epic: 1
+    action: "Harness: clear rebase_pending as soon as the epic base is an ancestor
+      of the agent HEAD"
+    owner: "harness maintainer"
+    status: open
+    ref: "docs/findings/epic-1-retro-2026-08-31.md"
+  - id: "epic-1-retro-item-6-harness-dormant-file-marker-so-auto-revi"
+    epic: 1
+    action: "Harness: dormant-file marker so auto-review findings against non-executing
+      files are logged as caveats instead of re-blocking"
+    owner: "harness maintainer"
+    status: open
+    ref: "docs/findings/epic-1-retro-2026-08-31.md"
+  - id: "epic-1-retro-item-7-confirm-or-veto-the-four-concurred-judge"
+    epic: 1
+    action: "Confirm or veto the four concurred judgement calls: bare-invocation exit
+      64, ports-free warns, shell-syntax commands unresolvable, nested .specwitness/.gitignore"
+    owner: "owner"
+    status: open
+    ref: "docs/findings/epic-1-retro-2026-08-31.md"
