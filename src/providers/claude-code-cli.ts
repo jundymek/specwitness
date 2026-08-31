@@ -524,7 +524,11 @@ export function createClaudeCodeCliProvider(
       if (result.outcome === 'timed-out') {
         throw new ProviderError(
           `${BINARY} timed out after ${String(timeoutMs)}ms while drafting for role "${prompt.role}"`,
-          'raise the provider timeout, or try a smaller epic',
+          // Only remedies the operator can actually reach. The timeout is not a
+          // configuration surface — the provider config is {adapter, mode} — so
+          // telling them to raise it would be advice they cannot take, which is
+          // worse than no hint at all under the ERROR/HINT contract.
+          `try a smaller epic, or check that \`${BINARY}\` responds when run interactively`,
         );
       }
 
