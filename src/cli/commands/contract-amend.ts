@@ -139,6 +139,20 @@ export async function runAmend(options: AmendCommandOptions): Promise<void> {
   // field rather than crash. So integrity is a separate question, asked next.
   const current = parseContract(text, contractRelativePath(epicId));
 
+  // THE FILENAME IS NOT IN THE FINGERPRINT, so nothing inside the document can
+  // notice that it is misfiled. A valid frozen contract for another epic,
+  // copied or moved to this path, parses and verifies perfectly — and amending
+  // it would bump its version and rewrite it here, turning a misplaced file
+  // into an internally-valid authority over the wrong epic. The path and the
+  // content are two claims about the same thing, and only a caller that knows
+  // both can compare them.
+  if (current.spec.epic !== epicId) {
+    throw new IntegrityError(
+      `${contractRelativePath(epicId)} contains a contract for ${current.spec.epic}, not ${epicId}`,
+      'move it back to its own path — amending it here would make a misfiled contract authoritative for the wrong epic',
+    );
+  }
+
   // Integrity BEFORE the operator is asked for anything. A tampered contract is
   // reported the moment it is recognised, rather than after someone has typed a
   // paragraph of rationale for an operation that was never going to proceed.

@@ -346,6 +346,51 @@ describe('contract --amend', () => {
       expect(recorder.asked).toEqual([]);
     });
 
+    it('refuses a contract belonging to a different epic', async () => {
+      // A valid frozen contract for another epic, copied or moved to
+      // `.specwitness/contracts/epic-7.yaml`, parses and verifies perfectly:
+      // the FILENAME is not part of the fingerprint, so nothing in the document
+      // objects to being misfiled. Amending it would bump its version and
+      // rewrite it at this path, turning a misplaced file into an
+      // internally-valid authority over the wrong epic.
+      // Internally CONSISTENT: epic-3 with E3-* criterion ids, so story 2.2's
+      // schema is perfectly happy with it. The only thing wrong is where it
+      // lives, and no rule inside the document can see that.
+      const base = frozenContract();
+      const criterion = base.spec.criteria[0];
+      if (criterion === undefined) {
+        throw new Error('fixture is missing its criterion');
+      }
+      const foreign = freeze(
+        {
+          spec: {
+            epic: 'epic-3',
+            version: 1,
+            criteria: [{ ...criterion, id: 'E3-01' }],
+          },
+          meta: { ...base.meta, frozen: false, fingerprint: null, frozenAt: null },
+        },
+        new Date('2026-08-30T12:00:00.000Z'),
+      );
+      const { root, file } = await projectWith(foreign);
+      const before = await readFile(file, 'utf8');
+      const recorder = io({ answers: ['y'] });
+
+      await expect(
+        runAmend({
+          projectRoot: root,
+          epicId: EPIC,
+          reason: 'scope reduced',
+          now: AT,
+          io: recorder,
+        }),
+      ).rejects.toBeInstanceOf(IntegrityError);
+
+      expect(await readFile(file, 'utf8')).toBe(before);
+      // Refused before the operator was asked to approve anything.
+      expect(recorder.asked).toEqual([]);
+    });
+
     it('refuses when there is no contract to amend', async () => {
       const root = await mkdtemp(join(tmpdir(), 'specwitness-amend-none-'));
 
