@@ -4,7 +4,7 @@ SpecWitness is an independent verification gate for agentic software development
 
 ## Current phase
 
-**Planning complete; implementation NOT started.** No production code exists yet. Implementation will be executed by a multi-agent cohort (one agent per story, ~7 parallel, plus a supervisor) reading the artifacts below.
+**Epic 1 merged 2026-08-31 (`b5377b0`); Epic 2 stories authored, cohort not yet launched.** Production code exists under `src/` (CLI skeleton + exit-code table, domain core, config model, `init`, `doctor`, run storage) with its tests under `tests/`. Implementation is executed by a multi-agent cohort (one agent per story, ~7 parallel, plus a supervisor) reading the artifacts below; per-epic retrospectives live in `docs/findings/`. Epic 2 story specs are in `docs/implementation-artifacts/epic-2-verification-contracts/`.
 
 ## Authoritative documents (read in this order)
 
