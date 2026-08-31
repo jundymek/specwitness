@@ -574,13 +574,16 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // its working tree — true by default, not true with `GIT_DIR` or a
     // separate git dir.
     const entries = await listWorktreesIn(cwd);
-    const first = entries?.[0];
+    if (entries === null) {
+      // Same rule as every other probe in this function, and it is stated once
+      // more here because this was the last place it was still wrong: a git
+      // that could not run says nothing about the directory. Only git ANSWERING
+      // means "no repository here".
+      return { outcome: 'git-unavailable', path: cwd, detail: 'git could not list worktrees' };
+    }
+    const first = entries[0];
     if (first === undefined) {
-      return {
-        outcome: 'not-a-repo',
-        path: cwd,
-        detail: entries === null ? 'git could not list worktrees' : 'git listed no worktrees',
-      };
+      return { outcome: 'not-a-repo', path: cwd, detail: 'git listed no worktrees' };
     }
     const mainWorktreeRoot = await resolveReal(first.path);
 

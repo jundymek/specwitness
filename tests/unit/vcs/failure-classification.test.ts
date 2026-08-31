@@ -185,6 +185,23 @@ describe('an operational git failure is not "this is not a repository"', () => {
     expect(result.outcome).toBe('git-unavailable');
   });
 
+  it('reports git-unavailable when the worktree listing fails during root resolution', async () => {
+    const repo = await makeRepo('fail-root-list');
+    scratches.push(repo.scratch);
+
+    // The last probe in `resolveRoot`, and the last place this rule was still
+    // wrong. `worktree list` is how the MAIN worktree is found; a git that
+    // cannot answer it has told us nothing about whether the directory is a
+    // repository.
+    const hanging = createGitVcs({
+      runner: runnerFailing((o) => isSubcommand(o, 'worktree', 'list'), 'timed-out'),
+    });
+
+    const result = await hanging.resolveRoot({ explicitRoot: repo.path, cwd: repo.path });
+
+    expect(result.outcome).toBe('git-unavailable');
+  });
+
   it('still reports a genuine non-repository as not-a-repo', async () => {
     const scratch = await scratchDir('fail-root-genuine');
     scratches.push(scratch);
