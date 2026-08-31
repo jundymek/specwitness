@@ -57,7 +57,12 @@ export function stripCodeFence(raw: string): string {
   const backticks = opening[1];
   const body = trimmed.slice(opening[0].length);
 
-  const closing = new RegExp(`(?:^|\\r?\\n)${backticks}\`*[ \\t]*$`).exec(body);
+  // Leading horizontal whitespace before the closing fence is allowed, because
+  // the `trim()` above already accepted an indented OPENING fence. Refusing the
+  // matching closing marker would half-recognise a uniformly indented block and
+  // hand the gate a still-wrapped payload it would then reject — a wrapped
+  // payload is exactly what this function exists to prevent.
+  const closing = new RegExp(`(?:^|\\r?\\n)[ \\t]*${backticks}\`*[ \\t]*$`).exec(body);
   if (closing === null) {
     // Unterminated: see the note above. Raw, not repaired.
     return raw;

@@ -53,6 +53,18 @@ describe('stripCodeFence', () => {
     it('handles an empty fenced payload', () => {
       expect(stripCodeFence('```json\n\n```')).toBe('');
     });
+
+    it('strips a uniformly indented fence, closing marker included', () => {
+      // CommonMark permits up to three spaces of indentation before a fence.
+      // `trim()` already accepts an indented OPENING fence, so refusing the
+      // matching closing one would half-recognise the block and hand the gate
+      // a still-wrapped payload it would then reject. Symmetry, not leniency.
+      expect(stripCodeFence('  ```json\n  {"a":1}\n  ```')).toBe('  {"a":1}');
+    });
+
+    it('strips an indented bare fence', () => {
+      expect(stripCodeFence(' ```\n a: 1\n ```')).toBe(' a: 1');
+    });
   });
 
   describe('returns input unchanged when it is not a fenced payload', () => {
