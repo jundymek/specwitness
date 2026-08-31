@@ -54,6 +54,41 @@ async function project(config?: string, options: { git?: boolean } = {}): Promis
   return root;
 }
 
+interface HeldPort {
+  readonly port: number;
+  close(): Promise<void>;
+}
+
+/**
+ * Occupies an ephemeral localhost port, or resolves `undefined` where the
+ * sandbox forbids listening. Both the success and the failure path settle:
+ * a `listen` that rejects with no error handler surfaces as an unhandled
+ * exception and a 30s test timeout, which is how this was found.
+ */
+async function tryListen(): Promise<HeldPort | undefined> {
+  const server = createServer();
+
+  return await new Promise<HeldPort | undefined>((resolve) => {
+    server.once('error', () => {
+      server.close();
+      resolve(undefined);
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (typeof address !== 'object' || address === null) {
+        server.close();
+        resolve(undefined);
+        return;
+      }
+      resolve({
+        port: address.port,
+        close: () => new Promise<void>((done) => server.close(() => done())),
+      });
+    });
+  });
+}
+
 async function doctor(cwd: string, args: string[] = []) {
   const result = await execa(process.execPath, [CLI, 'doctor', ...args], {
     cwd,
@@ -85,13 +120,28 @@ describe('doctor on a healthy project', () => {
     }
   });
 
-  it('stays at 0 when only optional checks warn', async () => {
-    // Playwright is absent from the fixture and the declared port is held by
-    // this test: two warnings, and doctor must still report success.
-    const held = createServer();
-    await new Promise<void>((resolve) => held.listen(0, '127.0.0.1', resolve));
-    const address = held.address();
-    const port = typeof address === 'object' && address !== null ? address.port : 0;
+  it('stays at 0 when an optional check warns', async () => {
+    // The fixture has no @playwright/test, so playwright-capability warns.
+    // An optional check must never move the exit code — that rule is what keeps
+    // a missing agent CLI (story 2.7) or an unprovisioned browser non-fatal.
+    const root = await project(HEALTHY);
+
+    const { exitCode, stdout } = await doctor(root);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toMatch(/⚠ playwright-capability/);
+  });
+
+  it('warns, and still exits 0, when a declared port is occupied', async (context) => {
+    // Binding a listener is not permitted in every sandbox (a Codex review run
+    // returned EPERM on 127.0.0.1). Skip rather than fail there: the product
+    // path is covered regardless, because `probePort` reports any bind failure
+    // — EPERM included — as an occupied port, which is a warn.
+    const held = await tryListen();
+    if (held === undefined) {
+      context.skip();
+      return;
+    }
 
     try {
       const root = await project(
@@ -102,9 +152,9 @@ describe('doctor on a healthy project', () => {
           'services:',
           '  web:',
           '    run: /bin/sh',
-          `    port: ${port}`,
+          `    port: ${held.port}`,
           '    ready:',
-          `      url: http://127.0.0.1:${port}/health`,
+          `      url: http://127.0.0.1:${held.port}/health`,
           '',
         ].join('\n'),
       );
@@ -112,10 +162,10 @@ describe('doctor on a healthy project', () => {
       const { exitCode, stdout } = await doctor(root);
 
       expect(exitCode).toBe(0);
-      expect(stdout).toContain(String(port));
-      expect(stdout).toMatch(/⚠/);
+      expect(stdout).toContain(String(held.port));
+      expect(stdout).toMatch(/⚠ ports-free/);
     } finally {
-      await new Promise<void>((resolve) => held.close(() => resolve()));
+      await held.close();
     }
   });
 });

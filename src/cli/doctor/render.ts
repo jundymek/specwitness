@@ -63,9 +63,10 @@ export function renderHuman(reports: readonly DoctorCheckReport[]): string {
   const width = Math.max(0, ...reports.map((report) => report.id.length));
 
   const lines = reports.map((report) => {
-    // An optional check's red line is marked, so nobody reads a warning as the
-    // reason their pipeline stopped — it never is.
-    const optional = report.required ? '' : ' (optional)';
+    // Mark an optional check only when it has something to say: a passing line
+    // needs no caveat, while a warn or fail line must not be read as the reason
+    // a pipeline stopped — an optional check never is.
+    const optional = report.required || report.status === 'pass' ? '' : ' (optional)';
     return `${GLYPHS[report.status]} ${report.id.padEnd(width)}  ${report.detail}${optional}`;
   });
 
