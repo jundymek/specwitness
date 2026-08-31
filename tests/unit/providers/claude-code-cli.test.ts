@@ -117,6 +117,33 @@ describe('probeClaudeCapability', () => {
     expect(capability.reason).toMatch(/rejected/i);
   });
 
+  it('rejects a binary that accepts the flags but does not emit JSON', async () => {
+    // The homonym case the spec warns about, in its most convincing form: a
+    // `claude` on PATH that swallows the flags and exits 0 with plain text. If
+    // exit code alone were the proof, doctor would report a healthy install
+    // while every generation failed later in envelope parsing.
+    const { runner } = runnerReturning(VERSION_OK, ok('Hello! I am not Claude Code.\n'));
+
+    const capability = await probeClaudeCapability(runner);
+    expect(capability.found).toBe(true);
+    expect(capability.jsonOutputFormat).toBe(false);
+    expect(capability.nonInteractive).toBe(false);
+    expect(capability.reason).toMatch(/json/i);
+  });
+
+  it('accepts a JSON object whose fields differ, leaving shape drift to generation', async () => {
+    // Capability is "the CLI honours --output-format json", not "the envelope
+    // has the fields I expect today". A drifted shape is a real invocation's
+    // problem, where the error can name the missing field precisely; failing the
+    // capability probe for it would report a version mismatch as a broken
+    // install.
+    const { runner } = runnerReturning(VERSION_OK, ok(JSON.stringify({ unexpected: 'shape' })));
+
+    const capability = await probeClaudeCapability(runner);
+    expect(capability.jsonOutputFormat).toBe(true);
+    expect(capability.nonInteractive).toBe(true);
+  });
+
   it('treats a logged-out CLI as CAPABLE — auth is not a capability', async () => {
     // The probe exercises a real invocation, so it fails for reasons that have
     // nothing to do with flag support: logged out, rate limited, quota spent.

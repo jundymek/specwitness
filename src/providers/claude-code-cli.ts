@@ -165,6 +165,16 @@ async function probeOnce(
   });
 }
 
+/** Did this output parse as a JSON object? The form only — never the fields. */
+function isJsonObject(stdout: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Does this stderr read like the CLI refusing the ARGUMENTS, as opposed to
  * refusing the work?
@@ -289,6 +299,31 @@ export function probeClaudeCapability(
         reason:
           `${BINARY} (${versionText}) rejected \`${BASELINE_ARGS.join(' ')}\` — ` +
           'the CLI is too old, or is not Claude Code',
+      };
+    }
+
+    // Exit 0 is not proof that `--output-format json` was honoured. A homonym
+    // `claude` — a shell alias, an unrelated script — can swallow the flags and
+    // print prose successfully, and reporting that as capable would have doctor
+    // declare a healthy install while every generation failed later in envelope
+    // parsing. So the probe requires output that actually parses as a JSON
+    // object.
+    //
+    // Only the FORM is checked here, not the fields. Capability means "the CLI
+    // honours the flag"; whether the envelope still carries the field this
+    // adapter reads is a question for a real invocation, where the error can
+    // name the missing field. Failing the capability probe on field drift would
+    // report a version mismatch as a broken installation.
+    if (capable.exitCode === 0 && !isJsonObject(capable.stdout)) {
+      return {
+        binary: BINARY,
+        found: true,
+        version: versionText,
+        nonInteractive: false,
+        jsonOutputFormat: false,
+        reason:
+          `${BINARY} (${versionText}) accepted \`${BASELINE_ARGS.join(' ')}\` but did not return ` +
+          'JSON — the binary on PATH may not be Claude Code',
       };
     }
 
