@@ -132,7 +132,7 @@ describe('billing-risk-env check', () => {
     const result = await billingRiskEnvCheck.run(ctx);
 
     expect(result.status).toBe('pass');
-    expect(result.detail).toContain('no AI providers are configured');
+    expect(result.detail).toContain('no AI provider is assigned to a role');
   });
 
   it('does not warn about a key no configured provider could ever spend', async () => {
@@ -172,6 +172,34 @@ describe('billing-risk-env check', () => {
     const { ctx } = await testContext({
       config: configWith('fake'),
       billingRiskEnv: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'],
+    });
+
+    const result = await billingRiskEnvCheck.run(ctx);
+
+    expect(result.status).toBe('pass');
+    expect(result.detail).not.toContain('could bill');
+  });
+
+  it('does not warn about a provider no role can reach', async () => {
+    // A provider declared under `ai.providers` that no role references cannot
+    // be invoked: `resolveRoleProvider` is the only way one is selected. Unused
+    // provider blocks are common in real configs — kept around after a switch,
+    // or added ahead of use — and warning about a key SpecWitness will never
+    // spend through them is the same false alarm as warning about the wrong
+    // vendor's key.
+    const { ctx } = await testContext({
+      config: [
+        'version: 1',
+        'project:',
+        '  baseBranch: master',
+        'ai:',
+        '  providers:',
+        '    codex:',
+        '      adapter: codex-cli',
+        '      mode: chatgpt',
+        '',
+      ].join('\n'),
+      billingRiskEnv: ['OPENAI_API_KEY'],
     });
 
     const result = await billingRiskEnvCheck.run(ctx);

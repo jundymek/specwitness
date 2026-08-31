@@ -195,6 +195,17 @@ function assertCoherentOptions(options: ContractOptions): void {
     );
   }
 
+  // Same rule as `--json` above, and for the same reason: an invocation shaped
+  // like an amendment must never generate a contract by surprise.
+  // `contract 7 --reason "..."` reads like the amend flow, and silently
+  // ignoring the flag would write a fresh draft over the operator's intent.
+  if (options.reason !== undefined && options.amend !== true) {
+    throw new UsageError(
+      '--reason only applies to --amend, and on its own it would silently generate a contract',
+      `run 'specwitness contract <epic> --amend' in a terminal to amend a frozen contract`,
+    );
+  }
+
   if (options.force === true && requested.length > 0) {
     throw new UsageError(
       `--force does not apply to ${requested[0] as string}`,

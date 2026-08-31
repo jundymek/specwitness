@@ -24,6 +24,7 @@
  * sentence, same fact — deliberate, not a duplicate.
  */
 
+import { AI_ROLES, resolveRoleProvider } from '../../../config/index.js';
 import type { DoctorCheck } from '../registry.js';
 
 /**
@@ -81,15 +82,30 @@ export const billingRiskEnvCheck: DoctorCheck = {
       return { status: 'warn', detail: warnAbout(present) };
     }
 
-    const providers = Object.values(ctx.config.value.ai.providers ?? {});
-    if (providers.length === 0) {
+    // REACHABLE, not merely declared. A provider block that no role references
+    // can never be invoked — `resolveRoleProvider` is the only way one is
+    // selected — and unused provider blocks are common in real configs, kept
+    // after a switch or added ahead of use. Warning about a key SpecWitness
+    // will never spend through them is the same false alarm as warning about
+    // the wrong vendor's key, and it is why this reads roles rather than
+    // `ai.providers`.
+    const config = ctx.config.value;
+    const adapters: string[] = [];
+    for (const role of AI_ROLES) {
+      const resolved = resolveRoleProvider(config, role);
+      if (resolved !== undefined) {
+        adapters.push(resolved.adapter);
+      }
+    }
+
+    if (adapters.length === 0) {
       return {
         status: 'pass',
-        detail: `${present.join(', ')} set, but no AI providers are configured — SpecWitness will not call one`,
+        detail: `${present.join(', ')} set, but no AI provider is assigned to a role — SpecWitness will not call one`,
       };
     }
 
-    const reachable = spendable(providers.map((provider) => provider.adapter));
+    const reachable = spendable(adapters);
     const atRisk = present.filter((name) => reachable.has(name));
 
     if (atRisk.length === 0) {

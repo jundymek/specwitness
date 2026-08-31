@@ -410,6 +410,30 @@ describe('contract --amend', () => {
       }
     });
 
+    it('refuses --reason without --amend rather than silently ignoring it', async () => {
+      // Story 2.6 refuses `--json` without `--status` for exactly this reason:
+      // "an invocation shaped like a question must never mutate the project by
+      // surprise". `contract 7 --reason "..."` reads like an amendment and
+      // would otherwise GENERATE A DRAFT while the operator believed they were
+      // amending a frozen contract — the same harm, through my option.
+      const fixedClock = { now: () => AT };
+
+      await expect(
+        runContract('7', { reason: 'scope reduced' }, fixedClock),
+      ).rejects.toBeInstanceOf(UsageError);
+    });
+
+    it('refuses --reason alongside --status or --freeze', async () => {
+      const fixedClock = { now: () => AT };
+
+      await expect(
+        runContract('7', { status: true, reason: 'x' }, fixedClock),
+      ).rejects.toBeInstanceOf(UsageError);
+      await expect(
+        runContract('7', { freeze: true, reason: 'x' }, fixedClock),
+      ).rejects.toBeInstanceOf(UsageError);
+    });
+
     it('refuses --force alongside --amend instead of honouring it', async () => {
       const fixedClock = { now: () => AT };
       // The bypass an agent would actually reach for. `--force` is the only
