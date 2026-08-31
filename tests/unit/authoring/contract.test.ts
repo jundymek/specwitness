@@ -6,6 +6,7 @@ import { KINDS, SEVERITIES, VERIFIABILITIES } from '../../../src/domain/contract
 import type { EpicSpec } from '../../../src/domain/epic-spec.js';
 import { ProviderError } from '../../../src/domain/errors.js';
 import { fingerprint } from '../../../src/schemas/canonical.js';
+import { CriterionSchema } from '../../../src/schemas/contract.js';
 import { FixedClock } from '../../fakes/ports.js';
 
 /**
@@ -407,5 +408,74 @@ describe('DRAFT_RESPONSE_SCHEMA', () => {
 
   it('rejects an empty criteria array at the schema, not downstream', () => {
     expect(DRAFT_RESPONSE_SCHEMA.safeParse({ criteria: [] }).success).toBe(false);
+  });
+});
+
+describe('DRAFT_RESPONSE_SCHEMA agrees with the persisted contract schema', () => {
+  /**
+   * The draft schema and `CriterionSchema` must accept exactly the same
+   * statements. If the draft schema is the more permissive of the two, a
+   * provider response passes the gate, the contract is WRITTEN, and every
+   * later `--status` or `--freeze` fails to parse the file this command just
+   * produced — an unreadable artifact with no explanation available to the
+   * operator, which also defeats the "a failed generation writes nothing"
+   * guarantee by writing something worse than nothing.
+   *
+   * Found by Codex review: the draft schema used `.min(1)` where the persisted
+   * schema uses a trimmed-non-empty refinement, so `"   "` was accepted here
+   * and rejected there.
+   */
+  const STATEMENTS = [
+    'A perfectly ordinary statement.',
+    '',
+    '   ',
+    '\t\n ',
+    ' leading and trailing ',
+    'x',
+    '—',
+  ];
+
+  it.each(STATEMENTS)('agrees on %j', (statement) => {
+    const draftAccepts = DRAFT_RESPONSE_SCHEMA.safeParse({
+      criteria: [{ statement, kind: 'behavioral', severity: 'normal', verifiability: 'automated' }],
+    }).success;
+
+    const persistedAccepts = CriterionSchema.safeParse({
+      id: 'E7-01',
+      statement,
+      kind: 'behavioral',
+      severity: 'normal',
+      verifiability: 'automated',
+    }).success;
+
+    expect(draftAccepts).toBe(persistedAccepts);
+  });
+});
+
+describe('generateDraft — a whitespace-only statement never reaches the file', () => {
+  it('exhausts the gate rather than writing an unreadable contract', async () => {
+    const blank = draft({
+      statement: '   ',
+      kind: 'behavioral',
+      severity: 'normal',
+      verifiability: 'automated',
+    });
+
+    await expect(generate(scripted(blank))).rejects.toThrow(ProviderError);
+  });
+
+  it('retries and accepts a valid statement after a whitespace-only one', async () => {
+    const blank = draft({
+      statement: '  ',
+      kind: 'behavioral',
+      severity: 'normal',
+      verifiability: 'automated',
+    });
+
+    const { contract } = await generate(scripted(blank, ONE_CRITERION));
+
+    expect(contract.spec.criteria[0]?.statement).toBe(
+      'The command prints the fingerprint on stdout.',
+    );
   });
 });

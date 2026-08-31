@@ -298,3 +298,63 @@ describe('runContract — project not initialised', () => {
     await expect(readdir(join(bare, '.specwitness'))).rejects.toThrow();
   });
 });
+
+describe('runContract — option combinations are checked, not silently resolved', () => {
+  /**
+   * Found by Codex review. Each of these used to "work" by quietly ignoring
+   * part of what the operator asked for, and the first is the dangerous one:
+   * an invocation that reads like a query performed a MUTATION.
+   */
+  it('refuses --json without --status instead of generating a draft', async () => {
+    chdir(await project());
+
+    await expect(runContract('7', { json: true }, clock())).rejects.toThrow(UsageError);
+    // The point of the refusal: nothing was written.
+    expect(await readdir(join(cwd, '.specwitness', 'contracts'))).toEqual([]);
+  });
+
+  it('refuses --status together with --freeze rather than silently picking one', async () => {
+    chdir(await project());
+
+    await expect(runContract('7', { status: true, freeze: true }, clock())).rejects.toThrow(
+      UsageError,
+    );
+  });
+
+  it('refuses --force with --status, which would silently ignore it', async () => {
+    chdir(await project());
+
+    await expect(runContract('7', { status: true, force: true }, clock())).rejects.toThrow(
+      UsageError,
+    );
+  });
+
+  /**
+   * --force with --freeze is the most misleading of the set: an operator
+   * freezing a tampered contract may well believe --force will override the
+   * refusal. Silently ignoring it would leave them thinking they forced
+   * something. It never overrides a frozen or tampered contract (ADR-005).
+   */
+  it('refuses --force with --freeze rather than letting it look effective', async () => {
+    chdir(await project());
+
+    await expect(runContract('7', { freeze: true, force: true }, clock())).rejects.toThrow(
+      UsageError,
+    );
+  });
+
+  it('still accepts the three documented invocations', async () => {
+    chdir(await project());
+
+    await expect(runContract('7', {}, clock())).resolves.toBeUndefined();
+    await expect(runContract('7', { freeze: true }, clock())).resolves.toBeUndefined();
+    await expect(runContract('7', { status: true, json: true }, clock())).resolves.toBeUndefined();
+  });
+
+  it('accepts --force with plain generation, which is where it applies', async () => {
+    chdir(await project());
+    await runContract('7', {}, clock());
+
+    await expect(runContract('7', { force: true }, clock())).resolves.toBeUndefined();
+  });
+});

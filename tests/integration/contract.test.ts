@@ -406,3 +406,36 @@ describe('contract <epic> — a tampered contract', () => {
     expect(result.stderr).toContain('ERROR:');
   });
 });
+
+describe('contract <epic> — incoherent option combinations are refused', () => {
+  /**
+   * Found by Codex review. `--json` reads like a query; before this guard it
+   * GENERATED AND WROTE a draft while printing human text. An invocation shaped
+   * like a question must never mutate the project by surprise.
+   */
+  it('refuses --json without --status, writing nothing, exit 64', async () => {
+    const root = await project();
+
+    const result = await run(root, 'contract', '7', '--json');
+
+    expect(result.exitCode).toBe(64);
+    expect(await readdir(join(root, '.specwitness', 'contracts'))).toEqual([]);
+  });
+
+  it('refuses --status together with --freeze rather than picking one', async () => {
+    const root = await project();
+
+    const result = await run(root, 'contract', '7', '--status', '--freeze');
+
+    expect(result.exitCode).toBe(64);
+    expect(result.stderr).toContain('HINT:');
+  });
+
+  it('refuses --force where it does not apply', async () => {
+    const root = await project();
+
+    const result = await run(root, 'contract', '7', '--freeze', '--force');
+
+    expect(result.exitCode).toBe(64);
+  });
+});

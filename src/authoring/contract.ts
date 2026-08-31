@@ -65,7 +65,17 @@ export const DRAFT_RESPONSE_SCHEMA = z.object({
   criteria: z
     .array(
       z.object({
-        statement: z.string().min(1),
+        // Trimmed-non-empty, matching `CriterionSchema` in
+        // `src/schemas/contract.ts` EXACTLY. `.min(1)` would accept "   ",
+        // which the persisted schema rejects — so the gate would succeed, the
+        // contract would be WRITTEN, and every later `--status` or `--freeze`
+        // would fail to parse the file this command had just produced. A
+        // divergence here does not merely reject a good draft; it persists an
+        // unreadable one, which is worse than writing nothing at all. A test
+        // asserts the two schemas agree statement for statement.
+        statement: z.string().refine((value) => value.trim().length > 0, {
+          message: 'must not be empty or whitespace-only',
+        }),
         kind: z.enum(KINDS),
         severity: z.enum(SEVERITIES),
         verifiability: z.enum(VERIFIABILITIES),

@@ -57,7 +57,7 @@ import { generateDraft } from '../../authoring/contract.js';
 import { contractStatusState, type LoadedContract } from '../../authoring/verifiable.js';
 import { loadConfig, resolveRoleProvider } from '../../config/index.js';
 import type { Contract } from '../../domain/contract.js';
-import { ConfigError, IntegrityError } from '../../domain/errors.js';
+import { ConfigError, IntegrityError, UsageError } from '../../domain/errors.js';
 import { normalizeEpicId } from '../../domain/ids.js';
 import type { Clock } from '../../domain/ports.js';
 import { ingestEpic } from '../../ingest/index.js';
@@ -111,6 +111,8 @@ export async function runContract(
   options: ContractOptions,
   clock: Clock,
 ): Promise<void> {
+  assertCoherentOptions(options);
+
   // Normalise FIRST: a malformed epic id is a usage error (exit 64) and must be
   // reported as one before any filesystem or config work makes it look like an
   // environment problem.
@@ -130,6 +132,55 @@ export async function runContract(
   }
 
   await generateContract(projectRoot, epic, options, clock);
+}
+
+/**
+ * Rejects invocations that ask for two things, or for something this command
+ * cannot do, INSTEAD of silently honouring part of the request.
+ *
+ * The dangerous case, and the reason this exists: `contract 7 --json` reads
+ * like a query, and without this check it GENERATED AND WROTE a draft while
+ * printing human text. An invocation shaped like a question must never mutate
+ * the project by surprise.
+ *
+ * `--force` is refused alongside `--status`/`--freeze` for a related reason.
+ * It applies only to regeneration over an existing draft, and it NEVER
+ * overrides a frozen or tampered contract (ADR-005). Someone typing
+ * `--freeze --force` at a tampered contract plausibly believes it will override
+ * the refusal; silently ignoring the flag would leave them believing they
+ * forced something. Refusing says so.
+ *
+ * MODES ARE MUTUALLY EXCLUSIVE and story 2.7's `--amend` joins this list — one
+ * entry in `MODES` and one line in the `--force` check, nothing restructured.
+ */
+function assertCoherentOptions(options: ContractOptions): void {
+  const MODES: readonly (readonly [string, boolean])[] = [
+    ['--status', options.status === true],
+    ['--freeze', options.freeze === true],
+  ];
+
+  const requested = MODES.filter(([, on]) => on).map(([name]) => name);
+
+  if (requested.length > 1) {
+    throw new UsageError(
+      `${requested.join(' and ')} ask for different things and cannot be combined`,
+      'run them as separate commands — the usual sequence is generate, review, --freeze, then --status',
+    );
+  }
+
+  if (options.json === true && options.status !== true) {
+    throw new UsageError(
+      '--json only applies to --status, and on its own it would silently generate a contract',
+      `run 'specwitness contract <epic> --status --json' to read the state, or drop --json to generate a draft`,
+    );
+  }
+
+  if (options.force === true && requested.length > 0) {
+    throw new UsageError(
+      `--force does not apply to ${requested[0] as string}`,
+      '--force only replaces an existing DRAFT during generation; it never overrides a frozen contract, which is what --amend is for',
+    );
+  }
 }
 
 /** Reads and parses the contract file, distinguishing absence from failure. */
