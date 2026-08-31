@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { stripCodeFence } from '../../../src/providers/text.js';
+import { stripCodeFence, withContextFiles } from '../../../src/providers/text.js';
 
 /**
  * `stripCodeFence` is the ONE fence stripper both CLI adapters share (story 2.4
@@ -118,5 +118,49 @@ describe('stripCodeFence', () => {
         expect(() => stripCodeFence(input)).not.toThrow();
       }
     });
+  });
+});
+
+/**
+ * Added by story 2.5 with story 2.4's written agreement, when the context-file
+ * formatting moved here out of a private copy in each adapter.
+ *
+ * These are the format's HOME. Both adapter suites also assert it literally at
+ * their own boundary, so a change here goes red in three places rather than
+ * silently producing two differently-shaped prompts for the same envelope.
+ */
+describe('withContextFiles', () => {
+  it('appends the paths as a delimited list', () => {
+    expect(withContextFiles('draft it', ['docs/a.md', 'docs/b.md'])).toBe(
+      'draft it\n\nContext files:\n- docs/a.md\n- docs/b.md',
+    );
+  });
+
+  it('returns the prompt unchanged when there are no context files', () => {
+    // Both shapes, because the gate may omit the field or send an empty array,
+    // and neither should produce a heading with nothing under it.
+    expect(withContextFiles('draft it')).toBe('draft it');
+    expect(withContextFiles('draft it', [])).toBe('draft it');
+  });
+
+  it('handles a single file without a stray separator', () => {
+    expect(withContextFiles('draft it', ['only.md'])).toBe(
+      'draft it\n\nContext files:\n- only.md',
+    );
+  });
+
+  it('leaves the prompt body byte-identical, including its own newlines', () => {
+    // The prompt is the caller's text: this function appends, it never reflows.
+    const multiline = 'line one\n\nline two\n  indented';
+    expect(withContextFiles(multiline, ['a.md'])).toBe(
+      `${multiline}\n\nContext files:\n- a.md`,
+    );
+  });
+
+  it('never throws, whatever it is handed', () => {
+    // Same contract as stripCodeFence: this runs on the path to a provider
+    // invocation, so a throw here would surface as an unclassified failure.
+    expect(() => withContextFiles('', [''])).not.toThrow();
+    expect(() => withContextFiles('', undefined)).not.toThrow();
   });
 });

@@ -46,7 +46,7 @@ import type {
 } from '../domain/agent-provider.js';
 import { ProviderError } from '../domain/errors.js';
 import type { ProcessResult, ProcessRunner } from '../domain/process-runner.js';
-import { stripCodeFence } from './text.js';
+import { stripCodeFence, withContextFiles } from './text.js';
 
 /** The binary name. Fixed: never built from config, never a command line (AD-3). */
 const BINARY = 'claude';
@@ -450,13 +450,15 @@ function extractPayload(stdout: string): { ok: true; text: string } | { ok: fals
  * `contextFiles` are appended as a delimited path list rather than passed
  * through a flag: `--add-dir` and friends are not in the probed baseline, and
  * AD-4 forbids reaching for a flag that has not been tested.
+ *
+ * The formatting itself now lives in `text.ts` alongside `stripCodeFence`,
+ * because story 2.5's adapter needs the identical format and two private copies
+ * would eventually diverge — a contract's quality must not depend on which
+ * provider happened to run. Moved by story 2.5 with this story's written
+ * agreement; behaviour is unchanged and this story's tests pass untouched.
  */
 function composePrompt(prompt: AgentPrompt): string {
-  if (prompt.contextFiles === undefined || prompt.contextFiles.length === 0) {
-    return prompt.prompt;
-  }
-  const list = prompt.contextFiles.map((file) => `- ${file}`).join('\n');
-  return `${prompt.prompt}\n\nContext files:\n${list}`;
+  return withContextFiles(prompt.prompt, prompt.contextFiles);
 }
 
 /** Build the claude adapter. Called by `createProvider` (AD-1: config arrives as arguments). */

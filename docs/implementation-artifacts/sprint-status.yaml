@@ -49,7 +49,7 @@ development_status:
   2-2-contract-model-canonical-serialization-fingerprint: review
   2-3-agentprovider-port-roles-structured-output-gate: review
   2-4-claude-code-cli-adapter: review
-  2-5-codex-cli-adapter: ready-for-dev
+  2-5-codex-cli-adapter: review
   2-6-specwitness-contract-epic-generate-review-freeze-status: done
   2-7-amendment-flow-runtime-integrity-provider-doctor-checks: ready-for-dev
   2-8-hermetic-dependency-rules-test: ready-for-dev

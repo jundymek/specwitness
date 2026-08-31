@@ -70,3 +70,36 @@ export function stripCodeFence(raw: string): string {
 
   return body.slice(0, closing.index);
 }
+
+/**
+ * Append an envelope's `contextFiles` to a prompt as a delimited path list.
+ *
+ * Shared by every agent-CLI adapter, and shared deliberately: the gate hands
+ * each adapter the SAME envelope for the same roles, so a model that never
+ * learns which files matter produces a worse contract on one provider than on
+ * the other — and story 2.6, which consumes the result, cannot see the
+ * difference in order to compensate for it. Two private copies of this format
+ * would eventually diverge; one function cannot.
+ *
+ * Appended as text rather than passed through a flag because neither CLI has a
+ * probed flag for attaching text files, and AD-4 forbids reaching for one that
+ * has not been tested.
+ *
+ * Takes PRIMITIVES rather than `AgentPrompt`, for the same reason
+ * `stripCodeFence` takes a string: it keeps this module import-free, which is
+ * what makes it trivially safe for any adapter to pull in.
+ *
+ * An absent or empty list returns the prompt UNCHANGED — no trailing header for
+ * a section with nothing in it.
+ *
+ * Landed here by story 2.5 with story 2.4's written agreement. 2.4 owns this
+ * file and had already merged, so the alternative was a duplicated format in
+ * both adapters — the exact drift this file exists to prevent.
+ */
+export function withContextFiles(prompt: string, contextFiles?: readonly string[]): string {
+  if (contextFiles === undefined || contextFiles.length === 0) {
+    return prompt;
+  }
+  const list = contextFiles.map((file) => `- ${file}`).join('\n');
+  return `${prompt}\n\nContext files:\n${list}`;
+}

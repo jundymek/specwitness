@@ -31,21 +31,27 @@ import type { AgentProvider, ProviderDeps, ProviderDescriptor } from '../domain/
 import { ProviderError } from '../domain/errors.js';
 
 import { createClaudeCodeCliProvider } from './claude-code-cli.js';
+import { createCodexCliProvider } from './codex-cli.js';
 import { createFakeProvider } from './fake.js';
 
 export type { ProviderDeps } from '../domain/agent-provider.js';
 
-/** Adapter kinds this build can actually construct. Grows with 2.4 and 2.5. */
-const IMPLEMENTED_ADAPTERS = ['fake', 'claude-code-cli'] as const;
+/**
+ * Adapter kinds this build can construct. With story 2.5 this is now every value
+ * `providerSchema` accepts, so `default:` is reachable only from a config the
+ * schema already rejected — it stays as the fail-closed floor, not as a to-do.
+ */
+const IMPLEMENTED_ADAPTERS = ['fake', 'claude-code-cli', 'codex-cli'] as const;
 
 /**
  * Build the adapter a descriptor names.
  *
  * Throws `ProviderError` (AD-7, exit 3) for an adapter this build cannot
- * construct. Note that `claude-code-cli` and `codex-cli` are VALID config values
- * — story 1.3's schema has carried them since Epic 1 — and still land here until
- * stories 2.4 and 2.5 implement them. Failing loudly, naming the adapter, is the
- * honest behaviour: the alternative is a stub that appears to work and produces
+ * construct. As of story 2.5 every value `providerSchema` accepts has a case, so
+ * `default:` is no longer the waiting room it was while 2.4 and 2.5 were
+ * outstanding — it is the fail-closed floor for a value that reached here without
+ * passing the schema. Failing loudly, naming the adapter, stays the honest
+ * behaviour: the alternative is a stub that appears to work and produces
  * nothing.
  */
 export function createProvider(descriptor: ProviderDescriptor, deps: ProviderDeps): AgentProvider {
@@ -56,8 +62,14 @@ export function createProvider(descriptor: ProviderDescriptor, deps: ProviderDep
     case 'claude-code-cli':
       return createClaudeCodeCliProvider(descriptor, deps);
 
-    // ↓ Story 2.5 (codex-cli) adds ONE case here, immediately above `default:`.
-    //   Nothing else in this file moves.
+    case 'codex-cli':
+      // The inline rename is deliberate: importing `ProviderDeps` into the
+      // adapter would make index -> codex-cli -> index a cycle, which
+      // dependency-cruiser's `no-circular` rule treats as an error.
+      return createCodexCliProvider(descriptor, {
+        runner: deps.processRunner,
+        warn: deps.warn,
+      });
 
     default:
       throw new ProviderError(
