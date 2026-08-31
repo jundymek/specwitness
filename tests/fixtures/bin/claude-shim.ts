@@ -29,6 +29,11 @@ export interface ShimInvocation {
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * What arrived on stdin. Present only for shims created with
+   * `{ recordStdin: true }` — see `writeClaudeShim`.
+   */
+  readonly stdin?: string;
 }
 
 export type ShimMode =
@@ -69,21 +74,35 @@ const created: string[] = [];
  * that depended on an inherited variable would break the very test asserting
  * that a variable was withheld.
  */
-function shimSource(mode: ShimMode, recordPath: string): string {
+function shimSource(mode: ShimMode, recordPath: string, recordStdin: boolean): string {
   return `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
 
 const MODE = ${JSON.stringify(mode)};
 const RECORD = ${JSON.stringify(recordPath)};
+const RECORD_STDIN = ${JSON.stringify(recordStdin)};
 
 const argv = process.argv.slice(2);
+
+// Reading stdin is OPT-IN. A synchronous read of fd 0 blocks until EOF, so a
+// shim that always read it would hang whenever stdin was inherited rather than
+// piped — turning an unrelated test into a 30s timeout. Tests that opt in always
+// pass an explicit \`input\`, so the pipe is closed and the read returns at once.
+let stdin;
+if (RECORD_STDIN) {
+  try {
+    stdin = fs.readFileSync(0, 'utf8');
+  } catch {
+    stdin = '';
+  }
+}
 
 // Record before doing anything else, so even a shim that hangs or exits
 // non-zero leaves evidence of exactly what it was asked to do.
 fs.appendFileSync(
   RECORD,
-  JSON.stringify({ argv, cwd: process.cwd(), env: process.env }) + '\\n',
+  JSON.stringify({ argv, cwd: process.cwd(), env: process.env, stdin }) + '\\n',
 );
 
 const isVersionProbe = argv.includes('--version');
@@ -148,14 +167,17 @@ if (isVersionProbe) {
  * recorded. Never writes into the repository: a stray executable named `claude`
  * inside the project would be a genuinely nasty thing to leave behind.
  */
-export async function writeClaudeShim(mode: ShimMode): Promise<ShimHandle> {
+export async function writeClaudeShim(
+  mode: ShimMode,
+  options: { readonly recordStdin?: boolean } = {},
+): Promise<ShimHandle> {
   const dir = await mkdtemp(join(tmpdir(), 'specwitness-claude-shim-'));
   created.push(dir);
 
   const binary = join(dir, 'claude');
   const recordPath = join(dir, 'invocations.jsonl');
 
-  await writeFile(binary, shimSource(mode, recordPath), 'utf8');
+  await writeFile(binary, shimSource(mode, recordPath, options.recordStdin === true), 'utf8');
   await chmod(binary, 0o755);
   await writeFile(recordPath, '', 'utf8');
 

@@ -83,6 +83,33 @@ describe('claude PATH shim (fixture self-test)', () => {
     expect(at(invocations, 1).argv).toEqual(['-p', '--output-format', 'json', 'hello']);
   });
 
+  describe('stdin recording (opt-in)', () => {
+    it('records an empty stdin for the ordinary argv path', async () => {
+      // The path the adapter takes for every normally-sized prompt. Pamela's
+      // ProcessRunOptions.input defaults to '', so an empty pipe is what the
+      // real CLI receives on EVERY invocation — verified harmless against the
+      // live claude 2.1.251, and pinned here so a fixture change cannot hide it.
+      const shim = await writeClaudeShim('capable', { recordStdin: true });
+      await execa(shim.binary, ['-p', '--output-format', 'json', 'the prompt'], { input: '' });
+
+      const invocation = at(await shim.invocations(), 0);
+      expect(invocation.stdin).toBe('');
+      expect(invocation.argv).toContain('the prompt');
+    });
+
+    it('records a prompt delivered on stdin, with no prompt in argv', async () => {
+      // The oversized-prompt path. The prompt must NOT also appear in argv:
+      // claude APPENDS piped stdin to an argv prompt rather than replacing it
+      // (measured on 2.1.251), so supplying both silently duplicates the prompt.
+      const shim = await writeClaudeShim('capable', { recordStdin: true });
+      await execa(shim.binary, ['-p', '--output-format', 'json'], { input: 'the big prompt' });
+
+      const invocation = at(await shim.invocations(), 0);
+      expect(invocation.stdin).toBe('the big prompt');
+      expect(invocation.argv).toEqual(['-p', '--output-format', 'json']);
+    });
+  });
+
   describe('modes behave as the adapter tests will assume', () => {
     it('capable: answers --version, and returns an envelope carrying the payload', async () => {
       const shim = await writeClaudeShim('capable');
