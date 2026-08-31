@@ -117,6 +117,28 @@ describe('probeClaudeCapability', () => {
     expect(capability.reason).toMatch(/rejected/i);
   });
 
+  it('treats a logged-out CLI as CAPABLE — auth is not a capability', async () => {
+    // The probe exercises a real invocation, so it fails for reasons that have
+    // nothing to do with flag support: logged out, rate limited, quota spent.
+    // Reporting those as "the CLI is too old" sends the operator to reinstall a
+    // perfectly good binary, and blocks the invocation path that would have
+    // shown them the CLI's own message. Flags accepted = capable; readiness is
+    // `probeClaudeAuth`'s question.
+    const { runner } = runnerReturning(VERSION_OK, failed(1, 'Invalid API key · Please run /login'));
+
+    const capability = await probeClaudeCapability(runner);
+    expect(capability.found).toBe(true);
+    expect(capability.nonInteractive).toBe(true);
+    expect(capability.jsonOutputFormat).toBe(true);
+  });
+
+  it('treats a rate-limited CLI as capable too', async () => {
+    const { runner } = runnerReturning(VERSION_OK, failed(1, 'rate limit exceeded, try again later'));
+
+    const capability = await probeClaudeCapability(runner);
+    expect(capability.nonInteractive).toBe(true);
+  });
+
   it('distinguishes a hung binary from one that said no', async () => {
     const { runner } = runnerReturning({
       outcome: 'timed-out',
@@ -466,6 +488,23 @@ describe('createClaudeCodeCliProvider — billing safety (FR-15)', () => {
     });
   });
 
+  it('withholds every known Anthropic credential variable BY DEFAULT', async () => {
+    // The default has to be complete on its own. `createProvider` builds this
+    // adapter with no options, and the provider config schema is a strictObject
+    // of {adapter, mode} with nowhere to name an extra variable — so anything
+    // not in this default is simply never withheld in production, whatever the
+    // injection seam below allows. AD-4 says "provider equivalents", plural.
+    const { runner, calls } = runnerReturning(VERSION_OK, ok(CAPABLE_ENVELOPE), ok(CAPABLE_ENVELOPE));
+    const provider = createClaudeCodeCliProvider(descriptor(), deps(runner));
+
+    await provider.generate({ role: 'contract-author', prompt: 'x' });
+
+    const withheld = calls[calls.length - 1]?.env.withhold ?? [];
+    expect(withheld).toEqual(
+      expect.arrayContaining(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']),
+    );
+  });
+
   it('withholds caller-configured equivalents too', async () => {
     const { runner, calls } = runnerReturning(VERSION_OK, ok(CAPABLE_ENVELOPE), ok(CAPABLE_ENVELOPE));
     const provider = createClaudeCodeCliProvider(descriptor(), deps(runner), {
@@ -557,5 +596,21 @@ describe('createClaudeCodeCliProvider — failure translation', () => {
     await expect(provider.generate({ role: 'contract-author', prompt: 'x' })).rejects.toBeInstanceOf(
       ProviderError,
     );
+  });
+
+  it("surfaces a logged-out CLI's own message, never install-or-update advice", async () => {
+    // The regression this guards: while the probe treated an auth failure as a
+    // capability failure, a logged-out operator was told to reinstall a working
+    // binary and never saw the CLI's actual complaint.
+    const { runner } = runnerReturning(VERSION_OK, failed(1, 'Invalid API key - please run /login'));
+    const provider = createClaudeCodeCliProvider(descriptor(), deps(runner));
+
+    const failure = await provider
+      .generate({ role: 'contract-author', prompt: 'x' })
+      .then(() => undefined)
+      .catch((error: unknown) => error as Error);
+
+    expect(failure?.message).toMatch(/please run \/login/i);
+    expect(failure?.message).not.toMatch(/too old/i);
   });
 });

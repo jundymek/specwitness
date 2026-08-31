@@ -57,8 +57,22 @@ const BASELINE_ARGS = ['-p', '--output-format', 'json'] as const;
 /** The mode that documents subscription-backed use. Others still withhold. */
 const RECOGNIZED_MODE = 'subscription';
 
-/** Withheld from every child environment. Callers may add equivalents. */
-const DEFAULT_BILLING_ENV_VARS = ['ANTHROPIC_API_KEY'] as const;
+/**
+ * Withheld from every child environment.
+ *
+ * This default must be complete on its own. `createProvider` builds the adapter
+ * with no options, and the provider config schema is a `strictObject` of
+ * `{adapter, mode}` — there is nowhere for a project to name an extra variable.
+ * So `billingEnvVars` below is an injection seam for callers and tests, NOT a
+ * configuration surface, and anything missing from this list is simply never
+ * withheld in practice.
+ *
+ * Both entries authenticate a billed Anthropic account, which is what AD-4's
+ * "provider equivalents" means. Giving projects a way to declare their own would
+ * be a config-schema change plus the ADR that goes with it, not an adapter
+ * change — flagged for the epic rather than done here.
+ */
+const DEFAULT_BILLING_ENV_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const;
 
 /**
  * Probe bound, matching `src/cli/doctor/checks/git.ts`'s 5s precedent. Doctor
@@ -116,7 +130,7 @@ export interface ClaudeAdapterOptions {
   /** Working directory for the child. Defaults to the process cwd. */
   readonly cwd?: string;
   readonly timeoutMs?: number;
-  /** Billing-risk variables to withhold. Defaults to `ANTHROPIC_API_KEY`. */
+  /** Extra billing-risk variables to withhold. An injection seam, not a config surface. */
   readonly billingEnvVars?: readonly string[];
 }
 
@@ -149,6 +163,24 @@ async function probeOnce(
     env: childEnvironment(billingEnvVars),
     input: '',
   });
+}
+
+/**
+ * Does this stderr read like the CLI refusing the ARGUMENTS, as opposed to
+ * refusing the work?
+ *
+ * The distinction decides whether a failed probe counts against capability. A
+ * commander-style CLI (which `claude` is) reports an unsupported flag with a
+ * recognisable usage error; an authentication or quota refusal looks nothing
+ * like one. Matching on that signature is a heuristic, and it is deliberately
+ * biased toward "the flags were fine": a false negative merely lets `generate`
+ * proceed and report the CLI's own message, whereas a false positive tells the
+ * operator their working installation is too old.
+ */
+function looksLikeFlagRejection(stderr: string): boolean {
+  return /unknown option|unrecognized option|unknown argument|invalid option|unknown command|error: unknown|usage:/i.test(
+    stderr,
+  );
 }
 
 /**
@@ -237,7 +269,17 @@ export function probeClaudeCapability(
       };
     }
 
-    if (capable.exitCode !== 0) {
+    // A non-zero exit means the CLI declined — but NOT necessarily that it does
+    // not understand the flags. The probe is a real invocation, so it also fails
+    // when the operator is logged out, rate limited or out of quota. Calling any
+    // of those a capability failure sends someone to reinstall a working binary
+    // AND hides the CLI's own message, because `generate` refuses before it ever
+    // reaches the invocation that would have shown it.
+    //
+    // So only a genuine ARGUMENT rejection counts against capability; everything
+    // else means the flags were accepted and readiness is `probeClaudeAuth`'s
+    // question, not this one.
+    if (capable.exitCode !== 0 && looksLikeFlagRejection(capable.stderr)) {
       return {
         binary: BINARY,
         found: true,
