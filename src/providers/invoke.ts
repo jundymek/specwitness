@@ -219,13 +219,19 @@ export async function attemptInvoke<T>(
     };
 
     const generated = await generateOnce(provider, prompt);
+    // Unconditionally, including on the `provider-failed` path where it is the
+    // empty string: `AgentFailure.raw` is documented as the LAST rejected
+    // payload, so it must always agree with `attempts.at(-1).raw`. Updating it
+    // only when the adapter returned text would let an exhausted response
+    // report an EARLIER attempt's payload whenever the final attempt threw —
+    // the one case where a reader is most likely to trust it.
+    lastRaw = generated.raw;
 
     let outcome: AttemptOutcome = generated.outcome;
     let errors: readonly string[] = generated.errors;
     let parsed: T | undefined;
 
     if (outcome === 'accepted') {
-      lastRaw = generated.raw;
       let value: unknown;
       try {
         value = JSON.parse(generated.raw);

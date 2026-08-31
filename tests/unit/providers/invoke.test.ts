@@ -384,3 +384,50 @@ describe('invoke(): exhaustion raises ProviderError and never a partial artifact
     expect(thrown).toBeInstanceOf(ProviderError);
   });
 });
+
+describe('the failure envelope always agrees with its last attempt', () => {
+  it('reports the FINAL payload when the last attempt is a provider failure', async () => {
+    // Regression: `raw` used to be updated only when the adapter returned text,
+    // so an exhausted response whose last attempt THREW still carried an
+    // earlier attempt's payload — stale diagnostic text presented as the last
+    // thing the provider said, in exactly the situation a reader trusts it most.
+    let call = 0;
+    const provider = {
+      id: 'flaky',
+      adapter: 'fake',
+      generate: async () => {
+        call += 1;
+        if (call < 3) {
+          return `bad payload ${call}`;
+        }
+        throw new Error('the CLI died on the last try');
+      },
+    };
+
+    const result = await attemptInvoke(request(), { provider, clock: steppingClock() });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      expect.unreachable('scripted an exhausted budget');
+    }
+    expect(result.attempts.map((a) => a.outcome)).toEqual([
+      'unparsable',
+      'unparsable',
+      'provider-failed',
+    ]);
+    expect(result.raw).toBe(result.attempts.at(-1)?.raw);
+    expect(result.raw).toBe('');
+  });
+
+  it('reports the final payload when the last attempt was merely rejected', async () => {
+    const provider = scriptedProvider('one', 'two', 'three');
+
+    const result = await attemptInvoke(request(), { provider, clock: steppingClock() });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.raw).toBe('three');
+      expect(result.raw).toBe(result.attempts.at(-1)?.raw);
+    }
+  });
+});
