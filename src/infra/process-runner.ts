@@ -33,12 +33,70 @@
  * NFR-1: nothing here reads a credential store, and nothing reads `process.env`
  * BY NAME. The environment is copied wholesale so the caller can subtract from
  * it; `tests/unit/doctor/credential-boundary.test.ts` scans this file.
+ *
+ * ============================================================================
+ * PROCESS GROUPS — MEASURED, NOT ASSUMED (story 3.2, macOS 15 / Node 22.20.0 /
+ * execa 10.0.1, 2026-08-31)
+ * ============================================================================
+ *
+ * The spine's Stack table flagged execa 10's process-group semantics on macOS
+ * as "verified by Epic 3 story 3.2 tests", i.e. nobody had verified them. So
+ * they were measured, with `/bin/sh -c` equivalent scripts that fork
+ * (`sleep 3600 &` then `wait`), recording whether the direct child, the
+ * grandchild and execa's own promise ended up where the docs imply. Verbatim
+ * results, one row per configuration:
+ *
+ *   A  execa `timeout: 500`, NOT detached
+ *      child dead · GRANDCHILD ALIVE · promise UNSETTLED after 6.7s
+ *   B  `subprocess.kill('SIGKILL')`, NOT detached
+ *      child dead · GRANDCHILD ALIVE · promise UNSETTLED after 6.7s
+ *   C  `detached: true` + `process.kill(-pgid, 'SIGKILL')`
+ *      child dead · grandchild DEAD · promise settled in 428ms
+ *   D  `detached: true` + `process.kill(-pgid, 'SIGTERM')`, then SIGKILL
+ *      child dead · grandchild DEAD · promise settled in 426ms; the whole group
+ *      was already gone 200ms after the SIGTERM, so the SIGKILL was a no-op
+ *   E  `detached: true` + execa `timeout: 500` (no explicit group kill)
+ *      child dead · GRANDCHILD ALIVE · promise UNSETTLED after 6.7s
+ *   F  `detached: true` + `timeout: 500` + `forceKillAfterDelay: 200`
+ *      child dead · GRANDCHILD ALIVE · promise UNSETTLED after 6.7s
+ *
+ * THE CONCLUSIONS, because the rows matter more than the prose:
+ *
+ *  1. execa never signals the process group, even when it created one (E, F).
+ *     `cleanup` and `forceKillAfterDelay` do not help. Detaching alone changes
+ *     NOTHING about reaping — it only makes reaping possible.
+ *  2. `process.kill(-pgid, ...)` does reach grandchildren (C, D). That is AC2's
+ *     explicitly permitted fallback, and it is the answer.
+ *  3. The unsettled promise in A/B/E/F is the SAME defect from a different
+ *     angle: the grandchild inherits the stdio pipes and holds them open, so
+ *     execa cannot settle. Kill the GROUP and the pipes close, which is why C
+ *     and D settle in ~430ms with no watchdog involvement at all.
+ *  4. SIGTERM to the group was sufficient for `sh` + `sleep` (D). The SIGKILL
+ *     escalation is still implemented, because a child that traps SIGTERM is
+ *     exactly the child that would otherwise leak.
+ *
+ * So this port owns the timeout itself rather than delegating it to execa:
+ * after a group kill execa reports `timedOut: false` and a `signal`, because
+ * from its point of view somebody else killed the child. Two mechanisms racing
+ * to classify one event is how a timeout ends up reported as `completed`, and
+ * that is the single worst thing this file could do.
+ *
+ * WHAT THIS COSTS, stated honestly: a detached child is no longer in the
+ * terminal's foreground process group, so Ctrl+C at an interactive prompt
+ * reaches SpecWitness but NOT the child. That is inherent to AD-8 — the whole
+ * point is that children outlive an abrupt parent death in a RECORDED way —
+ * and the designed remedy is the run manifest plus `specwitness clean`, not a
+ * signal handler. A descendant that leaves the group on purpose (`setsid`) is
+ * beyond the reach of any pgid kill on any OS; `npm`, `pnpm` and
+ * `docker compose` do not do that.
  */
 
+import { execFileSync } from 'node:child_process';
 import { statSync } from 'node:fs';
 
 import { execa } from 'execa';
 
+import { InfraError } from '../domain/errors.js';
 import type { Clock } from '../domain/ports.js';
 import type {
   ChildEnvironment,
@@ -55,6 +113,22 @@ export type ParentEnvironment = Readonly<Record<string, string | undefined>>;
  * port gives up and classifies the run itself. See `SETTLEMENT` below.
  */
 const SETTLEMENT_GRACE_MS = 1_000;
+
+/**
+ * Milliseconds between SIGTERM and SIGKILL when a process group is torn down.
+ *
+ * Two seconds, chosen rather than guessed. It is long enough for the things
+ * SpecWitness actually spawns to run a signal handler and flush — a test runner
+ * printing a summary, a dev server closing sockets, `docker compose` stopping
+ * containers — and short enough that tearing down several groups at the end of
+ * a verify run stays inside the time an operator will sit and watch. Overriding
+ * it per call (`teardownGraceMs`) is how tests assert the escalation in
+ * milliseconds instead of waiting this out.
+ */
+export const TEARDOWN_GRACE_MS = 2_000;
+
+/** How often liveness is re-probed while waiting out the grace period. */
+const GROUP_POLL_INTERVAL_MS = 20;
 
 interface SpawnFailure extends Error {
   code?: string;
@@ -190,6 +264,169 @@ export function resolveChildEnvironment(
   return child;
 }
 
+/**
+ * This process's OWN process-group id, or `null` when it cannot be determined.
+ *
+ * Node exposes `process.pid` and `process.ppid` but no `getpgid`, and the
+ * difference matters enormously here: under a test runner, a shell job or the
+ * agent harness, SpecWitness is frequently NOT its own group leader, so
+ * comparing a candidate pgid against `process.pid` alone leaves the one signal
+ * that would kill us undetected. That is not hypothetical — the first draft of
+ * this guard checked only `pid`/`ppid`, and the test asserting "never signal our
+ * own group" killed the entire vitest run instead of passing.
+ *
+ * So it is read once from `ps`, synchronously, and cached for the life of the
+ * process: one ~5ms spawn, ever, against a failure mode that takes down the
+ * caller. AD-3 holds — fixed binary, fixed argument array, no shell, no
+ * interpolation of anything but this process's own pid.
+ *
+ * Returns `null` rather than throwing if `ps` is unavailable or unparseable. A
+ * missing guard must not make teardown impossible; the structural refusals
+ * below still apply, and `specwitness clean` — the only caller that signals a
+ * pgid it did not create — verifies identity separately before it gets here.
+ */
+let cachedOwnProcessGroup: number | null | undefined;
+
+function ownProcessGroup(): number | null {
+  if (cachedOwnProcessGroup === undefined) {
+    try {
+      const reported = execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], {
+        encoding: 'utf8',
+        timeout: 2_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const value = Number(reported.trim());
+      cachedOwnProcessGroup = Number.isInteger(value) && value > 0 ? value : null;
+    } catch {
+      cachedOwnProcessGroup = null;
+    }
+  }
+  return cachedOwnProcessGroup;
+}
+
+/** Resolves after `ms`, without holding the event loop open. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+/**
+ * Refuses to signal anything that is not a process group we could have created.
+ *
+ * `process.kill(-pgid, ...)` is one negation away from being the most
+ * destructive call in this codebase, so the refusals are structural rather than
+ * advisory:
+ *
+ *   pgid <= 1     `kill(-0, ...)` signals the CALLER's own process group, which
+ *                 would take down SpecWitness and, under a test runner, the very
+ *                 suite trying to prove this is safe. `-1` means "every process
+ *                 this user may signal" — the worst syscall available here.
+ *   process.pid   a group led by this very process.
+ *   process.ppid  the parent's group: the shell, or the harness that launched us.
+ *   our own pgid  read from `ps` once and cached, because under a test runner or
+ *                 a shell job SpecWitness is usually NOT its own group leader and
+ *                 the three checks above would all miss it.
+ *
+ * WHAT THIS DOES NOT GUARANTEE: that `pgid` is still the group WE created. Pid
+ * reuse is real, and a pgid read back from a manifest written last week may
+ * belong to the operator's editor today. Nothing inside this function can know
+ * that. Establishing identity before signalling is the CALLER's job, and
+ * `specwitness clean` — the only caller that ever signals a pgid it did not
+ * spawn itself — does it with a recorded-time check before reaching here.
+ */
+function assertSignallableProcessGroup(pgid: number): void {
+  if (!Number.isInteger(pgid) || pgid <= 1) {
+    throw new InfraError(
+      `refusing to signal process group ${pgid}`,
+      'a process group id must be an integer greater than 1: 0 would signal the SpecWitness process group itself and -1 every process on the machine',
+    );
+  }
+  if (pgid === process.pid || pgid === process.ppid || pgid === ownProcessGroup()) {
+    throw new InfraError(
+      `refusing to signal process group ${pgid}: it is the SpecWitness process group or its parent`,
+      'this is a SpecWitness bug — please report it with the command you ran',
+    );
+  }
+}
+
+/**
+ * Sends one signal to a whole process group.
+ *
+ * Returns `false` when the group is already gone (ESRCH), which is the ordinary
+ * case for `clean` replaying an old manifest and must never be an error.
+ *
+ * EPERM is NOT tolerated. A group that exists but cannot be signalled is strong
+ * evidence that it is not ours, and continuing quietly would either leak it or,
+ * far worse, invite a retry against somebody else's process tree.
+ */
+function signalProcessGroup(pgid: number, signal: NodeJS.Signals | 0): boolean {
+  try {
+    process.kill(-pgid, signal);
+    return true;
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') {
+      return false;
+    }
+    if (code === 'EPERM') {
+      throw new InfraError(
+        `not permitted to signal process group ${pgid}`,
+        `the process group exists but belongs to another user, so nothing was signalled; inspect it with 'ps -g ${pgid}' before acting by hand`,
+      );
+    }
+    throw new InfraError(
+      `could not signal process group ${pgid}: ${describeCause(cause)}`,
+      'this is a SpecWitness bug — please report it with the command you ran',
+    );
+  }
+}
+
+/**
+ * AD-8 teardown: SIGTERM to the GROUP, a grace period, then SIGKILL to the
+ * GROUP. Both signals go to `-pgid`; neither ever goes to a bare pid, because a
+ * bare pid reaches the direct child only and leaves its descendants running —
+ * measured, rows A and B in this file's header.
+ *
+ * A FREE FUNCTION rather than a second method on `ProcessRunner`, deliberately.
+ * The port's OWNERSHIP block says there is exactly one method precisely so this
+ * story preserves exactly one, and a required second method would break every
+ * `ProcessRunner` fake under `tests/` — i.e. it would force edits to the tests
+ * the additive contract exists to protect. `run` tears its own group down on
+ * timeout, so ordinary callers never need this; it is here for long-lived
+ * services (Epic 4 story 4.1) and for `specwitness clean`.
+ *
+ * Idempotent and safe on a group that has already exited — the COMMON case when
+ * replaying a manifest, not an exceptional one. Resolves once the group is gone
+ * or once SIGKILL has been delivered.
+ */
+export async function terminateProcessGroup(
+  pgid: number,
+  options: { readonly graceMs?: number } = {},
+): Promise<void> {
+  assertSignallableProcessGroup(pgid);
+
+  const graceMs = options.graceMs ?? TEARDOWN_GRACE_MS;
+
+  if (!signalProcessGroup(pgid, 'SIGTERM')) {
+    return; // already gone
+  }
+
+  // Polled rather than slept through: a well-behaved group usually dies in
+  // milliseconds, and paying the full grace every time would add seconds per
+  // service to the end of every run.
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    await delay(Math.min(GROUP_POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    if (!signalProcessGroup(pgid, 0)) {
+      return;
+    }
+  }
+
+  signalProcessGroup(pgid, 'SIGKILL');
+}
+
 function createRunner(clock: Clock): ProcessRunner {
   const run = async (options: ProcessRunOptions): Promise<ProcessResult> => {
     // Copied wholesale rather than read by name: the caller subtracts from this,
@@ -197,15 +434,22 @@ function createRunner(clock: Clock): ProcessRunner {
     // that has no business knowing any.
     const env = resolveChildEnvironment(options.env, process.env);
     const startedAt = clock.now().getTime();
+    const graceMs = options.teardownGraceMs ?? TEARDOWN_GRACE_MS;
 
     // `durationMs` is computed for every exit path, including the throwing one,
-    // so a failed spawn is as measurable as a successful call.
+    // so a failed spawn is as measurable as a successful call. Called EXACTLY
+    // once per return, because the injected Clock may be a scripted sequence.
     const elapsed = (): number => Math.round(clock.now().getTime() - startedAt);
+
+    // Set only when the CALLER's `onProcessGroup` threw. Such an error must
+    // reach the caller unchanged: turning it into a `spawn-failed` value would
+    // report a SpecWitness durability failure (exit 3) as something the child
+    // did, and quietly downgrade it to an outcome nothing treats as urgent.
+    let recordingFailed = false;
 
     try {
       const spawned = execa(options.binary, [...options.args], {
         cwd: options.cwd,
-        timeout: options.timeoutMs,
         // Non-zero exit is a RESULT, not an exception: "it said no" is
         // information every caller needs, and an exception would flatten it
         // together with "it is not installed".
@@ -220,52 +464,90 @@ function createRunner(clock: Clock): ProcessRunner {
         // billing guarantee. `doctor/effects.ts` sets it explicitly for the same
         // reason.
         extendEnv: false,
+        // AD-8: the child leads its OWN process group, so a later
+        // `kill(-pgid, ...)` reaches its whole descendant tree. This flag alone
+        // reaps nothing (measured — header rows E and F); it only makes reaping
+        // possible.
+        detached: true,
+        // NOTE the absence of `timeout`. This port owns the timeout itself: see
+        // the header. After a group kill execa reports `timedOut: false` and a
+        // signal, because from its point of view somebody else did the killing,
+        // so leaving execa's own timer armed would mean two mechanisms racing to
+        // classify one event — which is how a timeout ends up reported as a
+        // clean `completed` run.
       });
 
+      // A detached child is its group's LEADER, so its pgid IS its pid.
+      // `undefined` when the spawn failed outright (ENOENT, bad cwd): there is
+      // no process, and therefore no group.
+      const pgid = typeof spawned.pid === 'number' ? spawned.pid : null;
+
+      if (pgid !== null && options.onProcessGroup !== undefined) {
+        try {
+          // AWAITED before anything observes the child: this is AC1's
+          // durability ordering, and it is the whole reason the hook exists.
+          await options.onProcessGroup(pgid);
+        } catch (cause) {
+          // The record failed, so nothing on disk knows this group exists. A
+          // live process group that nothing can find is the one state `clean`
+          // cannot recover from, so kill it before the error propagates.
+          // Swallowing the error would trade a reported infra failure for a
+          // silent leak.
+          recordingFailed = true;
+          spawned.catch(() => undefined);
+          await terminateProcessGroup(pgid, { graceMs }).catch(() => undefined);
+          throw cause;
+        }
+      }
+
+      let timedOut = false;
+      let teardown: Promise<Error | undefined> = Promise.resolve(undefined);
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        if (pgid !== null) {
+          teardown = terminateProcessGroup(pgid, { graceMs }).then(
+            () => undefined,
+            (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause))),
+          );
+        }
+      }, options.timeoutMs);
+      timer.unref?.();
+
       /**
-       * SETTLEMENT — why `execa`'s own timeout is not sufficient on its own.
+       * SETTLEMENT — why a watchdog survives even now that teardown reaps.
        *
-       * Verified against execa 10 / Node 22 (reported by story 2.5 with a
-       * reproduction, confirmed here): when the child FORKS, execa's timeout
-       * kills the direct child but the grandchild inherits the stdout/stderr
-       * pipes and keeps them open. execa does not settle until those streams
-       * close, so the promise never resolves and `timed-out` never happens.
+       * Story 2.3 introduced this because a forking child's grandchild inherits
+       * the stdout/stderr pipes and holds them open, so execa never settles and
+       * the promise hangs forever (header rows A, B, E, F). Killing the process
+       * GROUP closes those pipes, which is why the measured teardown settles in
+       * ~430ms with the watchdog never firing at all.
        *
-       *   sh -c 'while true; do sleep 3600; done'  → still unsettled after 8s
-       *   sh -c 'exec sleep 3600'                  → timed-out in 759ms
+       * It is kept anyway, because "the group kill worked" is an assumption and
+       * this port's contract is that it ALWAYS settles and ALWAYS classifies. If
+       * a descendant escaped the group (`setsid`), or the kill was refused, the
+       * watchdog is what stops `specwitness verify` wedging: an infra hang is
+       * not a product FAIL, but only if it can be DETECTED.
        *
-       * One process: fine. A process with children: hangs forever. That matters
-       * far beyond provider adapters (both of which spawn a single binary):
-       * Epic 3 runs project-declared gates through this port, and those are
-       * overwhelmingly `npm test` / `pnpm build` / `docker compose up` — whose
-       * entire job is to spawn children. A hung gate would hang `specwitness
-       * verify` indefinitely instead of failing cleanly, which is precisely the
-       * failure the exit-code contract exists to prevent: an infra hang is not
-       * a product FAIL, but only if it can be DETECTED.
-       *
-       * So this port keeps its own promise — it always settles, and it always
-       * classifies — by giving execa a grace period past `timeoutMs` and then
-       * deciding for itself.
-       *
-       * WHAT THIS DELIBERATELY DOES NOT DO: reap the orphaned descendants. That
-       * needs the child in its own process group and a `kill(-pgid)`, which is
-       * AD-8's mechanism and **Epic 3 story 3.2's scope** — the same story that
-       * owns the run manifest those orphans get recorded in. Detection here,
-       * teardown there. Until 3.2 lands, a forking child that ignores its
-       * timeout leaves descendants behind; leaking a process while reporting
-       * accurately beats leaking one while hanging forever.
+       * The deadline now allows for the teardown itself — the timeout, then the
+       * SIGTERM-to-SIGKILL grace, then a moment for execa to notice.
        */
       const settlement = await Promise.race([
         spawned.then((value) => ({ settled: true as const, value })),
         new Promise<{ settled: false }>((resolve) => {
-          const timer = setTimeout(
+          const watchdog = setTimeout(
             () => resolve({ settled: false }),
-            options.timeoutMs + SETTLEMENT_GRACE_MS,
+            options.timeoutMs + graceMs + SETTLEMENT_GRACE_MS,
           );
           // Never hold the event loop open on account of this watchdog.
-          timer.unref?.();
+          watchdog.unref?.();
         }),
       ]);
+
+      clearTimeout(timer);
+      // Never return while a SIGKILL is still in flight: a caller that removes a
+      // worktree next must not race processes still holding files inside it.
+      const teardownFailure = await teardown;
 
       if (!settlement.settled) {
         // The losing promise must not become an unhandled rejection later.
@@ -274,11 +556,14 @@ function createRunner(clock: Clock): ProcessRunner {
           outcome: 'timed-out',
           exitCode: null,
           stdout: '',
-          stderr:
+          stderr: joinLines([
             `timed out after ${options.timeoutMs}ms and did not exit within ` +
-            `${SETTLEMENT_GRACE_MS}ms of being killed; a descendant process is ` +
-            'likely still holding its output streams open',
+              `${graceMs + SETTLEMENT_GRACE_MS}ms of its process group being terminated; ` +
+              'a descendant process is likely still holding its output streams open',
+            teardownFailure?.message,
+          ]),
           durationMs: elapsed(),
+          pgid,
         };
       }
 
@@ -290,6 +575,26 @@ function createRunner(clock: Clock): ProcessRunner {
       const stdout = result.stdout ?? '';
       const stderr = result.stderr ?? '';
 
+      if (timedOut) {
+        // Classified HERE rather than from execa's `timedOut`, which is FALSE
+        // after our own group kill. The captured output is kept: a gate that
+        // timed out still produced evidence worth reading, and discarding it
+        // would leave an operator with a verdict and no explanation.
+        return {
+          outcome: 'timed-out',
+          exitCode: null,
+          stdout,
+          stderr: joinLines([
+            stderr,
+            `timed out after ${options.timeoutMs}ms; SpecWitness terminated its process group` +
+              (pgid === null ? '' : ` (pgid ${pgid})`),
+            teardownFailure?.message,
+          ]),
+          durationMs: elapsed(),
+          pgid,
+        };
+      }
+
       return {
         outcome: classify(fields, options.cwd, false),
         // `undefined` on a failed spawn; `null` is this port's "never started".
@@ -300,13 +605,20 @@ function createRunner(clock: Clock): ProcessRunner {
         // real child's output is never overwritten by a wrapper's prose.
         stderr: stderr.length > 0 || fields.failed !== true ? stderr : explain(fields),
         durationMs: elapsed(),
+        pgid,
       };
     } catch (error) {
+      // An `onProcessGroup` failure is NOT a subprocess outcome and must not be
+      // flattened into one. See `recordingFailed` above.
+      if (recordingFailed) {
+        throw error;
+      }
+
       // `reject: false` suppresses both non-zero exits and spawn failures, so
-      // this branch should be unreachable in practice. It is kept because
-      // "should be unreachable" is not a guarantee across an execa minor, and
-      // the alternative is an unclassified crash escaping a port whose whole
-      // contract is that it never throws for a subprocess outcome.
+      // the rest of this branch should be unreachable in practice. It is kept
+      // because "should be unreachable" is not a guarantee across an execa
+      // minor, and the alternative is an unclassified crash escaping a port
+      // whose whole contract is that it never throws for a subprocess outcome.
       const failure = error as SpawnFailure;
 
       return {
@@ -315,6 +627,7 @@ function createRunner(clock: Clock): ProcessRunner {
         stdout: failure.stdout ?? '',
         stderr: failure.stderr ?? failure.message,
         durationMs: elapsed(),
+        pgid: null,
       };
     }
   };
@@ -331,4 +644,14 @@ function createRunner(clock: Clock): ProcessRunner {
  */
 export function createProcessRunner(clock: Clock): ProcessRunner {
   return createRunner(clock);
+}
+
+/** Best-effort message from an unknown thrown value, for error text. */
+function describeCause(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** Joins the non-empty parts of an explanation, so no blank line ever leads. */
+function joinLines(parts: readonly (string | undefined)[]): string {
+  return parts.filter((part): part is string => part !== undefined && part.length > 0).join('\n');
 }

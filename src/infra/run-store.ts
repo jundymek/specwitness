@@ -22,11 +22,20 @@
  * Layering: this is `src/infra`, so `node:fs` is legal here and nowhere in
  * `src/domain` or `src/schemas` (dependency-cruiser enforces it). Time and
  * randomness arrive through the AD-9 ports rather than being read directly.
+ *
+ * WHAT STORY 3.2 ADDED, so story 3.5 can rebase over it knowingly:
+ * `recordWorktree`, `recordProcessGroup`, `markReaped`, `readProcessGroupRecords`
+ * and `writeEvidenceFile`, plus one private mutation queue and one private
+ * manifest-update helper that reuses `#writeDurably`. Nothing existing moved:
+ * `createRun`, `readManifest`, `listRuns`, `hasResult`, `runDir`,
+ * `#writeDurably` and `#syncDirectory` are byte-for-byte what story 1.6 wrote.
+ * Discipline 2 — atomic stage-and-rename for `result.json` — is STILL not
+ * implemented here and is still story 3.5's, by name.
  */
 
 import { existsSync } from 'node:fs';
 import { mkdir, open, readdir, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { InfraError } from '../domain/errors.js';
 import type { Clock, Ids } from '../domain/ports.js';
@@ -46,6 +55,46 @@ const RUNS_DIR = 'runs';
 
 /** Story 3.5 writes this; 1.6 only reports whether it exists yet. */
 const RESULT_FILENAME = 'result.json';
+
+/**
+ * Reaping evidence for `specwitness clean` — story 3.2.
+ *
+ * WHY A SECOND FILE RATHER THAN A RICHER MANIFEST FIELD. `clean` replays
+ * manifests days later, and pid reuse is real: a pgid recorded last week may be
+ * the operator's editor today. Killing the wrong process tree is the worst
+ * outcome available in this story — worse than leaking, because leaking is
+ * visible and recoverable while a wrongly-killed tree is neither — so `clean`
+ * must be able to PROVE a live pgid is still the one we recorded.
+ *
+ * The proof is the instant the pgid was recorded. `RunStore` records the pgid
+ * within milliseconds of the process being spawned, so the group leader's own
+ * OS start time must sit essentially on top of it; a recycled pid would have
+ * started far later. `clean` compares the two and refuses to signal when they
+ * disagree.
+ *
+ * That instant lives HERE and not in `manifest.json` because the manifest's
+ * `processGroups` is `number[]` in a `.strict()` schema that `src/schemas/`
+ * owns, and this story's contract is to POPULATE the reserved arrays, not to
+ * reshape them — a shape change without a version bump is exactly the kind of
+ * quiet break the AD-5 policy exists to prevent. So the manifest stays the
+ * authoritative list of what to reap, and this file is the evidence that makes
+ * reaping safe. Missing or corrupt evidence is not fatal: it means `clean`
+ * declines to signal and says so, which is the correct fail-closed direction.
+ */
+export const PROCESS_GROUPS_FILENAME = 'process-groups.json';
+
+/**
+ * Files `RunStore` owns, which caller-named evidence may never overwrite.
+ *
+ * `writeEvidenceFile` takes a name chosen by a caller — ultimately derived from
+ * a gate id in the operator's own config — and the crash record must not be
+ * clobberable by an unlucky one.
+ */
+const RESERVED_FILENAMES: ReadonlySet<string> = new Set([
+  MANIFEST_FILENAME,
+  RESULT_FILENAME,
+  PROCESS_GROUPS_FILENAME,
+]);
 
 /** A newly created run. */
 export interface CreatedRun {
@@ -76,6 +125,21 @@ export class RunStore {
   readonly #clock: Clock;
   readonly #ids: Ids;
   readonly #hooks: RunStoreHooks;
+
+  /**
+   * Serialises every read-modify-write on this store's files (story 3.2).
+   *
+   * Appending is inherently read-modify-write, which is the obvious
+   * implementation and the obviously wrong one: two in-flight appends both read
+   * the same manifest and the second write erases the first. Gates and services
+   * start in parallel, so that is the normal case rather than a stress test.
+   *
+   * A promise chain rather than a lock library, and PER INSTANCE rather than
+   * global: one process owns one run. Cross-process serialisation is not
+   * attempted and is not needed — two concurrent `specwitness` processes
+   * verifying the same project would each create their own run directory.
+   */
+  #mutations: Promise<unknown> = Promise.resolve();
 
   constructor(projectRoot: string, clock: Clock, ids: Ids, hooks: RunStoreHooks = {}) {
     this.#projectRoot = projectRoot;
@@ -248,6 +312,248 @@ export class RunStore {
         `check that ${path} and its directory are readable`,
       );
     }
+  }
+
+
+  /**
+   * Records a worktree path, durably, BEFORE the worktree is created (AD-8).
+   *
+   * Story 3.1 calls this immediately before `git worktree add`, so a `kill -9`
+   * in between leaves a readable record of a directory that may or may not
+   * exist — which is recoverable, because removing an absent worktree is a
+   * no-op. The opposite ordering is not recoverable: a worktree nothing on disk
+   * knows about is a leak `clean` can never find.
+   *
+   * Idempotent. Recording the same path twice keeps ONE entry and costs no
+   * second fsync, because `clean` and a retrying pipeline both replay.
+   */
+  async recordWorktree(runId: string, worktreePath: string): Promise<void> {
+    await this.#updateManifest(runId, (manifest) =>
+      manifest.worktrees.includes(worktreePath)
+        ? null
+        : { ...manifest, worktrees: [...manifest.worktrees, worktreePath] },
+    );
+  }
+
+  /**
+   * Records a process-group id, durably, BEFORE the run observes the child.
+   *
+   * Pass this as `ProcessRunOptions.onProcessGroup`; the runner awaits it before
+   * anything can observe the process, which is AC1's ordering.
+   *
+   * HONEST ABOUT THE ORDERING: a pgid cannot exist before `fork`, so the true
+   * sequence is spawn → learn the pgid → fsync → use the child, and the residual
+   * window is one spawn syscall wide. Claiming an ordering the OS does not offer
+   * would be worse than naming the window.
+   *
+   * The reaping evidence is written FIRST, then the manifest. Crash between the
+   * two and the manifest simply has no pgid — nothing claims a resource that
+   * cannot be verified. The reverse order would leave `clean` with a pgid it
+   * must refuse to signal.
+   */
+  async recordProcessGroup(runId: string, pgid: number): Promise<void> {
+    await this.#recordProcessGroupEvidence(runId, pgid);
+    await this.#updateManifest(runId, (manifest) =>
+      manifest.processGroups.includes(pgid)
+        ? null
+        : { ...manifest, processGroups: [...manifest.processGroups, pgid] },
+    );
+  }
+
+  /**
+   * Marks a run's resources reaped. Idempotent.
+   *
+   * "Reaped" is about RESOURCES, never results (Q51): the run directory, its
+   * evidence and its `result.json` all survive. V0 keeps every run, and the
+   * dogfooding data Epic 7 exists to collect is precisely what a retention
+   * policy would delete.
+   */
+  async markReaped(runId: string): Promise<void> {
+    await this.#updateManifest(runId, (manifest) =>
+      manifest.reaped ? null : { ...manifest, reaped: true },
+    );
+  }
+
+  /**
+   * The recorded-at instant for each pgid of a run — `clean`'s identity proof.
+   *
+   * Returns an empty map when no pgid was ever recorded. Throws `InfraError`
+   * naming the path when the evidence exists but cannot be read: silently
+   * treating corruption as "no evidence" would turn a manifest full of live
+   * process groups into a clean-looking run.
+   */
+  async readProcessGroupRecords(runId: string): Promise<ReadonlyMap<number, string>> {
+    const path = join(this.runDir(runId), PROCESS_GROUPS_FILENAME);
+
+    let text: string;
+    try {
+      text = await readFile(path, 'utf8');
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+        return new Map();
+      }
+      throw new InfraError(
+        `could not read the process-group record for ${runId}: ${describe(cause)}`,
+        `check that ${path} is readable`,
+      );
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new InfraError(
+        `process-group record is not valid JSON: ${path}`,
+        'the file is corrupt, so the process groups this run recorded cannot be verified; inspect them with `ps` before killing anything by hand',
+      );
+    }
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new InfraError(
+        `process-group record is malformed: ${path}`,
+        'expected an object mapping process-group ids to the instant each was recorded',
+      );
+    }
+
+    const records = new Map<number, string>();
+    for (const [key, value] of Object.entries(parsed)) {
+      const pgid = Number(key);
+      if (Number.isInteger(pgid) && typeof value === 'string') {
+        records.set(pgid, value);
+      }
+    }
+    return records;
+  }
+
+  /**
+   * Writes one evidence file into a run directory and returns its RELATIVE path.
+   *
+   * The seam stories 3.4 and 3.5 asked for during intent-sync, landed here in
+   * wave A so two wave-B stories do not collide in this file. The return value
+   * goes straight into an `EvidenceRef` (Q48), and it is structurally incapable
+   * of being absolute.
+   *
+   * CONTAINMENT IS THE POINT. `relativeName` ultimately derives from a gate id
+   * in the operator's own config, which the merged schema constrains only to
+   * "non-empty" — so a `..` really can arrive here. Escape is refused with the
+   * offending name in the message rather than sanitised silently, because a
+   * caller that hands this a dot-dot has a bug worth seeing. Nested names are
+   * fine and their parent directories are created.
+   */
+  async writeEvidenceFile(runId: string, relativeName: string, contents: string): Promise<string> {
+    const dir = this.runDir(runId);
+    const contained = this.#containedPath(dir, relativeName);
+
+    await mkdir(dirname(contained.absolute), { recursive: true });
+    await this.#writeDurably(dirname(contained.absolute), basename(contained.absolute), contents);
+
+    return contained.relative;
+  }
+
+  /**
+   * Resolves `relativeName` inside `dir`, refusing anything that leaves it.
+   *
+   * `resolve` + a prefix test rather than string inspection of the input: a
+   * blacklist of `..` sequences is defeated by encodings and by symlink-free
+   * paths that normalise outward, while asking the path module where the name
+   * actually lands is not.
+   */
+  #containedPath(dir: string, relativeName: string): { absolute: string; relative: string } {
+    const reject = (why: string): never => {
+      throw new InfraError(
+        `refusing to write evidence to '${relativeName}': ${why}`,
+        'evidence file names are relative to the run directory and may not escape it or replace a file SpecWitness owns',
+      );
+    };
+
+    if (relativeName.length === 0) {
+      return reject('the name is empty');
+    }
+    if (isAbsolute(relativeName)) {
+      return reject('it is an absolute path');
+    }
+
+    const absolute = resolve(dir, relativeName);
+    if (absolute === dir || !absolute.startsWith(`${dir}${sep}`)) {
+      return reject('it resolves outside the run directory');
+    }
+
+    const rel = relative(dir, absolute);
+    if (RESERVED_FILENAMES.has(rel)) {
+      return reject('that file belongs to SpecWitness');
+    }
+
+    return { absolute, relative: rel };
+  }
+
+  /**
+   * Reads a run's manifest, applies `mutate`, and writes it back durably.
+   *
+   * `mutate` returns `null` when nothing changed, and then nothing is written:
+   * idempotence is not only about deduplicating entries, it is about not paying
+   * an fsync per redundant append on a busy run.
+   *
+   * Serialised through `#mutations` so two concurrent appends cannot both read
+   * the pre-append manifest and lose one of the entries. Reuses `#writeDurably`
+   * rather than inventing a second write path — one durability discipline, one
+   * place to get it wrong.
+   */
+  async #updateManifest(
+    runId: string,
+    mutate: (manifest: RunManifest) => RunManifest | null,
+  ): Promise<void> {
+    await this.#serialize(async () => {
+      const manifest = await this.readManifest(runId);
+      const next = mutate(manifest);
+      if (next === null) {
+        return;
+      }
+      await this.#writeDurably(
+        this.runDir(runId),
+        MANIFEST_FILENAME,
+        `${JSON.stringify(next, null, 2)}\n`,
+      );
+    });
+  }
+
+  /** Adds one pgid to the reaping-evidence file, durably. Serialised. */
+  async #recordProcessGroupEvidence(runId: string, pgid: number): Promise<void> {
+    const recordedAt = this.#clock.now().toISOString();
+
+    await this.#serialize(async () => {
+      const existing = await this.readProcessGroupRecords(runId);
+      if (existing.has(pgid)) {
+        return;
+      }
+
+      const merged: Record<string, string> = {};
+      for (const [key, value] of existing) {
+        merged[String(key)] = value;
+      }
+      merged[String(pgid)] = recordedAt;
+
+      await this.#writeDurably(
+        this.runDir(runId),
+        PROCESS_GROUPS_FILENAME,
+        `${JSON.stringify(merged, null, 2)}\n`,
+      );
+    });
+  }
+
+  /**
+   * Runs `work` after every previously queued mutation, whatever their outcome.
+   *
+   * A rejected mutation must not poison the queue: one failed append would
+   * otherwise make every later append reject with an unrelated error, which is
+   * how a single unlucky write turns into a run that cannot record anything.
+   */
+  async #serialize<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.#mutations.then(work, work);
+    this.#mutations = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   }
 
   /**
