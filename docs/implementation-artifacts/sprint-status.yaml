@@ -48,7 +48,7 @@ development_status:
   2-1-bmad-v6-ingestion-to-epicspec: review
   2-2-contract-model-canonical-serialization-fingerprint: review
   2-3-agentprovider-port-roles-structured-output-gate: review
-  2-4-claude-code-cli-adapter: ready-for-dev
+  2-4-claude-code-cli-adapter: review
   2-5-codex-cli-adapter: ready-for-dev
   2-6-specwitness-contract-epic-generate-review-freeze-status: ready-for-dev
   2-7-amendment-flow-runtime-integrity-provider-doctor-checks: ready-for-dev
