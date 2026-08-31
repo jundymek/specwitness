@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -134,6 +134,97 @@ describe('P2 — an artifact root that is the project root itself', () => {
       expect(error).toBeInstanceOf(IngestError);
       expect((error as IngestError).message).toContain('- epics.md');
       expect((error as IngestError).message).not.toContain('- /epics.md');
+    }
+  });
+});
+
+describe('P2 (round 2) — an unparseable story heading refuses the whole ingest', () => {
+  function ingestMalformed() {
+    return ingestEpic({
+      projectRoot: join(FIXTURES, 'malformed-story'),
+      epicId: '7',
+      planningArtifacts: 'docs/planning-artifacts',
+      implementationArtifacts: 'docs/implementation-artifacts',
+    });
+  }
+
+  it('refuses rather than returning only the story it could parse', () => {
+    // Before the fix this succeeded with one story, silently dropping two —
+    // a plausible EpicSpec that verifies less than it claims to.
+    expect(ingestMalformed).toThrow(IngestError);
+  });
+
+  it('names the heading that claims a different epic', () => {
+    try {
+      ingestMalformed();
+      throw new Error('expected ingestEpic to throw');
+    } catch (error) {
+      expect((error as IngestError).message).toContain('names epic 8');
+      expect((error as IngestError).message).toContain('docs/planning-artifacts/epics.md:');
+    }
+  });
+
+  it('names the heading that says Story but does not parse as one', () => {
+    try {
+      ingestMalformed();
+      throw new Error('expected ingestEpic to throw');
+    } catch (error) {
+      expect((error as IngestError).message).toContain('looks like a story heading');
+      expect((error as IngestError).message).toContain('seven-two');
+    }
+  });
+
+  it('does not complain about a level-3 heading that is not about a story', () => {
+    // `### Notes` is not a claim that a story lives there, so it is simply
+    // skipped. Treating every unmatched heading as a defect would make the
+    // parser refuse ordinary documentation.
+    try {
+      ingestMalformed();
+      throw new Error('expected ingestEpic to throw');
+    } catch (error) {
+      expect((error as IngestError).message).not.toContain('Notes');
+    }
+  });
+
+  it('leaves well-formed real artifacts unaffected', () => {
+    // The guard must not fire on this repository's own epics, which are the
+    // specimens the parser was written against.
+    expect(() =>
+      ingestEpic({
+        projectRoot: fileURLToPath(new URL('../../../', import.meta.url)),
+        epicId: '1',
+        planningArtifacts: 'docs/planning-artifacts',
+        implementationArtifacts: 'docs/implementation-artifacts',
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('P2 (round 2) — unreadable directory metadata is a named IngestError', () => {
+  it('reports an EACCES on an artifact entry as an IngestError naming the path', () => {
+    // statSync's `throwIfNoEntry: false` suppresses ENOENT only. Unclassified,
+    // an EACCES escapes as "this is a SpecWitness bug" — exit 3 either way, but
+    // pointing the user at entirely the wrong thing.
+    const project = tempProject();
+    const implementation = join(project, 'docs', 'implementation-artifacts');
+    const locked = join(implementation, 'locked');
+    mkdirSync(locked, { recursive: true });
+    mkdirSync(join(locked, 'epic-7-hidden'), { recursive: true });
+    symlinkSync(join(locked, 'epic-7-hidden'), join(implementation, 'epic-7-via-locked'));
+    chmodSync(locked, 0o000);
+
+    try {
+      expect(() =>
+        ingestEpic({
+          projectRoot: project,
+          epicId: '7',
+          planningArtifacts: 'docs/planning-artifacts',
+          implementationArtifacts: 'docs/implementation-artifacts',
+        }),
+      ).toThrow(IngestError);
+    } finally {
+      // Restore before afterEach removes the tree, or cleanup itself fails.
+      chmodSync(locked, 0o755);
     }
   });
 });

@@ -57,6 +57,9 @@ const EPIC_HEADING = /^Epic\s+(\d+)\s*(?:[:.–—-]\s*(.*))?$/;
 /** `### Story <n>.<m>: <title>`, with the same full-number discipline. */
 const STORY_HEADING = /^Story\s+(\d+)\.(\d+)\s*(?:[:.–—-]\s*(.*))?$/;
 
+/** A heading asserting that a story lives here, however it is then spelled. */
+const CLAIMS_TO_BE_A_STORY = /^Story\b/i;
+
 /** The line that opens a criteria block in this layout. */
 const CRITERIA_MARKER = /^\*\*Acceptance Criteria:?\*\*:?\s*$/i;
 
@@ -98,7 +101,15 @@ export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
   const title = headingText(lines[epicIndex] as string, 2) ?? '';
   const epicTitle = EPIC_HEADING.exec(title)?.[2]?.trim() ?? '';
 
-  const storyStarts = findStoryHeadings(lines, epicIndex + 1, epicEnd, request.epicNumber);
+  const problems: string[] = [];
+  const storyStarts = findStoryHeadings(
+    lines,
+    epicIndex + 1,
+    epicEnd,
+    request.epicNumber,
+    relativePath,
+    problems,
+  );
   const goalEnd = storyStarts[0]?.index ?? epicEnd;
 
   const stories = storyStarts.map((start, position) =>
@@ -122,6 +133,7 @@ export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
     stories,
     searched,
     notes,
+    problems,
   };
 }
 
@@ -148,21 +160,49 @@ interface StoryStart {
   readonly title: string;
 }
 
-/** The `### Story <epic>.<m>` headings inside `[start, end)`. */
+/**
+ * The `### Story <epic>.<m>` headings inside `[start, end)`.
+ *
+ * A level-3 heading that is not about a story at all (`### Notes`) is simply not
+ * a story and is skipped. But a heading that CLAIMS to be a story and cannot be
+ * parsed — a malformed number, or a `### Story 8.1` sitting under `## Epic 7` —
+ * is recorded as a problem, and ingestion then refuses. Skipping it would
+ * succeed with a partial EpicSpec, dropping that story's acceptance criteria
+ * from the contract silently; the whole point of this gate is that a criterion
+ * cannot go missing without anyone being told.
+ */
 function findStoryHeadings(
   lines: readonly string[],
   start: number,
   end: number,
   epicNumber: number,
+  relativePath: string,
+  problems: string[],
 ): StoryStart[] {
   const starts: StoryStart[] = [];
   for (let index = start; index < end; index += 1) {
     const text = headingText(lines[index] as string, 3);
     if (text === undefined) continue;
+
     const match = STORY_HEADING.exec(text);
-    // A `### Story 8.1` nested under `## Epic 7` is a documentation bug; take
-    // the epic heading's word for which epic this is and skip the stray.
-    if (match === null || Number(match[1]) !== epicNumber) continue;
+    if (match === null) {
+      if (CLAIMS_TO_BE_A_STORY.test(text)) {
+        problems.push(
+          `${relativePath}:${index + 1}: '### ${text}' looks like a story heading but is not ` +
+            `'### Story <epic>.<story>: <title>'`,
+        );
+      }
+      continue;
+    }
+
+    if (Number(match[1]) !== epicNumber) {
+      problems.push(
+        `${relativePath}:${index + 1}: '### ${text}' is inside '## Epic ${epicNumber}' but ` +
+          `names epic ${match[1]}`,
+      );
+      continue;
+    }
+
     starts.push({
       index,
       id: `${match[1]}.${match[2]}`,

@@ -67,6 +67,17 @@ export interface EpicSourceReading {
   readonly searched: readonly string[];
   /** What was found instead: "exists but contains no '## Epic 7'", and so on. */
   readonly notes: readonly string[];
+  /**
+   * Artifact content that claims to be a story but could not be parsed.
+   *
+   * Distinct from `notes`, which describe an absence. A problem is a positive
+   * statement in the artifact that this reader could not honour — a
+   * `### Story 8.1` heading sitting under `## Epic 7`, say. Ingestion refuses
+   * outright when any is present: silently returning the subset it COULD parse
+   * would drop acceptance criteria from the contract without anyone noticing,
+   * which is precisely the fail-open behaviour AC3 forbids.
+   */
+  readonly problems?: readonly string[];
 }
 
 /** A source of epics. One per planning-artifact format. */

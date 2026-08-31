@@ -166,7 +166,7 @@ function findEpicDirectories(
   const epicDirectories: string[] = [];
 
   for (const entry of entries) {
-    if (!statSync(join(rootPath, entry), { throwIfNoEntry: false })?.isDirectory()) continue;
+    if (!isDirectory(join(rootPath, entry), repoPath(request.rootLabel, entry))) continue;
     if (/^epic-\d/i.test(entry)) epicDirectories.push(entry);
     if (pattern.test(entry)) matched.push(entry);
   }
@@ -181,6 +181,28 @@ function findEpicDirectories(
   }
 
   return matched.sort();
+}
+
+/**
+ * Whether `absolutePath` is a directory.
+ *
+ * `throwIfNoEntry: false` only suppresses ENOENT — an entry whose metadata
+ * cannot be read at all (a symlink traversing an EACCES directory, say) still
+ * throws. Unclassified, that escapes as "this is a SpecWitness bug", which
+ * exits 3 like an IngestError but sends the user to look in entirely the wrong
+ * place. A broken symlink, by contrast, is simply not a directory.
+ */
+function isDirectory(absolutePath: string, relativePath: string): boolean {
+  try {
+    return statSync(absolutePath, { throwIfNoEntry: false })?.isDirectory() ?? false;
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException | undefined)?.code;
+    throw new IngestError(
+      `cannot inspect ${relativePath}${code === undefined ? '' : ` (${code})`}`,
+      'check the entry is readable — SpecWitness must be able to tell a story directory ' +
+        'from a file to know which stories exist',
+    );
+  }
 }
 
 function listEntries(absolutePath: string, relativePath: string): string[] {

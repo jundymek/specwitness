@@ -93,6 +93,8 @@ export function ingestEpic(input: IngestInput): EpicSpec {
     rootLabel: implementationRoot,
   });
 
+  assertNoUnparseableArtifacts(canonicalId, fromEpicsFile, fromStoryFiles);
+
   const stories = merge(fromEpicsFile, fromStoryFiles);
 
   if (stories.length === 0) {
@@ -220,6 +222,34 @@ function notFound(
   }
 
   return new IngestError(lines.join('\n'), HINT);
+}
+
+/**
+ * AC3, fail-closed: artifact content that claims to be a story but cannot be
+ * parsed refuses the whole ingest.
+ *
+ * The tempting alternative — skip the malformed heading and return the stories
+ * that DID parse — produces a perfectly plausible EpicSpec that is quietly
+ * missing a story and all of its acceptance criteria. That contract then passes
+ * verification while the epic it claims to cover is only partly verified, which
+ * is the single worst failure this product can have: a green result that means
+ * nothing. Refusing is noisy and correct.
+ */
+function assertNoUnparseableArtifacts(
+  canonicalId: string,
+  ...readings: readonly EpicSourceReading[]
+): void {
+  const problems = readings.flatMap((reading) => reading.problems ?? []);
+  if (problems.length === 0) return;
+
+  throw new IngestError(
+    [
+      `${canonicalId}: the planning artifacts contain content that could not be parsed.`,
+      ...problems.map((problem) => `  - ${problem}`),
+    ].join('\n'),
+    'fix the heading in the planning artifact — SpecWitness refuses to ingest a partial ' +
+      'epic, because a contract missing a story silently verifies less than it claims to',
+  );
 }
 
 /**
