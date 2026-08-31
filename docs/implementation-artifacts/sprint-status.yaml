@@ -51,7 +51,7 @@ development_status:
   2-4-claude-code-cli-adapter: review
   2-5-codex-cli-adapter: review
   2-6-specwitness-contract-epic-generate-review-freeze-status: done
-  2-7-amendment-flow-runtime-integrity-provider-doctor-checks: ready-for-dev
+  2-7-amendment-flow-runtime-integrity-provider-doctor-checks: review
   2-8-hermetic-dependency-rules-test: ready-for-dev
   epic-2-retrospective: optional
 

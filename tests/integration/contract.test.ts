@@ -379,6 +379,40 @@ describe('contract <epic> — a tampered contract', () => {
     expect(payload.integrity).toBe('mismatch');
   });
 
+  it('is reported by the HUMAN rendering too, not only in --json (2.7)', async () => {
+    // Story 2.7's Task 3 asks for both renderings. An operator reading the
+    // default output must learn the contract is tampered without having to
+    // remember that --json says more than the text does.
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+    await tamper(root);
+
+    const result = await run(root, 'contract', '7', '--status');
+
+    expect(result.exitCode).toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/tampered|mismatch/i);
+  });
+
+  it('is refused by --amend, which cannot launder it into the audit trail (2.7)', async () => {
+    // UJ-5's core: the only legitimate way forward from a tampered contract is
+    // to restore it, never to amend it. Amending would write a history entry
+    // over content that never passed an integrity check, giving the tampering a
+    // clean chain of custody. Runs with `input: ''`, so the TTY refusal fires
+    // first — which is itself the point: an agent gets no further either way.
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+    await tamper(root);
+    const before = await contractText(root);
+
+    const result = await run(root, 'contract', '7', '--amend', '--reason', 'making it pass');
+
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('ERROR:');
+    expect(await contractText(root)).toBe(before);
+  });
+
   it('refuses a re-freeze with exit 3 and an ERROR/HINT pair', async () => {
     const root = await project();
     await run(root, 'contract', '7');
@@ -437,5 +471,72 @@ describe('contract <epic> — incoherent option combinations are refused', () =>
     const result = await run(root, 'contract', '7', '--freeze', '--force');
 
     expect(result.exitCode).toBe(64);
+  });
+});
+
+/**
+ * ADR-005 through the built binary (story 2.7).
+ *
+ * `input: ''` gives the child no TTY, which is exactly how the harness and any
+ * coding agent invoke it. These assertions are the security control, observed
+ * from outside the process: no injected predicate, no test seam, just the CLI
+ * an agent would actually run.
+ */
+describe('contract <epic> --amend — AC2, the no-TTY refusal', () => {
+  it('refuses with exit 3 and the ADR-005 wording', async () => {
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+    const before = await contractText(root);
+
+    const result = await run(root, 'contract', '7', '--amend', '--reason', 'scope reduced');
+
+    // 3, not 64: the invocation is well-formed and the context is wrong.
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('ERROR:');
+    expect(result.stderr).toContain('HINT:');
+    expect(result.stderr).toContain('interactive terminal');
+    expect(result.stderr).toContain('operator action');
+    // Nothing was written.
+    expect(await contractText(root)).toBe(before);
+  });
+
+  it('is not bypassed by --force, which is refused as incoherent', async () => {
+    // The flag an agent blocked by the refusal would reach for next: it is the
+    // only override in the command. Refused, not silently ignored — someone
+    // whose --force was dropped would believe they had forced something.
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+    const before = await contractText(root);
+
+    const result = await run(root, 'contract', '7', '--amend', '--force');
+
+    expect(result.exitCode).toBe(64);
+    expect(await contractText(root)).toBe(before);
+  });
+
+  it('offers no --yes, --confirm or --non-interactive in its help', async () => {
+    // ADR-005: "amendments cannot be scripted, by anyone." An agent reads
+    // --help looking for the escape hatch; there must not be one to find.
+    const root = await project();
+
+    const result = await run(root, 'contract', '--help');
+
+    expect(result.stdout).toContain('--amend');
+    expect(result.stdout).not.toMatch(/--yes|--confirm|--non-interactive/);
+  });
+
+  it('refuses a frozen contract regeneration by pointing at --amend', async () => {
+    // The other half of the loop: the hint an operator actually meets first.
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+
+    const result = await run(root, 'contract', '7');
+
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('--amend');
+    expect(result.stderr).toContain('interactive terminal');
   });
 });

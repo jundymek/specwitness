@@ -54,6 +54,7 @@ import {
   writeContractFileAtomically,
 } from '../../authoring/contract-file.js';
 import { generateDraft } from '../../authoring/contract.js';
+import { processAmendIo, runAmend } from './contract-amend.js';
 import { contractStatusState, type LoadedContract } from '../../authoring/verifiable.js';
 import { loadConfig, resolveRoleProvider } from '../../config/index.js';
 import type { Contract } from '../../domain/contract.js';
@@ -78,6 +79,8 @@ interface ContractOptions {
   readonly status?: boolean;
   readonly json?: boolean;
   readonly force?: boolean;
+  readonly amend?: boolean;
+  readonly reason?: string;
 }
 
 export function register(program: Command): void {
@@ -89,6 +92,11 @@ export function register(program: Command): void {
     .option('--status', 'report the contract state without prompting')
     .option('--json', 'with --status, emit a machine-readable report on stdout')
     .option('--force', 'regenerate over an existing DRAFT (never a frozen contract)')
+    .option('--amend', 'supersede a frozen contract with a new version (operator only, requires a terminal)')
+    .option(
+      '--reason <text>',
+      'with --amend, the audit-trail reason; prompted for when omitted. NOT a confirmation bypass',
+    )
     .addHelpText(
       'after',
       '\nRun this at the project root — the directory holding .specwitness/.\n\n' +
@@ -118,6 +126,24 @@ export async function runContract(
   // environment problem.
   const epic = normalizeEpicId(rawEpic);
   const projectRoot = process.cwd();
+
+  // AMEND DISPATCHES FIRST, BEFORE the project check. The no-TTY refusal is
+  // absolute (ADR-005), so it must not depend on filesystem state: run in an
+  // uninitialised directory, `assertProjectInitialised` would answer "run init"
+  // and an agent would learn that the refusal has an environmental exception.
+  // A policy with an exception is not a policy. `runAmend` checks the TTY first
+  // and re-asserts initialisation itself, so the interactive path still gets
+  // the init hint.
+  if (options.amend === true) {
+    await runAmend({
+      projectRoot,
+      epicId: epic,
+      ...(options.reason === undefined ? {} : { reason: options.reason }),
+      clock,
+      io: processAmendIo(),
+    });
+    return;
+  }
 
   await assertProjectInitialised(projectRoot);
 
@@ -157,6 +183,7 @@ function assertCoherentOptions(options: ContractOptions): void {
   const MODES: readonly (readonly [string, boolean])[] = [
     ['--status', options.status === true],
     ['--freeze', options.freeze === true],
+    ['--amend', options.amend === true],
   ];
 
   const requested = MODES.filter(([, on]) => on).map(([name]) => name);
@@ -172,6 +199,17 @@ function assertCoherentOptions(options: ContractOptions): void {
     throw new UsageError(
       '--json only applies to --status, and on its own it would silently generate a contract',
       `run 'specwitness contract <epic> --status --json' to read the state, or drop --json to generate a draft`,
+    );
+  }
+
+  // Same rule as `--json` above, and for the same reason: an invocation shaped
+  // like an amendment must never generate a contract by surprise.
+  // `contract 7 --reason "..."` reads like the amend flow, and silently
+  // ignoring the flag would write a fresh draft over the operator's intent.
+  if (options.reason !== undefined && options.amend !== true) {
+    throw new UsageError(
+      '--reason only applies to --amend, and on its own it would silently generate a contract',
+      `run 'specwitness contract <epic> --amend' in a terminal to amend a frozen contract`,
     );
   }
 
@@ -292,6 +330,23 @@ async function generateContract(
         `amend it explicitly with 'specwitness contract ${epic} --amend' (requires an ` +
           `interactive terminal), or remove ${contractRelativePath(epic)} deliberately if this ` +
           'contract was never real',
+      );
+    }
+
+    // A draft carrying AMENDMENT HISTORY is not an ordinary draft, and --force
+    // must not reach it. Between --amend and --freeze the contract sits in the
+    // draft state, and generation treats every draft as replaceable — from a
+    // NON-INTERACTIVE invocation. An agent that cannot amend could otherwise
+    // erase the record that an amendment happened and reset to a fresh version
+    // 1 with empty history: defeating the TTY gate by deleting its output
+    // rather than by bypassing it. The audit trail is the point of the gate,
+    // so it outlives the frozen flag that used to protect it.
+    if (existing.contract.meta.history.length > 0) {
+      throw new IntegrityError(
+        `the draft contract for ${epic} carries amendment history ` +
+          `(version ${existing.contract.spec.version}); regenerating would erase the audit trail`,
+        `freeze it with 'specwitness contract ${epic} --freeze' to complete the amendment, or ` +
+          `remove ${contractRelativePath(epic)} deliberately if the amendment was a mistake`,
       );
     }
 

@@ -114,7 +114,46 @@ describe('NFR-1: doctor never reads a credential store', () => {
     expect(violations).toEqual([]);
   });
 
-  it('reads exactly one environment variable, PATH', () => {
+  /**
+   * The env allow-list — EXACT, and every entry justified.
+   *
+   * Story 1.5 pinned this at `['PATH']`. Story 2.7 widened it to three, by
+   * NAME only, and the widening is the deliberate act the guard exists to
+   * force. It is spelled as an exact list rather than a predicate on purpose:
+   * relaxing it to "any variable", or to a `toContain`, would leave the
+   * assertion green while deleting everything it was protecting.
+   *
+   * Why each name is permitted:
+   *
+   *   PATH               binary discovery. Doctor reports whether a tool is
+   *                      resolvable; it cannot do that without knowing where
+   *                      the shell would look. Carries no credential.
+   *   ANTHROPIC_API_KEY  read for PRESENCE ONLY, to warn that a `claude`
+   *                      invocation could bill a metered API account instead
+   *                      of a subscription (FR-15). The value is discarded at
+   *                      the edge; only the name reaches a check, and only the
+   *                      name is ever printed.
+   *   ANTHROPIC_AUTH_TOKEN  the same. Story 2.4's adapter withholds it
+   *                      alongside the API key because it authenticates a
+   *                      billed Anthropic account just as directly; a
+   *                      diagnostic silent on it would miss a hazard the
+   *                      product itself already recognises.
+   *   OPENAI_API_KEY     the same, for `codex`.
+   *
+   * The distinction that makes the last two legitimate: naming a variable in
+   * order to WARN about it is the categorical opposite of reading a credential
+   * store. Doctor never learns a secret, never forwards one, and never prints
+   * one — a warning that echoed a key would leak it into terminal scrollback,
+   * CI logs and PR bodies, which is worse than the surprise bill it warned
+   * about.
+   *
+   * NOT covered here: `src/providers/**`, which reads the same two names in
+   * order to WITHHOLD them from a child process. Story 2.3 guards those in
+   * their own `describe` block with their own exact list, because two modules
+   * with different legitimate reads deserve two lists that each stay tight —
+   * a single union list becomes "everything anyone needed" within an epic.
+   */
+  it('reads exactly the allow-listed environment variables, and no others', () => {
     const envReads = doctorSources().flatMap((file) => {
       const source = ts.createSourceFile(
         file,
@@ -145,7 +184,60 @@ describe('NFR-1: doctor never reads a credential store', () => {
       return names;
     });
 
-    expect([...new Set(envReads)]).toEqual(['PATH']);
+    expect([...new Set(envReads)].sort()).toEqual([
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'OPENAI_API_KEY',
+      'PATH',
+    ]);
+  });
+
+  /**
+   * Doctor's billing list must cover every variable the ADAPTERS treat as
+   * billable, or the two halves of FR-15 disagree: the product would withhold a
+   * credential it considers a hazard while the diagnostic stayed silent about
+   * it. That is exactly what happened with `ANTHROPIC_AUTH_TOKEN`, which story
+   * 2.4 withheld from day one and doctor did not look for.
+   *
+   * The adapters' lists are module-private, so this reads their source rather
+   * than importing a constant. A source scan is the weaker tool, but the
+   * alternative — noticing by hand that someone added a fourth name — is what
+   * already failed once.
+   *
+   * WHAT THIS DOES AND DOES NOT CATCH, stated because the difference matters:
+   * it proves doctor KNOWS every name the adapters withhold. It does NOT prove
+   * doctor treats each one as spendable — a name read at the edge but missing
+   * from `SPENDABLE_BY` would pass here. That second property is asserted
+   * behaviourally in `billing-risk-env.test.ts`, one test per variable, which
+   * is the right level for it.
+   */
+  it('covers every billing variable the provider adapters withhold', () => {
+    const adapterSources = ['claude-code-cli.ts', 'codex-cli.ts'].map((file) =>
+      readFileSync(join(process.cwd(), 'src', 'providers', file), 'utf8'),
+    );
+
+    const withheld = new Set<string>();
+    for (const source of adapterSources) {
+      const block = /DEFAULT_BILLING_ENV_VARS[^=]*=\s*\[([^\]]*)\]/.exec(source);
+      expect(block).not.toBeNull();
+      for (const match of (block?.[1] ?? '').matchAll(/'([A-Z0-9_]+)'/g)) {
+        withheld.add(match[1] as string);
+      }
+    }
+
+    // Guards the guard: an empty set would pass vacuously.
+    expect(withheld.size).toBeGreaterThan(1);
+
+    const doctorKnows = new Set(
+      doctorSources().flatMap((file) => {
+        const text = readFileSync(file, 'utf8');
+        return [...text.matchAll(/'(ANTHROPIC_[A-Z_]+|OPENAI_[A-Z_]+)'/g)].map(
+          (match) => match[1] as string,
+        );
+      }),
+    );
+
+    expect([...withheld].filter((name) => !doctorKnows.has(name))).toEqual([]);
   });
 });
 
