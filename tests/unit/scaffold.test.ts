@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -417,6 +417,30 @@ describe('nothing is written until the whole layout is known to be valid', () =>
     expect(err).toBeInstanceOf(InfraError);
     // The point: the config the user cared about is byte-for-byte intact.
     expect(await readFile(configPath(), 'utf8')).toBe(precious);
+  });
+
+  it('does not replace the config when a later write fails on permissions', async () => {
+    // Phase 1 cannot see this one: an existing writable config.yaml inside a
+    // read-only .specwitness/ IS overwritable (writing an existing file needs
+    // permission on the file, not the directory), while creating .gitignore
+    // beside it is not. Ordering the config write last is what saves the user's
+    // data here — inspection alone cannot.
+    await makeGitDir();
+    await mkdir(join(root, '.specwitness'), { recursive: true });
+
+    const precious = 'version: 1\nproject:\n  baseBranch: develop\n# hand-tuned\n';
+    await writeFile(configPath(), precious, 'utf8');
+    await chmod(join(root, '.specwitness'), 0o500);
+
+    try {
+      const err = await scaffold(root, { force: true }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(InfraError);
+      expect(await readFile(configPath(), 'utf8')).toBe(precious);
+    } finally {
+      // Restore write permission so afterEach can clean up.
+      await chmod(join(root, '.specwitness'), 0o700);
+    }
   });
 
   it('does not create directories when the config entry is invalid', async () => {

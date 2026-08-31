@@ -59,18 +59,24 @@ if [ "$help_rc" -ne 0 ]; then
 fi
 
 echo "==> exit codes 64 and 3 must survive packaging"
+# The 3 case used to rely on `init` being an unimplemented stub. Story 1.4
+# implemented it, so this now asserts something better and permanent: the
+# consumer directory is not a Git repository, so `init` raises a real AD-7
+# InfraError, and the check proves that error still maps to 3 through a packed
+# install. Keep the invocation in $CONSUMER (a mktemp dir) — anywhere inside a
+# repository it would scaffold for real and exit 0.
 set +e
 "$CLI" definitely-not-a-command >/dev/null 2>&1
 usage_rc=$?
 "$CLI" init >/dev/null 2>&1
-stub_rc=$?
+infra_rc=$?
 set -e
 if [ "$usage_rc" -ne 64 ]; then
   echo "ERROR: unknown command exited $usage_rc, expected 64" >&2
   exit 1
 fi
-if [ "$stub_rc" -ne 3 ]; then
-  echo "ERROR: stub command exited $stub_rc, expected 3" >&2
+if [ "$infra_rc" -ne 3 ]; then
+  echo "ERROR: init outside a Git repository exited $infra_rc, expected 3" >&2
   exit 1
 fi
 
@@ -81,4 +87,4 @@ if tar -tzf "$TARBALL" | grep -Eq '^package/(src|tests)/'; then
   exit 1
 fi
 
-echo "OK: packed tarball installs and behaves (help 0, usage 64, stub 3)"
+echo "OK: packed tarball installs and behaves (help 0, usage 64, infra 3)"

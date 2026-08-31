@@ -190,16 +190,15 @@ export async function scaffold(
   // fails while the repository is still untouched.
   const configContents = configWritten ? await renderConfig(projectRoot) : undefined;
 
-  // PHASE 2 — write. Nothing below throws for a reason phase 1 could have seen.
+  // PHASE 2 — write, in the order that risks the user's data least.
+  //
+  // Replacing an existing config is the ONLY irreversible thing this command
+  // does, so it goes LAST: everything else that can fail has already succeeded
+  // by then. Phase 1 cannot catch every failure — an existing writable
+  // config.yaml inside a read-only `.specwitness/` is overwritable while
+  // creating a new file beside it is not — so ordering, not inspection, is what
+  // guarantees `--force` never destroys the config and then fails.
   await ensureDirectory(projectDir, PROJECT_DIR, present, created, skipped);
-
-  if (configContents === undefined) {
-    skipped.push(configRelative);
-  } else {
-    await write(configAbsolute, configContents);
-    // Replaced, not created: the user had a file there and now does not.
-    (configPresent ? replaced : created).push(configRelative);
-  }
 
   await ensureFile(
     join(projectDir, '.gitignore'),
@@ -220,7 +219,28 @@ export async function scaffold(
     );
   }
 
-  return { created, skipped, replaced, configWritten };
+  if (configContents === undefined) {
+    skipped.push(configRelative);
+  } else {
+    await write(configAbsolute, configContents);
+    // Replaced, not created: the user had a file there and now does not.
+    (configPresent ? replaced : created).push(configRelative);
+  }
+
+  // Reported in layout order rather than write order: which write happens first
+  // is an internal safety detail and should not reshuffle what the user reads.
+  return {
+    created: inLayoutOrder(created),
+    skipped: inLayoutOrder(skipped),
+    replaced: inLayoutOrder(replaced),
+    configWritten,
+  };
+}
+
+/** Keeps reported paths in a stable, human-sensible order. */
+function inLayoutOrder(paths: readonly string[]): string[] {
+  const order = LAYOUT.map((entry) => entry.relative);
+  return [...paths].sort((a, b) => order.indexOf(a) - order.indexOf(b));
 }
 
 /** What the scaffold expects at each path. */
