@@ -169,7 +169,16 @@ export async function runAmend(options: AmendCommandOptions): Promise<void> {
   // check passed.
   const supersededFingerprint = assertAmendable(current);
 
-  const reason = normalizeReason(options.reason ?? (await askForReason(io)));
+  let supplied = options.reason;
+  if (supplied === undefined) {
+    const answer = await askOrCancel(io, askForReason);
+    if (answer === undefined) {
+      io.write(CANCELLED);
+      return;
+    }
+    supplied = answer;
+  }
+  const reason = normalizeReason(supplied);
 
   io.write(
     [
@@ -186,10 +195,10 @@ export async function runAmend(options: AmendCommandOptions): Promise<void> {
     ].join('\n'),
   );
 
-  const answer = (await io.ask('Amend this contract? [y/N] ')).trim().toLowerCase();
-  if (!AFFIRMATIVE.has(answer)) {
+  const answer = await askOrCancel(io, (sink) => sink.ask('Amend this contract? [y/N] '));
+  if (answer === undefined || !AFFIRMATIVE.has(answer.trim().toLowerCase())) {
     // Nothing is written. The contract is byte-identical to what it was.
-    io.write('Amendment cancelled; the contract is unchanged.\n');
+    io.write(CANCELLED);
     return;
   }
 
@@ -231,6 +240,34 @@ export async function runAmend(options: AmendCommandOptions): Promise<void> {
       '',
     ].join('\n'),
   );
+}
+
+const CANCELLED = 'Amendment cancelled; the contract is unchanged.\n';
+
+/**
+ * Ask, reporting a failure to READ an answer as no answer at all.
+ *
+ * Ctrl+D at the prompt makes readline reject with `AbortError`. Left to
+ * propagate it escaped unclassified and told the operator "this is a
+ * SpecWitness bug — please report it", for an ordinary way of backing out of a
+ * confirmation. Found by driving the real binary through a pty; no injected-IO
+ * test could have caught it, because the injected reader never aborts.
+ *
+ * FAIL CLOSED, at BOTH prompts. `undefined` means the operator never answered,
+ * which cancels — rather than falling through to "a reason is required", which
+ * would answer a cancellation with a usage error. Any failure to obtain consent
+ * is the same as not having it, which is the only safe reading for a control
+ * whose entire purpose is to require a deliberate yes.
+ */
+async function askOrCancel(
+  io: AmendIo,
+  ask: (io: AmendIo) => Promise<string>,
+): Promise<string | undefined> {
+  try {
+    return await ask(io);
+  } catch {
+    return undefined;
+  }
 }
 
 async function askForReason(io: AmendIo): Promise<string> {

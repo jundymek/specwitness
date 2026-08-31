@@ -236,6 +236,62 @@ describe('contract --amend', () => {
       expect(await readFile(file, 'utf8')).toBe(before);
     });
 
+    it('treats a closed stdin (Ctrl+D) as a decline, not as a crash', async () => {
+      // Found by driving the real binary through a pty: Ctrl+D at the prompt
+      // made readline reject with AbortError, which escaped unclassified and
+      // told the operator "this is a SpecWitness bug — please report it". The
+      // file was correctly untouched, but aborting a confirmation is an
+      // ordinary thing to do and must not look like a defect.
+      //
+      // Fail closed: absence of an affirmative answer is a decline. Any failure
+      // to READ consent is the same as not having it.
+      const { root, file } = await projectWith(frozenContract());
+      const before = await readFile(file, 'utf8');
+
+      await runAmend({
+        projectRoot: root,
+        epicId: EPIC,
+        reason: 'scope reduced',
+        clock: { now: () => AT },
+        io: {
+          isInteractive: () => true,
+          write: () => {},
+          ask: async () => {
+            throw Object.assign(new Error('Aborted with Ctrl+D'), { name: 'AbortError' });
+          },
+        },
+      });
+
+      expect(await readFile(file, 'utf8')).toBe(before);
+    });
+
+    it('cancels rather than demanding a reason when the REASON prompt is aborted', async () => {
+      // The same abort at the other prompt. Answering a cancellation with
+      // "an amendment reason is required" would be a usage error for someone
+      // who deliberately backed out.
+      const { root, file } = await projectWith(frozenContract());
+      const before = await readFile(file, 'utf8');
+      const written: string[] = [];
+
+      await runAmend({
+        projectRoot: root,
+        epicId: EPIC,
+        clock: { now: () => AT },
+        io: {
+          isInteractive: () => true,
+          write: (text) => {
+            written.push(text);
+          },
+          ask: async () => {
+            throw Object.assign(new Error('Aborted with Ctrl+D'), { name: 'AbortError' });
+          },
+        },
+      });
+
+      expect(await readFile(file, 'utf8')).toBe(before);
+      expect(written.join('')).toContain('cancelled');
+    });
+
     it('treats anything that is not yes as no', async () => {
       // Fail closed. A stray keypress, an empty line, or a half-typed word must
       // not authorise a change to the definition of done.
