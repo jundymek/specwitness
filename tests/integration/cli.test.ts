@@ -115,8 +115,11 @@ describe('usage errors exit 64 (AC1)', () => {
   });
 });
 
+// Story 1.6 removed 'report' from these lists: it is implemented now and has
+// its own coverage in tests/integration/report.test.ts. 1.4 and 1.5 remove
+// 'init' and 'doctor' the same way, and the block goes with the last of them.
 describe('stub commands exit 3 (AC2)', () => {
-  it.each([['init'], ['doctor'], ['report']])(
+  it.each([['init'], ['doctor']])(
     '%s reports not-implemented on stderr and exits 3',
     async (command) => {
       const { exitCode, stdout, stderr } = await runCli([command]);
@@ -128,7 +131,7 @@ describe('stub commands exit 3 (AC2)', () => {
     },
   );
 
-  it.each([['init'], ['doctor'], ['report']])(
+  it.each([['init'], ['doctor']])(
     '%s never exits 0, 1 or 2 (fail closed)',
     async (command) => {
       const { exitCode } = await runCli([command]);
