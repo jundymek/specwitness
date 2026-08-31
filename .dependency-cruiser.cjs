@@ -116,6 +116,22 @@ module.exports = {
       },
     },
     {
+      name: 'ingest-core-only',
+      comment:
+        'AD-1/Q2: src/ingest/** is application-layer. It may import src/domain/**, ' +
+        'src/schemas/**, its own siblings and npm packages — never cli, config, infra, ' +
+        'providers or surfaces. This is the other half of the FR-6 promise: BMAD-specific ' +
+        'types never leave this directory, so a second ingestion source (question Q4) is a ' +
+        'new reader rather than an edit to contract logic. Node built-ins are allowed — ' +
+        'reading planning artifacts off disk is exactly what this layer is for.',
+      severity: 'error',
+      from: { path: '^src/ingest/' },
+      // `$1` is not used here: unlike `adapters-core-only`, which back-references
+      // the adapter it matched, `src/ingest` is a single named layer, so its own
+      // siblings are simply listed alongside the core.
+      to: { path: '^src/', pathNot: ['^src/(domain|schemas|ingest)/'] },
+    },
+    {
       name: 'no-circular',
       comment:
         'A cycle means the layer boundary is already gone and the modules can no longer ' +

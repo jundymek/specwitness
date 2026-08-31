@@ -174,6 +174,29 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
     expect(output).not.toContain('schemas-npm-allowlist');
     expect(exitCode).toBe(0);
   });
+
+  it('lets src/ingest use Node built-ins, the core, and its own siblings', async () => {
+    // Story 2.1's exact shape: ingestion is application-layer, it reads
+    // planning artifacts off disk, and it composes the domain model with its
+    // zod mirror. If this fails, the ingest reader cannot be written at all.
+    await writeModule('ingest/__probe-source.ts', 'export const source = 1;\n');
+    await writeModule(
+      'ingest/__probe-reader.ts',
+      "import { readFileSync } from 'node:fs';\n" +
+        "import { join } from 'node:path';\n" +
+        "import { IngestError } from '../domain/errors.js';\n" +
+        "import { SCHEMA_VERSIONS } from '../schemas/versions.js';\n" +
+        "import { source } from './__probe-source.js';\n" +
+        'export const read = (d: string) =>\n' +
+        '  readFileSync(join(d, "epics.md"), "utf8").length + source + SCHEMA_VERSIONS.runManifest;\n' +
+        'export const fail = () => new IngestError("x");\n',
+    );
+
+    const { exitCode, output } = await depcruise();
+
+    expect(output).not.toContain('ingest-core-only');
+    expect(exitCode).toBe(0);
+  });
 });
 
 describe('AD-1 rules still forbid what they are meant to forbid', () => {
@@ -208,6 +231,23 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     const { exitCode, output } = await depcruise();
 
     expect(output).toContain('schemas-npm-allowlist');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks a BMAD type leaking out of src/ingest into an adapter', async () => {
+    // The AC4 guarantee, red-tested: FR-6 says no BMAD-specific type may be
+    // imported outside `ingest/`. A rule with no proof that it fires is not a
+    // guardrail, and Epic 1's retrospective names this lesson explicitly.
+    // `src/config` rather than `src/cli`, so the failure can only be
+    // `ingest-core-only` and not `nothing-imports-cli`.
+    await writeModule(
+      'ingest/__probe-leak.ts',
+      "import { loadConfig } from '../config/load.js';\nexport const bad = loadConfig;\n",
+    );
+
+    const { exitCode, output } = await depcruise();
+
+    expect(output).toContain('ingest-core-only');
     expect(exitCode).not.toBe(0);
   });
 
