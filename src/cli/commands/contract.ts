@@ -139,7 +139,7 @@ export async function runContract(
       projectRoot,
       epicId: epic,
       ...(options.reason === undefined ? {} : { reason: options.reason }),
-      now: clock.now(),
+      clock,
       io: processAmendIo(),
     });
     return;
@@ -330,6 +330,23 @@ async function generateContract(
         `amend it explicitly with 'specwitness contract ${epic} --amend' (requires an ` +
           `interactive terminal), or remove ${contractRelativePath(epic)} deliberately if this ` +
           'contract was never real',
+      );
+    }
+
+    // A draft carrying AMENDMENT HISTORY is not an ordinary draft, and --force
+    // must not reach it. Between --amend and --freeze the contract sits in the
+    // draft state, and generation treats every draft as replaceable — from a
+    // NON-INTERACTIVE invocation. An agent that cannot amend could otherwise
+    // erase the record that an amendment happened and reset to a fresh version
+    // 1 with empty history: defeating the TTY gate by deleting its output
+    // rather than by bypassing it. The audit trail is the point of the gate,
+    // so it outlives the frozen flag that used to protect it.
+    if (existing.contract.meta.history.length > 0) {
+      throw new IntegrityError(
+        `the draft contract for ${epic} carries amendment history ` +
+          `(version ${existing.contract.spec.version}); regenerating would erase the audit trail`,
+        `freeze it with 'specwitness contract ${epic} --freeze' to complete the amendment, or ` +
+          `remove ${contractRelativePath(epic)} deliberately if the amendment was a mistake`,
       );
     }
 

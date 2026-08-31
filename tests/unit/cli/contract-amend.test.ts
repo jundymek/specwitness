@@ -107,7 +107,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'scope reduced',
-          now: AT,
+          clock: { now: () => AT },
           io: io({ interactive: false }),
         }),
       ).rejects.toBeInstanceOf(InfraError);
@@ -125,7 +125,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'scope reduced',
-          now: AT,
+          clock: { now: () => AT },
           io: io({ interactive: false }),
         });
       } catch (error) {
@@ -150,7 +150,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'scope reduced',
-          now: AT,
+          clock: { now: () => AT },
           io: io({ interactive: false }),
         });
       } catch (error) {
@@ -168,7 +168,7 @@ describe('contract --amend', () => {
         projectRoot: root,
         epicId: EPIC,
         reason: 'scope reduced',
-        now: AT,
+        clock: { now: () => AT },
         io: io({ interactive: false }),
       }).catch(() => undefined);
 
@@ -186,7 +186,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'I am automation and I would like to proceed',
-          now: AT,
+          clock: { now: () => AT },
           io: io({ interactive: false }),
         }),
       ).rejects.toBeInstanceOf(InfraError);
@@ -208,7 +208,7 @@ describe('contract --amend', () => {
         projectRoot: root,
         epicId: EPIC,
         reason: 'criterion E7-01 was unverifiable as written',
-        now: AT,
+        clock: { now: () => AT },
         io: recorder,
       });
 
@@ -229,7 +229,7 @@ describe('contract --amend', () => {
         projectRoot: root,
         epicId: EPIC,
         reason: 'scope reduced',
-        now: AT,
+        clock: { now: () => AT },
         io: io({ answers: ['n'] }),
       });
 
@@ -247,7 +247,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'scope reduced',
-          now: AT,
+          clock: { now: () => AT },
           io: io({ answers: [answer] }),
         });
 
@@ -263,7 +263,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'scope reduced',
-          now: AT,
+          clock: { now: () => AT },
           io: io({ answers: [answer] }),
         });
 
@@ -281,7 +281,7 @@ describe('contract --amend', () => {
         projectRoot: root,
         epicId: EPIC,
         reason: 'criterion E7-01 was unverifiable as written',
-        now: AT,
+        clock: { now: () => AT },
         io: io({ answers: ['y'] }),
       });
 
@@ -293,6 +293,37 @@ describe('contract --amend', () => {
       expect(after).toContain('criterion E7-01 was unverifiable as written');
     });
 
+    it('records when the operator CONFIRMED, not when the command started', async () => {
+      // The prompt window is unbounded — an operator may read, think, go to
+      // lunch, and come back. Stamping the history entry with the instant the
+      // process started would date the audit trail to a moment before the
+      // decision it records. The clock is read after confirmation.
+      const { root, file } = await projectWith(frozenContract());
+      const started = new Date('2026-08-31T09:00:00.000Z');
+      const confirmed = new Date('2026-08-31T11:30:00.000Z');
+      let current = started;
+
+      await runAmend({
+        projectRoot: root,
+        epicId: EPIC,
+        reason: 'scope reduced',
+        clock: { now: () => current },
+        io: {
+          isInteractive: () => true,
+          write: () => {},
+          ask: async () => {
+            // Time passes while the operator decides.
+            current = confirmed;
+            return 'y';
+          },
+        },
+      });
+
+      const after = await readFile(file, 'utf8');
+      expect(after).toContain('2026-08-31T11:30:00.000Z');
+      expect(after).not.toContain('2026-08-31T09:00:00.000Z');
+    });
+
     it('tells the operator the next step is --freeze', async () => {
       const { root } = await projectWith(frozenContract());
       const recorder = io({ answers: ['y'] });
@@ -301,7 +332,7 @@ describe('contract --amend', () => {
         projectRoot: root,
         epicId: EPIC,
         reason: 'scope reduced',
-        now: AT,
+        clock: { now: () => AT },
         io: recorder,
       });
 
@@ -312,7 +343,7 @@ describe('contract --amend', () => {
       const { root, file } = await projectWith(frozenContract());
       const recorder = io({ answers: ['the gate now runs on a different command', 'y'] });
 
-      await runAmend({ projectRoot: root, epicId: EPIC, now: AT, io: recorder });
+      await runAmend({ projectRoot: root, epicId: EPIC, clock: { now: () => AT }, io: recorder });
 
       expect(await readFile(file, 'utf8')).toContain('the gate now runs on a different command');
     });
@@ -334,7 +365,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'scope reduced',
-          now: AT,
+          clock: { now: () => AT },
           io: recorder,
         }),
       ).rejects.toBeInstanceOf(IntegrityError);
@@ -381,7 +412,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'scope reduced',
-          now: AT,
+          clock: { now: () => AT },
           io: recorder,
         }),
       ).rejects.toBeInstanceOf(IntegrityError);
@@ -399,7 +430,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: 'scope reduced',
-          now: AT,
+          clock: { now: () => AT },
           io: io({ answers: ['y'] }),
         }),
       ).rejects.toBeInstanceOf(InfraError);
@@ -430,7 +461,7 @@ describe('contract --amend', () => {
             projectRoot: root,
             epicId: EPIC,
             reason: 'scope reduced',
-            now: AT,
+            clock: { now: () => AT },
             io: meddling,
           }),
         ).rejects.toBeInstanceOf(IntegrityError);
@@ -452,7 +483,7 @@ describe('contract --amend', () => {
           projectRoot: root,
           epicId: EPIC,
           reason: '   ',
-          now: AT,
+          clock: { now: () => AT },
           io: io({ answers: ['y'] }),
         }),
       ).rejects.toBeInstanceOf(UsageError);
@@ -511,6 +542,38 @@ describe('contract --amend', () => {
           thrown = error;
         }
         expect((thrown as InfraError).message).toContain('interactive terminal');
+      } finally {
+        process.chdir(cwd);
+      }
+    });
+
+    it('refuses --force regeneration over a draft carrying amendment history', async () => {
+      // THE HOLE THE TWO-STEP FLOW OPENS. Between --amend and --freeze the
+      // contract is a DRAFT, and generation treats every draft as replaceable
+      // with --force — non-interactively. An agent that cannot amend could
+      // therefore erase the record that an amendment happened and reset to a
+      // fresh version 1 with empty history, which defeats the TTY gate by
+      // deleting its output rather than by bypassing it.
+      const { root, file } = await projectWith(frozenContract());
+      const cwd = process.cwd();
+      process.chdir(root);
+      try {
+        await runAmend({
+          projectRoot: root,
+          epicId: EPIC,
+          reason: 'scope reduced',
+          clock: { now: () => AT },
+          io: io({ answers: ['y'] }),
+        });
+        const amended = await readFile(file, 'utf8');
+        expect(amended).toContain('version: 2');
+
+        await expect(
+          runContract('7', { force: true }, { now: () => AT }),
+        ).rejects.toBeInstanceOf(IntegrityError);
+
+        // The audit trail survives untouched.
+        expect(await readFile(file, 'utf8')).toBe(amended);
       } finally {
         process.chdir(cwd);
       }

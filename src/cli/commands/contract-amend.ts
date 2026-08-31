@@ -76,6 +76,7 @@ import {
   writeContractFileAtomically,
 } from '../../authoring/contract-file.js';
 import { InfraError, IntegrityError } from '../../domain/errors.js';
+import type { Clock } from '../../domain/ports.js';
 import { parseContract, serializeContract } from '../../schemas/contract.js';
 
 /**
@@ -97,8 +98,15 @@ export interface AmendCommandOptions {
   readonly epicId: string;
   /** Supplied by `--reason`; prompted for when absent. Never a bypass. */
   readonly reason?: string;
-  /** Injected instant (AD-9). */
-  readonly now: Date;
+  /**
+   * Injected clock (AD-9), read AFTER the operator confirms.
+   *
+   * A `Date` captured before the prompt would date the audit trail to a moment
+   * before the decision it records — the prompt window is unbounded, and an
+   * operator may read, think, and come back. The clock is a port, not an
+   * instant, precisely so the flow chooses when to look at it.
+   */
+  readonly clock: Clock;
   readonly io: AmendIo;
 }
 
@@ -110,7 +118,7 @@ export function processIsInteractive(): boolean {
 const AFFIRMATIVE = new Set(['y', 'yes']);
 
 export async function runAmend(options: AmendCommandOptions): Promise<void> {
-  const { io, epicId, projectRoot, now } = options;
+  const { io, epicId, projectRoot, clock } = options;
 
   // FIRST, before touching the filesystem. A refusal that depends on nothing on
   // disk cannot be influenced by anything on disk, and the operator gets the
@@ -208,7 +216,7 @@ export async function runAmend(options: AmendCommandOptions): Promise<void> {
   // `amend` re-checks both preconditions rather than trusting this module: it
   // is the function that writes the audit trail, and the cost of asking twice
   // is nothing next to the cost of a caller that forgot.
-  const amended = amend({ contract: current, reason, at: now });
+  const amended = amend({ contract: current, reason, at: clock.now() });
 
   await writeContractFileAtomically(projectRoot, epicId, serializeContract(amended));
 
