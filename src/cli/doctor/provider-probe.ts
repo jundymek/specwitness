@@ -109,7 +109,13 @@ export function createProviderProbe(runner: ProcessRunner): ProbeProvider {
 
     if (descriptor.adapter === 'claude-code-cli') {
       const capability = await probeClaudeCapability(runner, options);
-      const capable = capability.nonInteractive && capability.jsonOutputFormat;
+      // MIRRORS THE ADAPTER'S OWN REFUSAL CONDITION, deliberately and exactly.
+      // `createClaudeCodeCliProvider` throws unless `found && nonInteractive`;
+      // any other predicate here would make doctor and generation disagree
+      // about the same probe result — the drift this whole arrangement exists
+      // to prevent, reintroduced in the renderer rather than in a second probe.
+      // Being STRICTER is a defect too: it warns about a provider that works.
+      const capable = capability.nonInteractive;
       return {
         hermetic: false,
         binary: capability.binary,
@@ -130,7 +136,15 @@ export function createProviderProbe(runner: ProcessRunner): ProbeProvider {
 
     if (descriptor.adapter === 'codex-cli') {
       const capability = await probeCodexCapability(runner, options);
-      const capable = capability.execAvailable && capability.outputSchemaSupported;
+      // Same rule, same reason: `createCodexCliProvider` refuses unless `exec`
+      // and `--output-schema` are present AND `missingFlags` is empty. A codex
+      // new enough for `--output-schema` but missing `--output-last-message`
+      // would otherwise be reported READY here and then refuse at the point of
+      // use, which is exactly what AD-4 exists to prevent.
+      const capable =
+        capability.execAvailable &&
+        capability.outputSchemaSupported &&
+        (capability.missingFlags?.length ?? 0) === 0;
       return {
         hermetic: false,
         binary: capability.binary,
