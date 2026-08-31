@@ -62,6 +62,27 @@ describe('runGit', () => {
     expect(outcome.stdout).toContain('git version');
   });
 
+  it('does not call an invalid cwd a missing binary', async () => {
+    // execa raises the SAME `code: 'ENOENT'` for a working directory that does
+    // not exist as it does for a binary that is not on PATH. Classifying on
+    // ENOENT alone would make doctor tell an operator to install the git they
+    // already have — a confidently wrong diagnosis, which is worse than a vague
+    // one from the tool whose whole job is to be right about this.
+    //
+    // Reported by story 2.3 (pamela) against her ProcessRunner after she hit it
+    // there; reproduced against the installed execa here before fixing, since
+    // the same trap sits one layer over in doctor's own spawn path.
+    const outcome = await createDoctorEffects().runGit(['--version'], {
+      cwd: join(tmpdir(), 'specwitness-definitely-no-such-dir-9f3c'),
+      timeoutMs: 5_000,
+    });
+
+    expect(outcome.notFound).toBe(false);
+    // And it says something useful: execa puts its explanation on the error's
+    // message, not on stderr, so a naive passthrough would report nothing at all.
+    expect(outcome.stderr).toContain('cwd');
+  });
+
   it('reports a non-zero exit as "said no", not as missing', async () => {
     // The third member of the missing / hung / said-no vocabulary. A git that
     // ran and refused is a result to interpret, not a broken machine.

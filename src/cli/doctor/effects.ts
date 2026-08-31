@@ -71,23 +71,8 @@ interface SpawnLike {
   stderr?: string;
 }
 
-/**
- * True when the binary itself could not be spawned.
- *
- * BOTH the resolved and the thrown path funnel through here, and that is the
- * whole point. Under the pinned execa 10, `reject: false` means a binary that is
- * not on PATH does NOT throw — it RESOLVES, with `code: 'ENOENT'` and
- * `exitCode: undefined`. Testing for ENOENT only inside a `catch` therefore
- * never ran, and `notFound` was false for every input this function had ever
- * seen: doctor reported "git exited without a code" for a machine with no git
- * installed, which is the single diagnosis it most exists to give.
- *
- * Found by story 2.3 while modelling its own runner on this function, and
- * reproduced against the installed execa before changing anything
- * (`tests/unit/doctor/effects.test.ts` covers all three outcomes). `cause` is
- * checked too because execa nests the original error there.
- */
-function isNotFound(result: SpawnLike): boolean {
+/** True when this spawn outcome carries an ENOENT, from either shape execa uses. */
+function isEnoent(result: SpawnLike): boolean {
   if (result.code === 'ENOENT') {
     return true;
   }
@@ -95,6 +80,58 @@ function isNotFound(result: SpawnLike): boolean {
   return (
     typeof cause === 'object' && cause !== null && (cause as { code?: string }).code === 'ENOENT'
   );
+}
+
+/**
+ * True when the BINARY could not be found — and not merely when something
+ * raised ENOENT.
+ *
+ * Two traps live here, both found the same way (a story modelling its own code
+ * on this function, going red, and reporting it) and both reproduced against
+ * the installed execa before being fixed.
+ *
+ * ONE: `reject: false` means a binary that is not on PATH does NOT throw — it
+ * RESOLVES, with `code: 'ENOENT'` and `exitCode: undefined`. Testing for ENOENT
+ * only inside a `catch` therefore never ran, and `notFound` was false for every
+ * input this function had ever seen: doctor reported "git exited without a
+ * code" on a machine with no git installed, which is the single diagnosis it
+ * most exists to give. Both paths now funnel through here so they cannot
+ * disagree again.
+ *
+ * TWO: an invalid `cwd` raises the SAME ENOENT as a missing binary. Classifying
+ * on ENOENT alone would make doctor say "git not found on PATH; install git" to
+ * an operator whose git is fine and whose directory is not — a confidently
+ * wrong diagnosis, which is worse than a vague one from the tool whose whole
+ * job is to tell "missing" from "hung" from "said no". So the filesystem is
+ * asked, and only a real directory lets an ENOENT mean "no such binary".
+ *
+ * Reported by story 2.3 (pamela), whose `ProcessRunner` hit both.
+ */
+async function isBinaryNotFound(result: SpawnLike, cwd: string): Promise<boolean> {
+  if (!isEnoent(result)) {
+    return false;
+  }
+
+  try {
+    const stats = await stat(cwd);
+    return stats.isDirectory();
+  } catch {
+    // The cwd itself is what is missing. Not a diagnosis about the binary.
+    return false;
+  }
+}
+
+/**
+ * execa reports an invalid `cwd` on the error's MESSAGE, leaving `stderr` empty,
+ * because no child ever ran to write anything. Passing the empty string through
+ * would report a failure with no explanation at all.
+ */
+function explain(stderr: unknown, message: unknown): string {
+  const text = typeof stderr === 'string' ? stderr : '';
+  if (text !== '') {
+    return text;
+  }
+  return typeof message === 'string' ? message : '';
 }
 
 async function runGit(args: readonly string[], options: RunOptions): Promise<RunOutcome> {
@@ -110,12 +147,13 @@ async function runGit(args: readonly string[], options: RunOptions): Promise<Run
       extendEnv: true,
     });
 
+    const spawn = result as unknown as SpawnLike;
     return {
       exitCode: result.exitCode ?? null,
       stdout: result.stdout,
-      stderr: result.stderr,
+      stderr: explain(result.stderr, (result as unknown as { message?: unknown }).message),
       timedOut: result.timedOut === true,
-      notFound: isNotFound(result as SpawnLike),
+      notFound: await isBinaryNotFound(spawn, options.cwd),
     };
   } catch (error) {
     // `reject: false` suppresses non-zero exits AND spawn failures, so reaching
@@ -125,9 +163,9 @@ async function runGit(args: readonly string[], options: RunOptions): Promise<Run
     return {
       exitCode: failure.exitCode ?? null,
       stdout: failure.stdout ?? '',
-      stderr: failure.stderr ?? failure.message,
+      stderr: explain(failure.stderr, failure.message),
       timedOut: failure.timedOut === true,
-      notFound: isNotFound(failure as SpawnLike),
+      notFound: await isBinaryNotFound(failure as SpawnLike, options.cwd),
     };
   }
 }
