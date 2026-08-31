@@ -133,6 +133,15 @@ describe('clean against real processes', () => {
 
     const runner = createProcessRunner(new SystemClock());
     let pgid = 0;
+    // Resolved when the pgid is durably recorded. Awaited before asserting on
+    // the manifest, because the child is ALREADY RUNNING while that fsync
+    // happens — this test read the manifest as soon as the grandchild appeared
+    // and intermittently found the pgid not yet written, which is the honest
+    // ordering documented on `onProcessGroup` rather than a defect.
+    let recorded: () => void = () => undefined;
+    const recordedPgid = new Promise<void>((resolve) => {
+      recorded = resolve;
+    });
 
     // Deliberately NOT awaited: this stands in for a run that is still going
     // when the process dies.
@@ -145,13 +154,15 @@ describe('clean against real processes', () => {
       onProcessGroup: async (value) => {
         pgid = trackPid(value);
         await store.recordProcessGroup(runId, value);
+        recorded();
       },
     });
 
     try {
       const grandchild = trackPid(Number(await waitForFile(pidFile)));
+      await recordedPgid;
 
-      // The manifest is on disk and fsynced BEFORE anything is reaped — that is
+      // The manifest is on disk and fsynced BEFORE the run proceeds — that is
       // the ordering that makes crash recovery possible at all.
       expect((await store.readManifest(runId)).processGroups).toEqual([pgid]);
 

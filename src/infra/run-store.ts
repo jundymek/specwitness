@@ -342,9 +342,11 @@ export class RunStore {
    * anything can observe the process, which is AC1's ordering.
    *
    * HONEST ABOUT THE ORDERING: a pgid cannot exist before `fork`, so the true
-   * sequence is spawn → learn the pgid → fsync → use the child, and the residual
-   * window is one spawn syscall wide. Claiming an ordering the OS does not offer
-   * would be worse than naming the window.
+   * sequence is spawn → learn the pgid → fsync → let the run proceed. The child
+   * is ALREADY RUNNING while this fsync happens and may fork children of its
+   * own in that window — observed, not theorised. What is guaranteed is that
+   * the record is durable before anything acts on the run. Claiming an ordering
+   * the OS does not offer would be worse than naming the window.
    *
    * The reaping evidence is written FIRST, then the manifest. Crash between the
    * two and the manifest simply has no pgid — nothing claims a resource that

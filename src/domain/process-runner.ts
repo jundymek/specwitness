@@ -160,6 +160,17 @@ export interface ProcessRunOptions {
    * which a live process group exists that nothing on disk can find — the one
    * state `specwitness clean` cannot recover from.
    *
+   * WHAT THIS DOES AND DOES NOT ORDER, stated precisely because the imprecise
+   * version is tempting: a pgid cannot exist before `fork`, so the child is
+   * ALREADY RUNNING while the record is being fsynced, and it may spawn
+   * children of its own in that window. (Observed, not theorised: a test read
+   * the manifest as soon as the child's grandchild appeared and found the pgid
+   * not yet written.) What is guaranteed is that the record is durable before
+   * the run PROCEEDS — before the outcome is observed, before a worktree is
+   * used, before anything downstream acts on the run. The unrecorded window is
+   * the duration of one spawn plus one fsync, and it is the smallest window any
+   * OS makes available.
+   *
    * If it REJECTS, the implementation kills the group and then propagates the
    * error. That is deliberate and is not a violation of "run never rejects":
    * that contract is about SUBPROCESS outcomes (ENOENT, a timeout, a non-zero

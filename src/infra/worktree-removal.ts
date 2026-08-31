@@ -43,6 +43,13 @@ const GIT_TIMEOUT_MS = 60_000;
  * repository may be in a state that a full root resolution would legitimately
  * refuse — and refusing to reap is the one moment reaping matters most. It has
  * a project root and a recorded path, and that is all this needs.
+ *
+ * NEVER SUCCEEDS WITHOUT PROOF. An unanswerable `git worktree list` is reported
+ * as an error, not read as "nothing is registered". alice (3.1) hit exactly this
+ * in her own implementation during review: a git that could not list worktrees
+ * made every recorded worktree look already-absent, so `clean` reported a clean
+ * sweep while the checkout and its registration were both still there. A leak
+ * that announces itself is recoverable; one that reports success is not.
  */
 export async function removeWorktreeAtPath(
   runner: ProcessRunner,
@@ -60,16 +67,25 @@ export async function removeWorktreeAtPath(
   if (remove.outcome === 'not-found') {
     throw new InfraError(
       `could not remove the worktree at ${worktreePath}: git not found on PATH`,
-      'install git and reopen your shell, then run specwitness clean again',
+      "install git and reopen your shell, then run 'specwitness clean' again",
+    );
+  }
+
+  const after = await registrationOf(runner, repoRoot, worktreePath);
+
+  if (after === 'unknown') {
+    throw new InfraError(
+      `could not verify that the worktree at ${worktreePath} was removed: git worktree list did not answer`,
+      `check the repository at ${repoRoot} by hand; the worktree may still be registered`,
     );
   }
 
   if (remove.outcome !== 'completed' || remove.exitCode !== 0) {
-    // `git worktree remove` fails when the path was never registered — which is
-    // the ordinary case for a manifest replayed twice, and must not be an error.
-    // Distinguished by what is actually TRUE afterwards rather than by parsing
-    // git's message, which is git's to change.
-    if (!existsSync(worktreePath) && !(await isRegistered(runner, repoRoot, worktreePath))) {
+    // `git worktree remove` fails when the path was never registered — the
+    // ordinary case for a manifest replayed twice, which must not be an error.
+    // Decided by what is actually TRUE afterwards rather than by matching git's
+    // failure prose, which is git's to change.
+    if (after === 'absent' && !existsSync(worktreePath)) {
       return;
     }
     throw new InfraError(
@@ -78,7 +94,7 @@ export async function removeWorktreeAtPath(
     );
   }
 
-  if (await isRegistered(runner, repoRoot, worktreePath)) {
+  if (after === 'present') {
     throw new InfraError(
       `worktree removal left a registration behind for ${worktreePath}`,
       `run 'git worktree prune' in ${repoRoot}`,
@@ -89,15 +105,16 @@ export async function removeWorktreeAtPath(
 /**
  * Is `worktreePath` still in `git worktree list --porcelain`?
  *
- * A probe that cannot answer reports `false` on purpose: this is only ever used
- * to CONFIRM a removal or to excuse an already-absent path, and a git that
- * cannot list worktrees is already reported by the caller it excuses.
+ * THREE-VALUED on purpose. Collapsing "git could not tell me" into "not
+ * registered" is the bug described above: it turns a broken repository into a
+ * confident report of success. `unknown` is the caller's cue to refuse to claim
+ * anything.
  */
-async function isRegistered(
+async function registrationOf(
   runner: ProcessRunner,
   repoRoot: string,
   worktreePath: string,
-): Promise<boolean> {
+): Promise<'present' | 'absent' | 'unknown'> {
   const list = await runner.run({
     binary: 'git',
     args: ['worktree', 'list', '--porcelain'],
@@ -107,12 +124,14 @@ async function isRegistered(
   });
 
   if (list.outcome !== 'completed' || list.exitCode !== 0) {
-    return false;
+    return 'unknown';
   }
 
-  return list.stdout
+  const registered = list.stdout
     .split('\n')
     .some((line) => line.startsWith('worktree ') && line.slice('worktree '.length) === worktreePath);
+
+  return registered ? 'present' : 'absent';
 }
 
 /** The first line of a stderr blob, for a single-line error message. */

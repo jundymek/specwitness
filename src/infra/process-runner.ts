@@ -304,11 +304,21 @@ function ownProcessGroup(): number | null {
   return cachedOwnProcessGroup;
 }
 
-/** Resolves after `ms`, without holding the event loop open. */
+/**
+ * Resolves after `ms`.
+ *
+ * REF'D, deliberately. Every timer whose expiry a run's settlement depends on
+ * must hold the event loop open, or Node can empty the loop while the CLI's
+ * top-level `await` is still pending and exit 13 (ERR_UNFINISHED_TOP_LEVEL_AWAIT)
+ * with no output at all. That is not hypothetical: it is what happened when this
+ * file first dropped execa's own (ref'd) `timeout` timer and left every
+ * replacement timer unref'd — `specwitness doctor` exited 13 instead of 0 under
+ * load. Timers are cleared or awaited on every path, so nothing here outlives
+ * the run it belongs to.
+ */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
+    setTimeout(resolve, ms);
   });
 }
 
@@ -503,6 +513,8 @@ function createRunner(clock: Clock): ProcessRunner {
       let timedOut = false;
       let teardown: Promise<Error | undefined> = Promise.resolve(undefined);
 
+      // REF'D (see `delay`): this timer is what keeps the process alive long
+      // enough to notice a hang and reap it. Cleared the moment the run settles.
       const timer = setTimeout(() => {
         timedOut = true;
         if (pgid !== null) {
@@ -512,7 +524,6 @@ function createRunner(clock: Clock): ProcessRunner {
           );
         }
       }, options.timeoutMs);
-      timer.unref?.();
 
       /**
        * SETTLEMENT — why a watchdog survives even now that teardown reaps.
@@ -532,19 +543,26 @@ function createRunner(clock: Clock): ProcessRunner {
        * The deadline now allows for the teardown itself — the timeout, then the
        * SIGTERM-to-SIGKILL grace, then a moment for execa to notice.
        */
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
       const settlement = await Promise.race([
         spawned.then((value) => ({ settled: true as const, value })),
         new Promise<{ settled: false }>((resolve) => {
-          const watchdog = setTimeout(
+          watchdog = setTimeout(
             () => resolve({ settled: false }),
             options.timeoutMs + graceMs + SETTLEMENT_GRACE_MS,
           );
-          // Never hold the event loop open on account of this watchdog.
-          watchdog.unref?.();
         }),
       ]);
 
+      // CLEARED rather than unref'd. Story 2.3 unref'd this so a fast run would
+      // not be held open by the losing side of the race; clearing achieves the
+      // same thing without the failure mode unref'ing everything introduced —
+      // an event loop that empties while the run is still pending, which Node
+      // reports as exit 13 with no output.
       clearTimeout(timer);
+      if (watchdog !== undefined) {
+        clearTimeout(watchdog);
+      }
       // Never return while a SIGKILL is still in flight: a caller that removes a
       // worktree next must not race processes still holding files inside it.
       const teardownFailure = await teardown;
