@@ -130,7 +130,7 @@ export interface ClaudeAdapterOptions {
   /** Working directory for the child. Defaults to the process cwd. */
   readonly cwd?: string;
   readonly timeoutMs?: number;
-  /** Extra billing-risk variables to withhold. An injection seam, not a config surface. */
+  /** Billing-risk variables to withhold IN ADDITION to the defaults, which always apply. */
   readonly billingEnvVars?: readonly string[];
 }
 
@@ -141,6 +141,20 @@ export interface ClaudeAdapterOptions {
  * fresh probe automatically, with no reset hook to forget to call.
  */
 const capabilityCache = new WeakMap<ProcessRunner, Map<string, Promise<ClaudeCapability>>>();
+
+/**
+ * The billing variables to withhold: the defaults, ALWAYS, plus anything the
+ * caller adds.
+ *
+ * A union rather than a replacement, deliberately. If naming one extra variable
+ * dropped the built-in ones, an operator trying to be *more* careful would hand
+ * `ANTHROPIC_API_KEY` straight to the child — the exact outcome this adapter
+ * exists to prevent, reached by an act of caution. There is no legitimate reason
+ * to withhold fewer than the defaults, so the API does not offer one.
+ */
+function resolveBillingEnvVars(extra: readonly string[] | undefined): readonly string[] {
+  return [...new Set([...DEFAULT_BILLING_ENV_VARS, ...(extra ?? [])])];
+}
 
 /** The child environment: inherited, minus the billing variables. Never mutates the parent. */
 function childEnvironment(billingEnvVars: readonly string[]): {
@@ -237,7 +251,7 @@ export function probeClaudeCapability(
     return cached;
   }
 
-  const billingEnvVars = options.billingEnvVars ?? DEFAULT_BILLING_ENV_VARS;
+  const billingEnvVars = resolveBillingEnvVars(options.billingEnvVars);
 
   const probe = (async (): Promise<ClaudeCapability> => {
     const version = await probeOnce(runner, ['--version'], billingEnvVars, cwd);
@@ -360,7 +374,7 @@ export async function probeClaudeAuth(
   runner: ProcessRunner,
   options: ClaudeAdapterOptions = {},
 ): Promise<ClaudeAuthProbe> {
-  const billingEnvVars = options.billingEnvVars ?? DEFAULT_BILLING_ENV_VARS;
+  const billingEnvVars = resolveBillingEnvVars(options.billingEnvVars);
   const result = await probeOnce(
     runner,
     [...BASELINE_ARGS, 'Reply with the single word: ok'],
@@ -451,7 +465,7 @@ export function createClaudeCodeCliProvider(
   deps: ProviderDeps,
   options: ClaudeAdapterOptions = {},
 ): AgentProvider {
-  const billingEnvVars = options.billingEnvVars ?? DEFAULT_BILLING_ENV_VARS;
+  const billingEnvVars = resolveBillingEnvVars(options.billingEnvVars);
   const cwd = options.cwd ?? process.cwd();
   const timeoutMs = options.timeoutMs ?? DEFAULT_INVOCATION_TIMEOUT_MS;
 

@@ -550,6 +550,42 @@ describe('createClaudeCodeCliProvider — billing safety (FR-15)', () => {
     );
   });
 
+  it('ADDS caller-supplied names to the defaults, never replaces them', async () => {
+    // The dangerous shape: a caller naming one extra variable must not thereby
+    // un-withhold the built-in ones. Replacing rather than extending would let a
+    // well-meaning addition hand ANTHROPIC_API_KEY straight to the child — the
+    // exact outcome this adapter exists to prevent, arrived at by trying to be
+    // more careful.
+    const { runner, calls } = runnerReturning(VERSION_OK, ok(CAPABLE_ENVELOPE), ok(CAPABLE_ENVELOPE));
+    const provider = createClaudeCodeCliProvider(descriptor(), deps(runner), {
+      billingEnvVars: ['CUSTOM_ANTHROPIC_TOKEN'],
+    });
+
+    await provider.generate({ role: 'contract-author', prompt: 'x' });
+
+    for (const call of calls) {
+      expect(call.env.withhold).toEqual(
+        expect.arrayContaining([
+          'ANTHROPIC_API_KEY',
+          'ANTHROPIC_AUTH_TOKEN',
+          'CUSTOM_ANTHROPIC_TOKEN',
+        ]),
+      );
+    }
+  });
+
+  it('does not duplicate a name the caller repeats from the defaults', async () => {
+    const { runner, calls } = runnerReturning(VERSION_OK, ok(CAPABLE_ENVELOPE), ok(CAPABLE_ENVELOPE));
+    const provider = createClaudeCodeCliProvider(descriptor(), deps(runner), {
+      billingEnvVars: ['ANTHROPIC_API_KEY'],
+    });
+
+    await provider.generate({ role: 'contract-author', prompt: 'x' });
+
+    const withheld = calls[calls.length - 1]?.env.withhold ?? [];
+    expect(withheld.filter((name) => name === 'ANTHROPIC_API_KEY')).toHaveLength(1);
+  });
+
   it('withholds caller-configured equivalents too', async () => {
     const { runner, calls } = runnerReturning(VERSION_OK, ok(CAPABLE_ENVELOPE), ok(CAPABLE_ENVELOPE));
     const provider = createClaudeCodeCliProvider(descriptor(), deps(runner), {
