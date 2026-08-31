@@ -359,6 +359,22 @@ describe('billing safety against a real child process (AC2, FR-15)', () => {
     expect(process.env.OPENAI_API_KEY).toBe(BILLING_SENTINEL);
   });
 
+  it('the `codex doctor` child does not receive OPENAI_API_KEY either', async () => {
+    // FR-15 is a guarantee about codex SUBPROCESSES, and `codex doctor` is one.
+    // It is also the probe story 2.7 renders, so if it saw a credential the
+    // invocation withholds, doctor could report auth as usable while generation
+    // fails — the diagnostic answering an easier question than the real one.
+    const shim = await withShim('capable');
+    vi.stubEnv('OPENAI_API_KEY', BILLING_SENTINEL);
+
+    await probeCodexAuth(runner, { timeoutMs: TIMEOUT_MS });
+
+    const childEnv = await shim.envMap();
+    expect(childEnv).not.toHaveProperty('OPENAI_API_KEY');
+    expect((await shim.env()).join('\n')).not.toContain(BILLING_SENTINEL);
+    expect(process.env.OPENAI_API_KEY).toBe(BILLING_SENTINEL);
+  });
+
   it('withholds under an unrecognized mode too', async () => {
     // `mode` is validated only as a non-empty string, and no artifact defines a
     // mode that opts into API billing — so a typo must not become a charge.

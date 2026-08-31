@@ -193,6 +193,20 @@ describe('probeCodexCapability', () => {
     expect(runner.calls).toHaveLength(2); // --version and exec --help, once each
   });
 
+  it('withholds billing variables from EVERY probe spawn', async () => {
+    // `--version` and `exec --help` need no credentials at all, so this costs
+    // nothing — and it means there is no spawn anywhere in this adapter that
+    // receives a billing variable. A guarantee with one exception is a
+    // guarantee nobody can rely on.
+    const runner = recordingRunner([VERSION_OK, HELP_OK]);
+
+    await probeCodexCapability(runner);
+
+    for (const call of runner.calls) {
+      expect(call.env).toEqual({ inherit: true, withhold: ['OPENAI_API_KEY'] });
+    }
+  });
+
   it('bounds every probe spawn with an explicit timeout', async () => {
     const runner = recordingRunner([VERSION_OK, HELP_OK]);
 
@@ -210,6 +224,36 @@ describe('probeCodexAuth', () => {
       ok: true,
       exitCode: 0,
       conclusive: true,
+    });
+  });
+
+  it('withholds billing variables from `codex doctor` too', async () => {
+    // Two bugs in one, both real:
+    //
+    // 1. THE DIAGNOSTIC WOULD LIE. `codex doctor` run with OPENAI_API_KEY
+    //    inherited can report auth as usable *because of the API key*, while the
+    //    real `codex exec` — which withholds it — then fails. The whole reason
+    //    story 2.7 calls this probe instead of writing its own is so that what
+    //    doctor reports and what an invocation does cannot drift apart. Leaking
+    //    the key here would reintroduce that drift inside the shared probe.
+    // 2. FR-15 IS ABOUT CODEX SUBPROCESSES, not about `exec` specifically.
+    //    `codex doctor` is one, so passing it the key breaks the guarantee in a
+    //    place nobody would think to look.
+    const runner = recordingRunner([result()]);
+
+    await probeCodexAuth(runner);
+
+    expect(runner.calls[0]?.env).toEqual({ inherit: true, withhold: ['OPENAI_API_KEY'] });
+  });
+
+  it('extends the withheld set for the auth probe as well', async () => {
+    const runner = recordingRunner([result()]);
+
+    await probeCodexAuth(runner, { billingEnvVars: ['MY_ORG_OPENAI_TOKEN'] });
+
+    expect(runner.calls[0]?.env).toEqual({
+      inherit: true,
+      withhold: ['OPENAI_API_KEY', 'MY_ORG_OPENAI_TOKEN'],
     });
   });
 

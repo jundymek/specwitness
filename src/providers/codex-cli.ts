@@ -133,6 +133,25 @@ const SUBSCRIPTION_MODE = 'chatgpt';
 
 export interface ProbeOptions {
   readonly timeoutMs?: number;
+  /**
+   * Extra billing-risk variable names to withhold, on top of the defaults.
+   *
+   * Probes withhold the SAME variables an invocation does, and that is load
+   * bearing for two separate reasons:
+   *
+   * 1. **The probe must predict the invocation.** `codex doctor` run with
+   *    `OPENAI_API_KEY` inherited can report auth as usable *because of the API
+   *    key* — while the real `codex exec`, which withholds it, then fails. A
+   *    diagnostic that answers a different question from the one it claims to
+   *    answer is worse than no diagnostic, and story 2.7 renders this verbatim.
+   * 2. **The FR-15 guarantee is about codex SUBPROCESSES, not about `exec`.**
+   *    `codex doctor` is one. Leaking the key into it would break the guarantee
+   *    in a place nobody thought to look.
+   *
+   * Like `CodexAdapterOptions.billingEnvVars`, this EXTENDS the defaults and can
+   * never shrink them.
+   */
+  readonly billingEnvVars?: readonly string[];
 }
 
 /**
@@ -251,18 +270,26 @@ export async function probeCodexCapability(
   if (cached !== undefined) {
     return cached;
   }
-  const probe = probeUncached(runner, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS);
+  const probe = probeUncached(
+    runner,
+    options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
+    billingNames(options.billingEnvVars),
+  );
   capabilityCache.set(BINARY, probe);
   return probe;
 }
 
-async function probeUncached(runner: ProcessRunner, timeoutMs: number): Promise<CodexCapability> {
+async function probeUncached(
+  runner: ProcessRunner,
+  timeoutMs: number,
+  withhold: readonly string[],
+): Promise<CodexCapability> {
   const version = await runner.run({
     binary: BINARY,
     args: ['--version'],
     cwd: process.cwd(),
     timeoutMs,
-    env: { inherit: true },
+    env: childEnvironment(withhold),
     input: '',
   });
 
@@ -296,7 +323,7 @@ async function probeUncached(runner: ProcessRunner, timeoutMs: number): Promise<
     args: ['exec', '--help'],
     cwd: process.cwd(),
     timeoutMs,
-    env: { inherit: true },
+    env: childEnvironment(withhold),
     input: '',
   });
 
@@ -341,12 +368,17 @@ export async function probeCodexAuth(
   options: ProbeOptions = {},
 ): Promise<CodexAuthProbe> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  // Withheld here for the same reason generation withholds: `codex doctor` must
+  // answer the question a real `codex exec` would face, not a more permissive
+  // one. Inheriting the API key could report auth as usable on the strength of
+  // a credential the invocation then removes.
+  const withhold = billingNames(options.billingEnvVars);
   const result = await runner.run({
     binary: BINARY,
     args: ['doctor'],
     cwd: process.cwd(),
     timeoutMs,
-    env: { inherit: true },
+    env: childEnvironment(withhold),
     input: '',
   });
 
@@ -434,6 +466,19 @@ function childEnvironment(withhold: readonly string[]): ChildEnvironment {
 }
 
 /**
+ * The billing-risk names to withhold, defaults UNION caller-supplied.
+ *
+ * One resolver for probes and generation alike, so the two can never drift into
+ * withholding different sets — which is the bug that would let `codex doctor`
+ * answer a different question from the `codex exec` it exists to predict. It
+ * only ever grows the list: there is deliberately no way to withhold fewer
+ * variables than the defaults.
+ */
+function billingNames(extra: readonly string[] | undefined): readonly string[] {
+  return [...new Set([...DEFAULT_BILLING_ENV_VARS, ...(extra ?? [])])];
+}
+
+/**
  * Which billing-risk variables are present in the parent environment.
  *
  * Presence of the NAME counts, even when the value is empty — agreed with story
@@ -477,6 +522,7 @@ async function generate(
 ): Promise<string> {
   const capability = await probeCodexCapability(deps.runner, {
     timeoutMs: options.probeTimeoutMs,
+    billingEnvVars,
   });
 
   // A capability we need but could not confirm produces a capability ERROR, not
