@@ -360,6 +360,44 @@ describe('contract --amend', () => {
       ).rejects.toBeInstanceOf(InfraError);
     });
 
+    it('refuses when the file changed while the operator was deciding', async () => {
+      // TIME OF CHECK, TIME OF USE. The prompt window is however long a human
+      // takes to read and type, which is forever in filesystem terms. Integrity
+      // was verified against the bytes read BEFORE the prompt; writing
+      // afterwards without re-checking would overwrite whatever arrived in the
+      // meantime — and if what arrived was a tamper, the amendment would launder
+      // it, which is the exact thing integrity-first exists to prevent.
+      const { root, file } = await projectWith(frozenContract());
+
+      const meddling: AmendIo = {
+        isInteractive: () => true,
+        write: () => {},
+        ask: async () => {
+          // Someone edits the contract while the prompt is open.
+          await writeFile(file, `${await readFile(file, 'utf8')}\n# edited during the prompt\n`);
+          return 'y';
+        },
+      };
+
+      const changed = await readFile(file, 'utf8').then(async () => {
+        await expect(
+          runAmend({
+            projectRoot: root,
+            epicId: EPIC,
+            reason: 'scope reduced',
+            now: AT,
+            io: meddling,
+          }),
+        ).rejects.toBeInstanceOf(IntegrityError);
+        return await readFile(file, 'utf8');
+      });
+
+      // The newer content survives untouched: an amendment must never silently
+      // discard an edit it never saw.
+      expect(changed).toContain('# edited during the prompt');
+      expect(changed).not.toContain('version: 2');
+    });
+
     it('refuses a blank reason without writing anything', async () => {
       const { root, file } = await projectWith(frozenContract());
       const before = await readFile(file, 'utf8');

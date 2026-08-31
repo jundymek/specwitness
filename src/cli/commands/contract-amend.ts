@@ -60,7 +60,7 @@ import {
   readContractFile,
   writeContractFileAtomically,
 } from '../../authoring/contract-file.js';
-import { InfraError } from '../../domain/errors.js';
+import { InfraError, IntegrityError } from '../../domain/errors.js';
 import { parseContract, serializeContract } from '../../schemas/contract.js';
 
 /**
@@ -150,6 +150,26 @@ export async function runAmend(options: AmendCommandOptions): Promise<void> {
     // Nothing is written. The contract is byte-identical to what it was.
     io.write('Amendment cancelled; the contract is unchanged.\n');
     return;
+  }
+
+  // TIME OF CHECK, TIME OF USE. Integrity was verified against the bytes read
+  // BEFORE the prompt, and the prompt window is however long a human takes to
+  // read and type — forever, in filesystem terms. Writing now without looking
+  // again would overwrite whatever arrived in the meantime; and if what arrived
+  // was a tamper, the amendment would launder it into the audit trail as
+  // legitimate, which is the exact thing checking integrity first exists to
+  // prevent. So: re-read, and refuse unless the bytes are the ones the operator
+  // actually confirmed.
+  //
+  // Compared as BYTES rather than by re-parsing. The question is not "is the
+  // new content also valid?" but "is this still the thing you agreed to?", and
+  // only the original bytes answer that.
+  const nowOnDisk = await readContractFile(projectRoot, epicId);
+  if (nowOnDisk !== text) {
+    throw new IntegrityError(
+      `the contract at ${contractRelativePath(epicId)} changed while the amendment was being confirmed`,
+      'nothing was written — re-read the file and run the amendment again if you still want it',
+    );
   }
 
   // `amend` re-checks both preconditions rather than trusting this module: it
