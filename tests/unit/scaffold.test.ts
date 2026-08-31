@@ -78,6 +78,15 @@ describe('isGitRepository (AC3, filesystem-only)', () => {
     await expect(isGitRepository(root)).resolves.toBe(false);
   });
 
+  it('rejects a .git file whose gitdir is a regular file, not a directory', async () => {
+    // `gitdir: notes.txt` is a stale pointer, not a worktree. Accepting it
+    // would let init scaffold exactly where AC3 says it must refuse.
+    await writeFile(join(root, 'notes.txt'), 'not a git directory\n', 'utf8');
+    await writeFile(join(root, '.git'), `gitdir: ${join(root, 'notes.txt')}\n`, 'utf8');
+
+    await expect(isGitRepository(root)).resolves.toBe(false);
+  });
+
   it('accepts a .git file whose gitdir really exists', async () => {
     const gitdir = join(root, 'real-gitdir');
     await mkdir(gitdir, { recursive: true });

@@ -262,8 +262,11 @@ async function resolveGitDir(projectRoot: string): Promise<string | undefined> {
 
   // A relative gitdir is relative to the working tree that named it.
   const gitDir = isAbsolute(target) ? target : resolve(projectRoot, target);
-  const exists = await stat(gitDir).catch(() => undefined);
-  return exists === undefined ? undefined : gitDir;
+  // Must be a DIRECTORY: `gitdir: notes.txt` pointing at a regular file (or a
+  // FIFO, or a socket) is a stale pointer, not a worktree, and accepting it
+  // would let `init` scaffold where AC3 says it must refuse.
+  const targetEntry = await stat(gitDir).catch(() => undefined);
+  return targetEntry?.isDirectory() === true ? gitDir : undefined;
 }
 
 /**
