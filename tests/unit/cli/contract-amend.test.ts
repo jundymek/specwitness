@@ -448,6 +448,29 @@ describe('contract --amend', () => {
       }
     });
 
+    it('refuses on the real command path before the project is even checked', async () => {
+      // The no-TTY policy is absolute, so it must not depend on filesystem
+      // state. `runAmend` checks the TTY first — but on the COMMAND path story
+      // 2.6's `assertProjectInitialised` ran before the amend branch, so in an
+      // uninitialised directory an agent got "run init" instead of the ADR-005
+      // refusal. Same invocation, different answer depending on where you stood:
+      // a policy with an environmental exception is not a policy.
+      const empty = await mkdtemp(join(tmpdir(), 'specwitness-amend-uninit-'));
+      const cwd = process.cwd();
+      process.chdir(empty);
+      try {
+        let thrown: unknown;
+        try {
+          await runContract('7', { amend: true, reason: 'x' }, { now: () => AT });
+        } catch (error) {
+          thrown = error;
+        }
+        expect((thrown as InfraError).message).toContain('interactive terminal');
+      } finally {
+        process.chdir(cwd);
+      }
+    });
+
     it('refuses --reason without --amend rather than silently ignoring it', async () => {
       // Story 2.6 refuses `--json` without `--status` for exactly this reason:
       // "an invocation shaped like a question must never mutate the project by

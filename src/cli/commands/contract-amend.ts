@@ -50,12 +50,27 @@
  *
  * Every path is fail-closed: a tampered contract, an absent one, a declined
  * confirmation and an empty reason each leave the file byte-identical.
+ *
+ * THE RESIDUAL RACE, STATED RATHER THAN IMPLIED. The re-read below closes the
+ * window that matters — the seconds or minutes a human spends at the prompt.
+ * A microsecond window remains between that read and the rename, and closing it
+ * properly needs a lock file or a compare-and-swap the filesystem does not
+ * offer. That is deliberately NOT built here, for the same reason ADR-005 gives
+ * for the whole feature: V0 is tamper-EVIDENT, not tamper-proof. An adversary
+ * who can write the file at that exact instant can also simply rewrite it a
+ * moment after the amendment lands, which ADR-005 already concedes and which no
+ * lock would prevent. A lock would add stale-lock failure modes and imply a
+ * guarantee the product does not make. The hardening path — harness permission
+ * denial, CODEOWNERS, an optional signing key held outside agent reach — is
+ * ADR-005's, deferred to v2+, and half-building it here would be worse than
+ * naming the limit.
  */
 
 import { createInterface } from 'node:readline/promises';
 
 import { amend, assertAmendable, normalizeReason } from '../../authoring/amend.js';
 import {
+  assertProjectInitialised,
   contractRelativePath,
   readContractFile,
   writeContractFileAtomically,
@@ -106,6 +121,10 @@ export async function runAmend(options: AmendCommandOptions): Promise<void> {
       'amendment is an operator action: run it yourself in a terminal. There is deliberately no non-interactive flag — see ADR-005',
     );
   }
+
+  // Only now does the filesystem enter the picture, so the operator still gets
+  // the "run init" hint — after the refusal that does not depend on it.
+  await assertProjectInitialised(projectRoot);
 
   const text = await readContractFile(projectRoot, epicId);
   if (text === undefined) {

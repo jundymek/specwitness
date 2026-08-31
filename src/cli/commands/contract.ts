@@ -127,13 +127,13 @@ export async function runContract(
   const epic = normalizeEpicId(rawEpic);
   const projectRoot = process.cwd();
 
-  await assertProjectInitialised(projectRoot);
-
-  if (options.status === true) {
-    await reportStatus(projectRoot, epic, options.json === true);
-    return;
-  }
-
+  // AMEND DISPATCHES FIRST, BEFORE the project check. The no-TTY refusal is
+  // absolute (ADR-005), so it must not depend on filesystem state: run in an
+  // uninitialised directory, `assertProjectInitialised` would answer "run init"
+  // and an agent would learn that the refusal has an environmental exception.
+  // A policy with an exception is not a policy. `runAmend` checks the TTY first
+  // and re-asserts initialisation itself, so the interactive path still gets
+  // the init hint.
   if (options.amend === true) {
     await runAmend({
       projectRoot,
@@ -142,6 +142,13 @@ export async function runContract(
       now: clock.now(),
       io: processAmendIo(),
     });
+    return;
+  }
+
+  await assertProjectInitialised(projectRoot);
+
+  if (options.status === true) {
+    await reportStatus(projectRoot, epic, options.json === true);
     return;
   }
 
