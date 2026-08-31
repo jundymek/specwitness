@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
+import { KINDS, SEVERITIES, VERIFIABILITIES } from '../../src/domain/contract.js';
 import { CRITERION_STATUSES, GATE_STATUSES } from '../../src/domain/result.js';
 import { INFRA_ERROR_CLASSIFICATIONS, VERDICTS } from '../../src/domain/run-outcome.js';
 import {
   CriterionStatusSchema,
   GateStatusSchema,
   InfraErrorClassificationSchema,
+  KindSchema,
+  SeveritySchema,
   VerdictSchema,
+  VerifiabilitySchema,
 } from '../../src/schemas/enums.js';
 import { SCHEMA_VERSIONS, schemaVersionFor } from '../../src/schemas/versions.js';
 
@@ -16,6 +20,9 @@ describe('schemas/enums — derived from the domain, so they cannot drift', () =
     ['GateStatus', GateStatusSchema, GATE_STATUSES],
     ['Verdict', VerdictSchema, VERDICTS],
     ['InfraErrorClassification', InfraErrorClassificationSchema, INFRA_ERROR_CLASSIFICATIONS],
+    ['Kind', KindSchema, KINDS],
+    ['Severity', SeveritySchema, SEVERITIES],
+    ['Verifiability', VerifiabilitySchema, VERIFIABILITIES],
   ])('%s schema options equal the domain array exactly', (_name, schema, domainValues) => {
     expect([...schema.options]).toEqual([...domainValues]);
   });
@@ -68,6 +75,41 @@ describe('taxonomy closure — a change here must be a deliberate ADR, not a sli
 
   it('excludes usage from the infra classifications — a usage error exits 64, never 3', () => {
     expect(INFRA_ERROR_CLASSIFICATIONS).not.toContain('usage');
+  });
+
+  it('pins the criterion kinds exactly (PRD Glossary)', () => {
+    expect([...KINDS]).toEqual([
+      'behavioral',
+      'integration',
+      'invariant',
+      'security',
+      'structural',
+      'performance',
+      'human',
+    ]);
+  });
+
+  it('pins the severities exactly — two levels, no weighting rule to imply', () => {
+    expect([...SEVERITIES]).toEqual(['critical', 'normal']);
+  });
+
+  it('pins the verifiabilities exactly', () => {
+    expect([...VERIFIABILITIES]).toEqual(['automated', 'human']);
+  });
+
+  it('rejects a kind the model might invent', () => {
+    // 2.6 hands provider output through this schema. A draft carrying
+    // `kind: deterministic` (dropped from the vocabulary deliberately) or a
+    // capitalised variant must fail the gate, not reach a fingerprinted file.
+    for (const illegal of ['deterministic', 'Behavioral', 'behaviour', 'ux', '']) {
+      expect(KindSchema.safeParse(illegal).success).toBe(false);
+    }
+  });
+
+  it('rejects a severity outside the two levels', () => {
+    for (const illegal of ['blocker', 'CRITICAL', 'minor', 'low']) {
+      expect(SeveritySchema.safeParse(illegal).success).toBe(false);
+    }
   });
 });
 

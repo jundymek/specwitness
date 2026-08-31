@@ -1,0 +1,19 @@
+# A third top-level key. AD-5 says exactly two: it would have to be either
+# fingerprinted or not, and neither answer is one anybody chose.
+spec:
+  epic: epic-7
+  version: 1
+  criteria: []
+meta:
+  schemaVersion: 1
+  frozen: false
+  fingerprint: null
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: null
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
+  history: []
+notes: reviewed by marek

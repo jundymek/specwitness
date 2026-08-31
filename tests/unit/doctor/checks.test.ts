@@ -460,6 +460,9 @@ describe('BUILTIN_CHECKS', () => {
       'commands-resolvable',
       'playwright-capability',
       'ports-free',
+      // ── appended by story 2.7; the seven above are unchanged and unmoved ──
+      'billing-risk-env',
+      'ai-providers',
     ]);
   });
 
@@ -475,9 +478,26 @@ describe('BUILTIN_CHECKS', () => {
     ]);
   });
 
-  it('contains no provider check: those are story 2.7, via the registry', () => {
-    const ids = BUILTIN_CHECKS.map((check) => check.id).join(' ');
+  /**
+   * This replaces story 1.5's "contains no provider check: those are story 2.7,
+   * via the registry", which was a placeholder assertion whose only job was to
+   * fail the moment 2.7 landed — it has now done that job and been retired.
+   *
+   * Its real subject was never the absence of provider checks; it was the EXIT
+   * CODE. Doctor exits 3 only on a required failure, so the property worth
+   * keeping is that nothing 2.7 appended is required. UJ-4's edge case is
+   * explicit: with no agent CLI installed, contract *generation* is unavailable
+   * but execution of existing plans still works — so a missing or unusable
+   * provider, and an exported API key, must warn and leave the code at 0.
+   */
+  it('marks every provider/billing check optional, so none can change the exit code', () => {
+    const providerish = BUILTIN_CHECKS.filter((check) =>
+      /claude|codex|provider|auth|billing/i.test(check.id),
+    );
 
-    expect(ids).not.toMatch(/claude|codex|provider|auth|billing/i);
+    // Guards the guard: were the ids renamed, an empty filter would pass
+    // vacuously and this test would protect nothing.
+    expect(providerish.length).toBeGreaterThan(0);
+    expect(providerish.every((check) => !check.required)).toBe(true);
   });
 });

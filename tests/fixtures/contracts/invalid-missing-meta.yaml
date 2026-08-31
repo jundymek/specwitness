@@ -1,0 +1,11 @@
+# `meta` deleted by hand. Must be rejected with a message naming the path, not
+# crash on a property access.
+spec:
+  epic: epic-7
+  version: 1
+  criteria:
+    - id: E7-01
+      statement: A new company appears in the companies list after onboarding completes.
+      kind: behavioral
+      severity: critical
+      verifiability: automated

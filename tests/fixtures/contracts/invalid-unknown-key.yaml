@@ -1,0 +1,25 @@
+# An unknown key inside a criterion. A strict schema must name its path rather
+# than drop it: a dropped key in a fingerprinted document is a silent
+# expectation change.
+spec:
+  epic: epic-7
+  version: 1
+  criteria:
+    - id: E7-01
+      statement: A new company appears in the companies list after onboarding completes.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+      owner: alice
+meta:
+  schemaVersion: 1
+  frozen: false
+  fingerprint: null
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: null
+  provenance:
+    provider: codex
+    model: null
+    providerCliVersion: 0.144.4
+    generatedAt: 2026-08-31T09:00:00.000Z
+  history: []

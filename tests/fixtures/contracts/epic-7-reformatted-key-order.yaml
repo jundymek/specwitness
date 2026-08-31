@@ -1,0 +1,38 @@
+# Cosmetic reformat #1: KEY ORDER.
+# Same contract as epic-7-frozen.yaml with every mapping's keys shuffled —
+# `meta` before `spec`, and the criterion fields in a different order each time.
+# The fingerprint must be identical, because key order in a mapping carries no
+# meaning in YAML and the canonicalizer sorts keys before hashing.
+meta:
+  history: []
+  provenance:
+    generatedAt: 2026-08-31T09:00:00.000Z
+    providerCliVersion: 0.144.4
+    model: null
+    provider: codex
+  frozenAt: 2026-08-31T09:05:00.000Z
+  createdAt: 2026-08-31T09:00:00.000Z
+  fingerprint: 4f7f9292551ac1cf01d2b77d4e845561b6e6f4331d34ae5c07e7730312d1f184
+  frozen: true
+  schemaVersion: 1
+spec:
+  criteria:
+    - verifiability: automated
+      severity: critical
+      kind: behavioral
+      statement: A new company appears in the companies list after onboarding completes.
+      id: E7-01
+    - kind: security
+      id: E7-02
+      verifiability: automated
+      statement: |-
+        Only an owner may invite a member.
+        A member who tries receives 403 and no invitation is created.
+      severity: critical
+    - severity: normal
+      statement: The onboarding confirmation copy reads naturally to a native speaker — café, ☕.
+      verifiability: human
+      kind: human
+      id: E7-03
+  version: 1
+  epic: epic-7

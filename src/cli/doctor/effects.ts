@@ -18,6 +18,12 @@ import { pathToFileURL } from 'node:url';
 
 import { execa } from 'execa';
 
+import type { Clock } from '../../domain/ports.js';
+import { SystemClock } from '../../infra/clock.js';
+import { createProcessRunner } from '../../infra/process-runner.js';
+
+import { createProviderProbe, type ProbeProvider } from './provider-probe.js';
+
 /** Outcome of a trusted-tooling subprocess (git only). */
 export interface RunOutcome {
   /** `null` when the process was killed (e.g. a timeout) or never started. */
@@ -51,6 +57,17 @@ export interface DoctorEffects {
   resolvesFrom(specifier: string, fromDir: string): boolean;
   /** Binds and immediately releases a localhost port to see whether it is free. */
   probePort(port: number, host: string): Promise<PortProbe>;
+  /**
+   * Readiness of one configured AI provider (story 2.7).
+   *
+   * Calls the ADAPTERS' own capability and auth probes — the same ones a real
+   * invocation runs — and returns them in one normalised shape. Doctor writes
+   * no probe of its own: a second one would drift from what an invocation
+   * actually does, which is the exact failure a diagnostic must not have.
+   * Spawning goes through story 2.3's `ProcessRunner`, never `execa` here, so
+   * probe and invocation cannot classify a missing binary differently.
+   */
+  probeProvider: ProbeProvider;
 }
 
 interface SpawnFailure extends Error {
@@ -59,6 +76,79 @@ interface SpawnFailure extends Error {
   exitCode?: number;
   stdout?: string;
   stderr?: string;
+}
+
+/** The subset of an execa result — resolved OR thrown — that classification needs. */
+interface SpawnLike {
+  code?: string;
+  cause?: unknown;
+  timedOut?: boolean;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+}
+
+/** True when this spawn outcome carries an ENOENT, from either shape execa uses. */
+function isEnoent(result: SpawnLike): boolean {
+  if (result.code === 'ENOENT') {
+    return true;
+  }
+  const cause = result.cause;
+  return (
+    typeof cause === 'object' && cause !== null && (cause as { code?: string }).code === 'ENOENT'
+  );
+}
+
+/**
+ * True when the BINARY could not be found — and not merely when something
+ * raised ENOENT.
+ *
+ * Two traps live here, both found the same way (a story modelling its own code
+ * on this function, going red, and reporting it) and both reproduced against
+ * the installed execa before being fixed.
+ *
+ * ONE: `reject: false` means a binary that is not on PATH does NOT throw — it
+ * RESOLVES, with `code: 'ENOENT'` and `exitCode: undefined`. Testing for ENOENT
+ * only inside a `catch` therefore never ran, and `notFound` was false for every
+ * input this function had ever seen: doctor reported "git exited without a
+ * code" on a machine with no git installed, which is the single diagnosis it
+ * most exists to give. Both paths now funnel through here so they cannot
+ * disagree again.
+ *
+ * TWO: an invalid `cwd` raises the SAME ENOENT as a missing binary. Classifying
+ * on ENOENT alone would make doctor say "git not found on PATH; install git" to
+ * an operator whose git is fine and whose directory is not — a confidently
+ * wrong diagnosis, which is worse than a vague one from the tool whose whole
+ * job is to tell "missing" from "hung" from "said no". So the filesystem is
+ * asked, and only a real directory lets an ENOENT mean "no such binary".
+ *
+ * Reported by story 2.3 (pamela), whose `ProcessRunner` hit both.
+ */
+async function isBinaryNotFound(result: SpawnLike, cwd: string): Promise<boolean> {
+  if (!isEnoent(result)) {
+    return false;
+  }
+
+  try {
+    const stats = await stat(cwd);
+    return stats.isDirectory();
+  } catch {
+    // The cwd itself is what is missing. Not a diagnosis about the binary.
+    return false;
+  }
+}
+
+/**
+ * execa reports an invalid `cwd` on the error's MESSAGE, leaving `stderr` empty,
+ * because no child ever ran to write anything. Passing the empty string through
+ * would report a failure with no explanation at all.
+ */
+function explain(stderr: unknown, message: unknown): string {
+  const text = typeof stderr === 'string' ? stderr : '';
+  if (text !== '') {
+    return text;
+  }
+  return typeof message === 'string' ? message : '';
 }
 
 async function runGit(args: readonly string[], options: RunOptions): Promise<RunOutcome> {
@@ -74,23 +164,25 @@ async function runGit(args: readonly string[], options: RunOptions): Promise<Run
       extendEnv: true,
     });
 
+    const spawn = result as unknown as SpawnLike;
     return {
       exitCode: result.exitCode ?? null,
       stdout: result.stdout,
-      stderr: result.stderr,
+      stderr: explain(result.stderr, (result as unknown as { message?: unknown }).message),
       timedOut: result.timedOut === true,
-      notFound: false,
+      notFound: await isBinaryNotFound(spawn, options.cwd),
     };
   } catch (error) {
-    // `reject: false` suppresses non-zero exits, so reaching here means the
-    // process could not be spawned or was killed.
+    // `reject: false` suppresses non-zero exits AND spawn failures, so reaching
+    // here is rarer than it looks — but a killed process or an invalid option
+    // still lands here, and it must classify identically.
     const failure = error as SpawnFailure;
     return {
       exitCode: failure.exitCode ?? null,
       stdout: failure.stdout ?? '',
-      stderr: failure.stderr ?? failure.message,
+      stderr: explain(failure.stderr, failure.message),
       timedOut: failure.timedOut === true,
-      notFound: failure.code === 'ENOENT',
+      notFound: await isBinaryNotFound(failure as SpawnLike, options.cwd),
     };
   }
 }
@@ -161,6 +253,15 @@ async function probePort(port: number, host: string): Promise<PortProbe> {
   });
 }
 
-export function createDoctorEffects(): DoctorEffects {
-  return { runGit, isExecutableFile, pathExists, resolvesFrom, probePort };
+export function createDoctorEffects(clock: Clock = new SystemClock()): DoctorEffects {
+  return {
+    runGit,
+    isExecutableFile,
+    pathExists,
+    resolvesFrom,
+    probePort,
+    probeProvider: createProviderProbe(createProcessRunner(clock)),
+  };
 }
+
+export type { ProviderAuth, ProviderProbe } from './provider-probe.js';

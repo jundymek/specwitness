@@ -125,7 +125,11 @@ const serviceSchema = z.strictObject({
 });
 
 const providerSchema = z.strictObject({
-  adapter: z.enum(['claude-code-cli', 'codex-cli']),
+  // `fake` is a SHIPPED adapter, not a test-only escape hatch: it returns canned
+  // responses from a fixture directory so the Golden Corpus e2e (Epic 6) can
+  // drive the real `specwitness` binary with no agent CLI installed and no
+  // network. Story 2.3 added it; 2.4 and 2.5 implement the two real ones.
+  adapter: z.enum(['claude-code-cli', 'codex-cli', 'fake']),
   mode: nonEmptyString,
 });
 
