@@ -499,6 +499,34 @@ async function isInsideGitRepo(dir: string): Promise<boolean> {
   }
 }
 
+/**
+ * Compose the text the model sees, folding in the envelope's `contextFiles`.
+ *
+ * Appended as a delimited path list rather than passed through a flag: codex has
+ * no probed flag for attaching text files (`-i/--image` is for images), and AD-4
+ * forbids reaching for one that has not been tested.
+ *
+ * The format is BYTE-IDENTICAL to story 2.4's `composePrompt`, deliberately.
+ * Both adapters answer the same envelope for the same roles, so a contract's
+ * quality must not depend on which provider happened to run — and story 2.6
+ * cannot compensate for a difference it cannot see. Dropping `contextFiles`
+ * entirely, which is what this file did before, meant the codex path silently
+ * lost context the caller had asked for.
+ *
+ * NOTE — known duplication, raised rather than hidden: this is the same five
+ * lines in both adapters. `src/providers/text.ts` (story 2.4's shared helper) is
+ * the natural home, but it is already merged and it is not this story's file to
+ * edit. Flagged to story 2.4 and the supervisor for consolidation; pinned by a
+ * test here in the meantime so the two cannot drift silently.
+ */
+function composePrompt(prompt: AgentPrompt): string {
+  if (prompt.contextFiles === undefined || prompt.contextFiles.length === 0) {
+    return prompt.prompt;
+  }
+  const list = prompt.contextFiles.map((file) => `- ${file}`).join('\n');
+  return `${prompt.prompt}\n\nContext files:\n${list}`;
+}
+
 function firstMeaningfulLine(text: string): string | undefined {
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
@@ -565,6 +593,36 @@ function presentBillingVars(
 }
 
 /**
+ * Emits the FR-15 billing warnings.
+ *
+ * WITHHOLDING IS UNCONDITIONAL, and that is a deliberate reading of the
+ * artifacts rather than an oversight. `ai.providers.<name>.mode` is validated
+ * only as a non-empty string (story 1.3), and the sole modes any planning
+ * artifact defines are `subscription` (claude) and `chatgpt` (codex) — both of
+ * which withhold. NOTHING defines a mode that opts INTO API-key billing. So
+ * there is no value of `mode` for which passing `OPENAI_API_KEY` to the child is
+ * an authorized outcome, and inventing one would create a silent-billing escape
+ * hatch reachable by a typo the schema does not catch. An unrecognized mode
+ * withholds and warns (agreed with story 2.4): failing safe on billing is
+ * cheaper than an unexpected charge on someone's account. Adding an opt-in mode
+ * later is an explicit config-schema change plus an ADR, not a condition here.
+ */
+function warnAboutBilling(
+  mode: string,
+  billingEnvVars: readonly string[],
+  warn: WarnSink,
+): void {
+  for (const name of presentBillingVars(process.env, billingEnvVars)) {
+    warn(`⚠ ${name} present in environment — withheld from the ${BINARY} subprocess (mode: ${mode})`);
+  }
+  if (mode !== SUBSCRIPTION_MODE) {
+    warn(
+      `⚠ unrecognized provider mode "${mode}" for the ${BINARY} adapter — withholding billing variables anyway`,
+    );
+  }
+}
+
+/**
  * Creates the adapter. `mode` comes from `ai.providers.<name>.mode`, already
  * validated as a non-empty string by story 1.3.
  */
@@ -592,6 +650,14 @@ async function generate(
   deps: CodexAdapterDeps,
   options: CodexAdapterOptions,
 ): Promise<string> {
+  // Warn BEFORE probing, not after. The probe itself spawns `codex` with these
+  // variables withheld, so by the time it returns the warning is already a
+  // statement about something that happened. Emitting it afterwards means a
+  // probe that fails or times out SUPPRESSES a warning FR-15 requires — the
+  // operator would be told nothing about a withholding that did occur. Story
+  // 2.4 warns pre-probe for the same reason, so the two adapters agree.
+  warnAboutBilling(mode, billingEnvVars, deps.warn);
+
   const capability = await probeCodexCapability(deps.runner, {
     timeoutMs: options.probeTimeoutMs,
     billingEnvVars,
@@ -608,28 +674,6 @@ async function generate(
     throw new ProviderError(
       capability.reason ?? `${BINARY} cannot author verification artifacts`,
       `install or update the Codex CLI, then re-run 'specwitness doctor'`,
-    );
-  }
-
-  // WITHHOLDING IS UNCONDITIONAL, and that is a deliberate reading of the
-  // artifacts rather than an oversight. `ai.providers.<name>.mode` is validated
-  // only as a non-empty string (story 1.3), and the sole modes any planning
-  // artifact defines are `subscription` (claude) and `chatgpt` (codex) — both of
-  // which withhold. NOTHING defines a mode that opts INTO API-key billing. So
-  // there is no value of `mode` for which passing OPENAI_API_KEY to the child is
-  // an authorized outcome, and inventing one here would create a silent-billing
-  // escape hatch reachable by a typo. An unrecognized mode withholds and warns
-  // (agreed with story 2.4): failing safe on billing is cheaper than an
-  // unexpected charge on someone's account. Adding an opt-in mode later is an
-  // explicit config-schema change plus an ADR — not a condition in this file.
-  for (const name of presentBillingVars(process.env, billingEnvVars)) {
-    deps.warn(
-      `⚠ ${name} present in environment — withheld from the ${BINARY} subprocess (mode: ${mode})`,
-    );
-  }
-  if (mode !== SUBSCRIPTION_MODE) {
-    deps.warn(
-      `⚠ unrecognized provider mode "${mode}" for the ${BINARY} adapter — withholding billing variables anyway`,
     );
   }
 
@@ -686,8 +730,9 @@ async function generate(
     // travels on stdin via codex's own `-` sentinel. The two paths are mutually
     // exclusive: codex APPENDS a piped stdin as a `<stdin>` block when a prompt
     // argument is also present, so sending both would silently duplicate it.
-    const oversized = Buffer.byteLength(prompt.prompt, 'utf8') > ARGV_PROMPT_LIMIT_BYTES;
-    args.push(oversized ? STDIN_PROMPT : prompt.prompt);
+    const composed = composePrompt(prompt);
+    const oversized = Buffer.byteLength(composed, 'utf8') > ARGV_PROMPT_LIMIT_BYTES;
+    args.push(oversized ? STDIN_PROMPT : composed);
 
     const result = await deps.runner.run({
       binary: BINARY,
@@ -697,7 +742,7 @@ async function generate(
       env: childEnvironment(billingEnvVars),
       // Prompt-free by contract on the ordinary path: an empty stdin means codex
       // can never block waiting for input that is not coming.
-      input: oversized ? prompt.prompt : '',
+      input: oversized ? composed : '',
     });
 
     if (result.outcome === 'not-found') {

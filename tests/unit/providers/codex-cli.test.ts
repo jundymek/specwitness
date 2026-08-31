@@ -418,6 +418,59 @@ describe('generate — argv translation (AC1)', () => {
     expect(JSON.parse(written as string)).toEqual(schema);
   });
 
+  it('forwards contextFiles, in story 2.4\'s exact format', async () => {
+    // Previously dropped entirely, so the codex path silently lost context the
+    // caller had asked for. The FORMAT is asserted literally, not loosely: both
+    // adapters answer the same envelope for the same roles, so a contract's
+    // quality must not depend on which provider happened to run, and story 2.6
+    // cannot compensate for a difference it cannot see. If story 2.4 ever
+    // changes its wording, this test is what makes the divergence visible
+    // instead of silent.
+    const runner = recordingRunner([VERSION_OK, HELP_OK, writesAnswer('{}')]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() });
+
+    await provider.generate({
+      role: 'contract-author',
+      prompt: 'author it',
+      contextFiles: ['src/a.ts', 'src/b.ts'],
+      jsonSchema: {},
+    });
+
+    expect(runner.calls[2]?.args.at(-1)).toBe(
+      'author it\n\nContext files:\n- src/a.ts\n- src/b.ts',
+    );
+  });
+
+  it('leaves the prompt untouched when there are no contextFiles', async () => {
+    const runner = recordingRunner([VERSION_OK, HELP_OK, writesAnswer('{}')]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() });
+
+    await provider.generate({ role: 'contract-author', prompt: 'author it', jsonSchema: {} });
+
+    // No trailing section, no empty heading: an absent list adds nothing.
+    expect(runner.calls[2]?.args.at(-1)).toBe('author it');
+  });
+
+  it('counts the COMPOSED prompt against the stdin threshold', async () => {
+    // The size that matters is what actually reaches argv. Measuring
+    // `prompt.prompt` while sending prompt + context files could put an
+    // oversized argument on a Linux command line — the exact E2BIG the
+    // threshold exists to prevent.
+    const runner = recordingRunner([VERSION_OK, HELP_OK, writesAnswer('{}')]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() });
+
+    await provider.generate({
+      role: 'contract-author',
+      prompt: 'x'.repeat(60 * 1024),
+      contextFiles: [`src/${'y'.repeat(10 * 1024)}.ts`],
+      jsonSchema: {},
+    });
+
+    // Under the limit on its own; over it once the context list is folded in.
+    expect(runner.calls[2]?.args.at(-1)).toBe('-');
+    expect(runner.calls[2]?.input).toContain('Context files:');
+  });
+
   it('passes a prompt full of shell metacharacters as ONE inert argv element', async () => {
     // AD-3, proved rather than asserted in a comment. argv arrays reach execve
     // directly, so there is no shell to interpret any of this.
@@ -735,6 +788,27 @@ describe('generate — billing safety (AC2, FR-15)', () => {
     expect(runner.calls[2]?.env).toEqual({ inherit: true, withhold: ['OPENAI_API_KEY'] });
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('unrecognized provider mode "subscribtion"'),
+    );
+  });
+
+  it('warns even when the capability probe FAILS', async () => {
+    // The probe itself spawns codex with the variable withheld, so by the time
+    // it returns the warning is a statement about something that already
+    // happened. Emitting it after the capability gate meant a failed or
+    // timed-out probe SUPPRESSED a warning FR-15 requires — the operator would
+    // hear nothing about a withholding that did occur. Story 2.4 warns
+    // pre-probe for the same reason.
+    vi.stubEnv('OPENAI_API_KEY', 'FAKE-BILLING-VALUE');
+    const warn = vi.fn();
+    const runner = recordingRunner([result({ outcome: 'not-found', exitCode: null })]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn });
+
+    await provider
+      .generate({ role: 'contract-author', prompt: 'p', jsonSchema: {} })
+      .catch(() => undefined);
+
+    expect(warn).toHaveBeenCalledWith(
+      '⚠ OPENAI_API_KEY present in environment — withheld from the codex subprocess (mode: chatgpt)',
     );
   });
 
