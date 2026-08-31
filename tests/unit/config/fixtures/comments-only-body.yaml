@@ -1,0 +1,16 @@
+# A template-shaped document: one active key, everything else commented out.
+# This is the shape story 1.4 ships as templates/config.yaml, so it must parse.
+version: 1
+project:
+  baseBranch: main
+# setup:
+#   install: pnpm install
+# gates:
+#   - { id: lint, run: pnpm lint }
+# services:
+#   backend:
+#     run: pnpm dev
+#     port: 3000
+#     ready: { url: "http://localhost:3000" }
+# observations:
+#   company-count: { run: ./scripts/company-count.sh }

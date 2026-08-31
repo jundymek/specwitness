@@ -29,20 +29,20 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: '2026-08-30'
-last_updated: '2026-08-30'
+last_updated: '2026-08-31'
 project: specwitness
 project_key: NOKEY
 tracking_system: file-system
 story_location: docs/implementation-artifacts
 development_status:
   epic-1: in-progress
-  1-1-cli-package-skeleton-with-exit-code-contract: ready-for-dev
-  1-2-domain-core-result-taxonomy-errors-verdict-aggregation: ready-for-dev
-  1-3-project-configuration-model-validation: ready-for-dev
-  1-4-specwitness-init: ready-for-dev
-  1-5-specwitness-doctor-runtime-project-diagnostics: ready-for-dev
-  1-6-run-storage-foundation-run-identifiers: ready-for-dev
-  epic-1-retrospective: optional
+  1-1-cli-package-skeleton-with-exit-code-contract: done
+  1-2-domain-core-result-taxonomy-errors-verdict-aggregation: done
+  1-3-project-configuration-model-validation: done
+  1-4-specwitness-init: done
+  1-5-specwitness-doctor-runtime-project-diagnostics: done
+  1-6-run-storage-foundation-run-identifiers: done
+  epic-1-retrospective: done
 
   epic-2: backlog
   2-1-bmad-v6-ingestion-to-epicspec: backlog

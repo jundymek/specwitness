@@ -1,0 +1,7 @@
+version: 1
+project:
+  baseBranch: master
+services:
+  backend:
+    run: pnpm dev
+    ready: { url: "http://localhost:3000", timeoutSec: sixty }
