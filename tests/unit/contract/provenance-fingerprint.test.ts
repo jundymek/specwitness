@@ -161,3 +161,51 @@ describe('populating meta.provenance cannot change a contract fingerprint (AD-5)
     expect(contractState(reparsed)).toBe('frozen');
   });
 });
+
+/**
+ * A version string is UNTRUSTED TEXT that this story newly writes into a YAML
+ * document (story 3.8's Security section).
+ *
+ * The threat is small but real and cheap to close: `providerCliVersion` is
+ * whatever a binary named `claude` or `codex` on the operator's PATH printed for
+ * `--version`, recorded verbatim. Both adapters already reason about a homonym
+ * binary — a shell alias, an unrelated program — so a hostile or merely broken
+ * one printing YAML-shaped text is exactly the case worth pinning. If the
+ * serializer emitted that as raw structure rather than as a quoted scalar, a
+ * `--version` string could inject keys into the contract document, which is the
+ * artifact the entire product treats as authoritative.
+ *
+ * It cannot, because nothing in this story builds YAML by hand — the merged
+ * serializer does it. This test is what stops that staying true only by accident.
+ */
+describe('an untrusted version string cannot inject YAML structure', () => {
+  const HOSTILE = [
+    ['newlines and a fake key', 'x\ncriteria: []\nmeta:\n  frozen: false\n'],
+    ['a document separator', '1.0\n---\nspec:\n  epic: evil\n'],
+    ['a leading anchor and a comment', '&anchor 1.0 # trailing'],
+    ['flow-mapping syntax', '{epic: pwned, version: 99}'],
+    ['a leading indicator character', '*not-an-alias'],
+    ['a colon-space pair, which YAML reads as a mapping', 'version: 1.0'],
+  ] as const;
+
+  for (const [label, version] of HOSTILE) {
+    it(`records ${label} as an inert scalar`, () => {
+      const contract = withProvenance(frozen(), {
+        ...POPULATED,
+        providerCliVersion: version,
+      });
+
+      const reparsed = parseContract(serializeContract(contract), 'contracts/epic-7.yaml');
+
+      // Survives verbatim — the adapters promise "verbatim, never parsed", and
+      // sanitising it here would be this layer editing what the CLI said.
+      expect(reparsed.meta.provenance.providerCliVersion).toBe(version);
+      // And changed nothing else. `spec` is untouched, so the contract is still
+      // frozen against its original fingerprint: no injected key reached it.
+      expect(reparsed.spec.epic).toBe('epic-7');
+      expect(reparsed.spec.criteria).toHaveLength(3);
+      expect(contractState(reparsed)).toBe('frozen');
+      expect(fingerprint(reparsed.spec)).toBe(FROZEN_FINGERPRINT);
+    });
+  }
+});
