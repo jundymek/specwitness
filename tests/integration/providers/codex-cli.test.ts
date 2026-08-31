@@ -190,10 +190,15 @@ describe('invocation against a real subprocess (AC1)', () => {
       '--skip-git-repo-check',
       'author the contract',
     ]);
-    // `-C` is honoured by the process, not merely passed: the child really
-    // started there. Compared through `realpath` because macOS resolves `/var`
-    // to `/private/var`, so the child's own `pwd` is the resolved form of the
-    // path we passed — a difference in the platform, not in the adapter.
+    // The target directory is asserted TWICE, by different means, because the
+    // adapter sets it two ways and both matter: `--cd <work>` in the argv above
+    // (what codex is TOLD), and the spawn's own working directory here (where
+    // the process actually STARTED). The fake reports its real `pwd`, so this
+    // half would catch a cwd that was merely inherited rather than passed.
+    //
+    // Compared through `realpath` because macOS resolves `/var` to
+    // `/private/var`, so the child's `pwd` is the resolved form of the path we
+    // passed — a property of the platform, not a discrepancy in the adapter.
     const { realpath } = await import('node:fs/promises');
     expect(await shim.cwd()).toBe(await realpath(work));
     expect(raw).toBe('{"criteria":[]}');
