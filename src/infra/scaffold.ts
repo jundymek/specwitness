@@ -113,29 +113,130 @@ export async function isGitRepository(projectRoot: string): Promise<boolean> {
 }
 
 /**
- * The branch `HEAD` points at, or `master` when that cannot be determined.
+ * The repository's DEFAULT branch — the one an epic is verified against — or
+ * `master` when it cannot be determined.
  *
- * The written `project.baseBranch` is an observation rather than a guess: a
- * repository whose default branch is `main` gets `main`, so `doctor`'s
- * base-branch check resolves instead of reporting a phantom `master`.
+ * Deliberately not "the branch that is checked out". `project.baseBranch` is
+ * the branch a finished epic is compared to, and `init` is very often run from
+ * a feature branch. Writing the current branch there would produce a valid,
+ * plausible, silently WRONG config: verification would diff the epic against
+ * itself and see no changes. A placeholder the user must correct is far better
+ * than a value that looks right and is not.
  *
- * Never throws. A repository we cannot read HEAD from still gets a config
- * file — only the placeholder's accuracy is affected, and `doctor` will say so.
+ * Sources, best first, all filesystem-only:
+ *   1. `refs/remotes/origin/HEAD` — what the remote calls its default branch.
+ *   2. A local `main` or `master`, whichever exists.
+ *   3. `HEAD`'s branch, but ONLY when its ref does not exist yet — that is a
+ *      freshly initialised repository with no commits, where the checked-out
+ *      branch genuinely IS the intended default.
+ *   4. `master`.
+ *
+ * Never throws: a repository we cannot read still gets a config file, and only
+ * the placeholder's accuracy is affected. `doctor` reports the rest.
  */
-export async function readHeadBranch(projectRoot: string): Promise<string> {
+export async function readBaseBranch(projectRoot: string): Promise<string> {
   try {
     const gitDir = await resolveGitDir(projectRoot);
     if (gitDir === undefined) {
       return FALLBACK_BASE_BRANCH;
     }
 
-    const head = await readFile(join(gitDir, 'HEAD'), 'utf8');
-    // A detached HEAD holds a raw sha and matches nothing here.
-    const match = /^ref:\s*refs\/heads\/(.+)$/m.exec(head.trim());
-    return match?.[1]?.trim() || FALLBACK_BASE_BRANCH;
+    // Refs live in the COMMON dir, which is the gitdir itself for an ordinary
+    // repository but the main repository's `.git` for a linked worktree — a
+    // worktree gitdir has its own HEAD and no `refs/heads` of its own. Looking
+    // for refs in the wrong place made every worktree look like a fresh repo
+    // with no branches, which is exactly when the checked-out branch gets used.
+    const commonDir = await resolveCommonDir(gitDir);
+
+    const fromRemote = await readRemoteDefaultBranch(commonDir);
+    if (fromRemote !== undefined) {
+      return fromRemote;
+    }
+
+    for (const conventional of ['main', 'master']) {
+      if (await branchExists(commonDir, conventional)) {
+        return conventional;
+      }
+    }
+
+    // HEAD is per-worktree, so it is read from the gitdir, not the common dir.
+    const checkedOut = await readHeadBranch(gitDir);
+    if (checkedOut !== undefined && !(await branchExists(commonDir, checkedOut))) {
+      // No ref for it yet: `git init` before the first commit. Nothing else
+      // exists to prefer, and this is the branch the user chose.
+      return checkedOut;
+    }
+
+    return FALLBACK_BASE_BRANCH;
   } catch {
     return FALLBACK_BASE_BRANCH;
   }
+}
+
+/**
+ * Where a repository's refs actually live.
+ *
+ * A linked worktree's gitdir holds a `commondir` file pointing at the main
+ * repository's `.git`; `refs/heads`, `refs/remotes` and `packed-refs` are all
+ * there, not in the worktree gitdir.
+ */
+async function resolveCommonDir(gitDir: string): Promise<string> {
+  const pointer = await readFile(join(gitDir, 'commondir'), 'utf8').catch(() => undefined);
+  const target = pointer?.trim();
+  if (target === undefined || target === '') {
+    return gitDir;
+  }
+  return isAbsolute(target) ? target : resolve(gitDir, target);
+}
+
+/** The branch `HEAD` names, or undefined when detached or unreadable. */
+async function readHeadBranch(gitDir: string): Promise<string | undefined> {
+  const head = await readFile(join(gitDir, 'HEAD'), 'utf8').catch(() => undefined);
+  if (head === undefined) {
+    return undefined;
+  }
+  // A detached HEAD holds a raw sha and matches nothing here.
+  const match = /^ref:\s*refs\/heads\/(.+)$/m.exec(head.trim());
+  return match?.[1]?.trim() || undefined;
+}
+
+/** What `origin` calls its default branch, from the symbolic ref git writes on clone. */
+async function readRemoteDefaultBranch(gitDir: string): Promise<string | undefined> {
+  const loose = await readFile(join(gitDir, 'refs', 'remotes', 'origin', 'HEAD'), 'utf8').catch(
+    () => undefined,
+  );
+  const fromLoose = loose === undefined ? undefined : matchOriginRef(loose);
+  if (fromLoose !== undefined) {
+    return fromLoose;
+  }
+
+  // Older clones keep it in packed-refs instead of a loose file.
+  const packed = await readFile(join(gitDir, 'packed-refs'), 'utf8').catch(() => undefined);
+  return packed === undefined ? undefined : matchOriginRef(packed);
+}
+
+function matchOriginRef(contents: string): string | undefined {
+  const match = /refs\/remotes\/origin\/(?!HEAD\b)(\S+)/.exec(contents);
+  return match?.[1]?.trim() || undefined;
+}
+
+/** True when a local branch ref exists, loose or packed. */
+async function branchExists(gitDir: string, branch: string): Promise<boolean> {
+  const loose = await stat(join(gitDir, 'refs', 'heads', ...branch.split('/'))).catch(
+    () => undefined,
+  );
+  if (loose !== undefined) {
+    return true;
+  }
+
+  const packed = await readFile(join(gitDir, 'packed-refs'), 'utf8').catch(() => undefined);
+  return packed === undefined
+    ? false
+    : new RegExp(`^\\S+\\s+refs/heads/${escapeForRegExp(branch)}$`, 'm').test(packed);
+}
+
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -314,7 +415,7 @@ async function inspectLayout(projectDir: string): Promise<Map<string, true>> {
 /** The shipped template with the base-branch placeholder resolved (D4/D12). */
 async function renderConfig(projectRoot: string): Promise<string> {
   const template = await readTemplate();
-  const branch = await readHeadBranch(projectRoot);
+  const branch = await readBaseBranch(projectRoot);
 
   const pattern = new RegExp(`^(\\s*baseBranch:\\s*)${TEMPLATE_BASE_BRANCH}\\s*$`, 'gm');
   const matches = template.match(pattern) ?? [];

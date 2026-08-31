@@ -1,13 +1,13 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 import { InfraError } from '../../src/domain/errors.js';
-import { isGitRepository, readHeadBranch, scaffold } from '../../src/infra/scaffold.js';
+import { isGitRepository, readBaseBranch, scaffold } from '../../src/infra/scaffold.js';
 
 /**
  * Every test works in a throwaway directory: the scaffold's whole job is to
@@ -105,39 +105,114 @@ describe('isGitRepository (AC3, filesystem-only)', () => {
   });
 });
 
-describe('readHeadBranch (D4 — placeholder comes from the repo, not a guess)', () => {
-  it('reads the branch name out of .git/HEAD', async () => {
-    await makeGitDir('ref: refs/heads/main\n');
-    await expect(readHeadBranch(root)).resolves.toBe('main');
+describe('readBaseBranch — the DEFAULT branch, not the checked-out one', () => {
+  /** Writes a loose ref so a branch "exists". */
+  async function makeBranch(name: string): Promise<void> {
+    const ref = join(root, '.git', 'refs', 'heads', ...name.split('/'));
+    await mkdir(dirname(ref), { recursive: true });
+    await writeFile(ref, `${'0'.repeat(40)}\n`, 'utf8');
+  }
+
+  it('prefers what origin calls its default branch', async () => {
+    await makeGitDir('ref: refs/heads/story/my-feature\n');
+    await makeBranch('story/my-feature');
+    await makeBranch('main');
+    const originHead = join(root, '.git', 'refs', 'remotes', 'origin', 'HEAD');
+    await mkdir(dirname(originHead), { recursive: true });
+    await writeFile(originHead, 'ref: refs/remotes/origin/develop\n', 'utf8');
+
+    await expect(readBaseBranch(root)).resolves.toBe('develop');
   });
 
-  it('handles branch names containing slashes', async () => {
-    await makeGitDir('ref: refs/heads/release/2026-q3\n');
-    await expect(readHeadBranch(root)).resolves.toBe('release/2026-q3');
+  it('reads origin/HEAD out of packed-refs when there is no loose file', async () => {
+    await makeGitDir('ref: refs/heads/story/my-feature\n');
+    await writeFile(
+      join(root, '.git', 'packed-refs'),
+      '# pack-refs with: peeled fully-peeled sorted \n' +
+        `${'a'.repeat(40)} refs/remotes/origin/trunk\n`,
+      'utf8',
+    );
+
+    await expect(readBaseBranch(root)).resolves.toBe('trunk');
+  });
+
+  it('NEVER returns the checked-out feature branch when a real default exists', async () => {
+    // The defect this replaced: `baseBranch` is the branch an epic is VERIFIED
+    // AGAINST. Writing the branch you happen to be on makes verification diff
+    // the epic against itself and see nothing — valid, plausible, and silently
+    // wrong. init is very often run from a feature branch.
+    await makeGitDir('ref: refs/heads/story/1.4-specwitness-init\n');
+    await makeBranch('story/1.4-specwitness-init');
+    await makeBranch('main');
+
+    await expect(readBaseBranch(root)).resolves.toBe('main');
+  });
+
+  it('falls back to master rather than the feature branch when nothing else is known', async () => {
+    await makeGitDir('ref: refs/heads/story/my-feature\n');
+    await makeBranch('story/my-feature');
+
+    // A placeholder the user must correct beats a value that looks right.
+    await expect(readBaseBranch(root)).resolves.toBe('master');
+  });
+
+  it.each([['main'], ['master']])('uses local %s when there is no remote', async (branch) => {
+    await makeGitDir(`ref: refs/heads/${branch}\n`);
+    await makeBranch(branch);
+
+    await expect(readBaseBranch(root)).resolves.toBe(branch);
+  });
+
+  it('uses the checked-out branch on a fresh repo with no commits', async () => {
+    // `git init --initial-branch=trunk` before the first commit: refs/heads is
+    // empty, so the checked-out branch genuinely IS the intended default.
+    await makeGitDir('ref: refs/heads/trunk\n');
+
+    await expect(readBaseBranch(root)).resolves.toBe('trunk');
   });
 
   it('falls back to master on a detached HEAD', async () => {
     await makeGitDir('9fceb02d0ae598e95dc970b74767f19372d61af8\n');
-    await expect(readHeadBranch(root)).resolves.toBe('master');
+    await expect(readBaseBranch(root)).resolves.toBe('master');
   });
 
   it('falls back to master when HEAD is missing or unreadable', async () => {
     await mkdir(join(root, '.git'), { recursive: true });
-    await expect(readHeadBranch(root)).resolves.toBe('master');
+    await expect(readBaseBranch(root)).resolves.toBe('master');
   });
 
   it('follows a .git FILE to the real gitdir', async () => {
     const gitdir = join(root, 'elsewhere');
-    await mkdir(gitdir, { recursive: true });
+    await mkdir(join(gitdir, 'refs', 'heads'), { recursive: true });
     await writeFile(join(gitdir, 'HEAD'), 'ref: refs/heads/develop\n', 'utf8');
     await writeFile(join(root, '.git'), `gitdir: ${gitdir}\n`, 'utf8');
 
-    await expect(readHeadBranch(root)).resolves.toBe('develop');
+    await expect(readBaseBranch(root)).resolves.toBe('develop');
   });
 
   it('falls back to master when the .git file points nowhere useful', async () => {
     await writeFile(join(root, '.git'), 'gitdir: /nonexistent/path/.git\n', 'utf8');
-    await expect(readHeadBranch(root)).resolves.toBe('master');
+    await expect(readBaseBranch(root)).resolves.toBe('master');
+  });
+
+  it('finds refs through commondir in a linked worktree', async () => {
+    // A worktree gitdir has its own HEAD and NO refs/heads — refs live in the
+    // main repository, reached via `commondir`. Looking in the wrong place made
+    // every worktree look like a fresh repo with no branches, which is exactly
+    // the case that falls back to the checked-out branch. Found by running the
+    // real thing against this repository's own worktree, not by a fixture.
+    const mainGit = join(root, 'main-repo', '.git');
+    await mkdir(join(mainGit, 'refs', 'heads'), { recursive: true });
+    await writeFile(join(mainGit, 'refs', 'heads', 'main'), `${'0'.repeat(40)}\n`, 'utf8');
+
+    const worktreeGit = join(mainGit, 'worktrees', 'wt');
+    await mkdir(worktreeGit, { recursive: true });
+    await writeFile(join(worktreeGit, 'HEAD'), 'ref: refs/heads/story/my-feature\n', 'utf8');
+    await writeFile(join(worktreeGit, 'commondir'), '../..\n', 'utf8');
+
+    await writeFile(join(root, '.git'), `gitdir: ${worktreeGit}\n`, 'utf8');
+
+    await expect(readBaseBranch(root)).resolves.toBe('main');
   });
 });
 
