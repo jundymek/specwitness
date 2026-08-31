@@ -45,15 +45,15 @@ development_status:
   epic-1-retrospective: done
 
   epic-2: in-progress
-  2-1-bmad-v6-ingestion-to-epicspec: review
-  2-2-contract-model-canonical-serialization-fingerprint: review
-  2-3-agentprovider-port-roles-structured-output-gate: review
-  2-4-claude-code-cli-adapter: review
-  2-5-codex-cli-adapter: review
+  2-1-bmad-v6-ingestion-to-epicspec: done
+  2-2-contract-model-canonical-serialization-fingerprint: done
+  2-3-agentprovider-port-roles-structured-output-gate: done
+  2-4-claude-code-cli-adapter: done
+  2-5-codex-cli-adapter: done
   2-6-specwitness-contract-epic-generate-review-freeze-status: done
-  2-7-amendment-flow-runtime-integrity-provider-doctor-checks: review
+  2-7-amendment-flow-runtime-integrity-provider-doctor-checks: done
   2-8-hermetic-dependency-rules-test: ready-for-dev
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
   epic-3: backlog
   3-1-revision-resolution-isolated-worktree: backlog
