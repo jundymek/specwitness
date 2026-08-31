@@ -11,7 +11,7 @@
  * Later stories register their own with a one-line addition:
  *   - story 1.6 adds `runManifest`
  *   - Epic 2 adds `contract` and `plan`
- *   - Epic 3 adds `jsonReport`
+ *   - Epic 3 adds `jsonReport` (story 3.5 — done)
  *
  * Deliberately NOT here: any assert/validate-and-throw helper. What a version
  * MISMATCH means is artifact-specific — a run manifest wants "a newer
@@ -50,6 +50,21 @@ export const SCHEMA_VERSIONS = Object.freeze({
    * source appears (question Q4) the shape must already be identifiable.
    */
   epicSpec: 1,
+
+  /**
+   * The persisted run report, `.specwitness/runs/<run-id>/result.json`
+   * (story 3.5). A SEPARATE artifact from `runManifest` above, with its own
+   * version: the manifest is the crash-recovery record written before any
+   * resource exists, this is the finished result written atomically at the end.
+   * Story 3.2 populating the manifest's reserved arrays does not bump
+   * `runManifest`, and registering this key does not touch it either — every
+   * manifest written before Epic 3 stays readable after it.
+   *
+   * This is the number FR-30's harness contract is versioned by: `--json`
+   * stdout and this file are the same bytes (AD-11), so a consumer that can
+   * read one can read the other.
+   */
+  jsonReport: 1,
 
   /**
    * The Verification Contract document (`.specwitness/contracts/<epic>.yaml`),
