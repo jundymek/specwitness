@@ -38,21 +38,26 @@ export const portsFreeCheck: DoctorCheck = {
       return { status: 'pass', detail: 'no service ports declared' };
     }
 
-    const occupied: string[] = [];
+    const occupied: { name: string; port: number; reason: string }[] = [];
     for (const { name, port } of declared) {
       const probe = await ctx.effects.probePort(port, HOST);
       if (!probe.free) {
-        occupied.push(`services.${name} port ${port} (${probe.reason ?? 'bind failed'})`);
+        occupied.push({ name, port, reason: probe.reason ?? 'bind failed' });
       }
     }
 
     if (occupied.length > 0) {
+      const listed = occupied
+        .map((entry) => `services.${entry.name} port ${entry.port} (${entry.reason})`)
+        .join('; ');
+
       return {
         status: 'warn',
-        // The PID hint is advisory text, not a command doctor runs: spawning
-        // lsof to name a process would be doing work the user did not ask a
-        // diagnostic command to do.
-        detail: `${occupied.join('; ')} — find the holder with: lsof -i :${declared[0]?.port ?? ''}`,
+        // The hint names an OCCUPIED port, not the first declared one: sending
+        // someone to inspect a port that is free is worse than giving no hint.
+        // It stays advisory text rather than a command doctor runs — spawning
+        // lsof to name a process is work a diagnostic was not asked to do.
+        detail: `${listed} — find the holder with: lsof -i :${occupied[0]?.port ?? ''}`,
       };
     }
 

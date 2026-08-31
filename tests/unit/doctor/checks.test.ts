@@ -403,6 +403,34 @@ describe('ports-free (optional)', () => {
     expect(result.detail).toContain('lsof');
   });
 
+  it('points the lsof hint at an occupied port, not the first declared one', async () => {
+    // Two services, the FIRST one free: a hint built from declared[0] would
+    // send the user to inspect a port that is not the problem.
+    const { ctx } = await testContext({
+      config: [
+        MINIMAL_CONFIG,
+        'services:',
+        '  web:',
+        '    run: /usr/bin/serve',
+        '    port: 3000',
+        '    ready:',
+        '      url: http://127.0.0.1:3000/health',
+        '  api:',
+        '    run: /usr/bin/serve',
+        '    port: 4000',
+        '    ready:',
+        '      url: http://127.0.0.1:4000/health',
+      ].join('\n'),
+      occupiedPorts: { 4000: 'EADDRINUSE' },
+    });
+
+    const result = await portsFreeCheck.run(ctx);
+
+    expect(result.status).toBe('warn');
+    expect(result.detail).toContain('lsof -i :4000');
+    expect(result.detail).not.toContain('lsof -i :3000');
+  });
+
   it('passes when no service declares a port', async () => {
     const { ctx } = await testContext({ config: MINIMAL_CONFIG });
 
