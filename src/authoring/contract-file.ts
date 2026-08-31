@@ -147,15 +147,35 @@ export interface WriteContractOptions {
    * would hurt most; production passes nothing.
    */
   readonly onStage?: (stagedPath: string) => void;
+  /**
+   * The post-rename durability barrier. Injectable for the same reason
+   * `onStage` exists: fsyncing a directory cannot be made to fail portably from
+   * outside the process, so the one failure this module must classify correctly
+   * would otherwise be the one failure no test could produce. Production passes
+   * nothing and gets `syncDirectory` below.
+   */
+  readonly syncDirectory?: (path: string) => Promise<void>;
+  /**
+   * Called when the rename succeeded but the barrier did not. NOT an error: the
+   * new contract is on disk and readable: only its survival of a power loss in
+   * the next moments is unproven. Optional because no caller surfaces it today.
+   */
+  readonly onDurabilityWarning?: (message: string) => void;
 }
 
 /**
  * Writes a contract file atomically: stage, fsync, rename, fsync the directory.
  *
- * On any failure the staged file is removed and the previous contract is left
- * exactly as it was. The directory fsync is the step most often skipped, and
- * the one that matters after the rename: fsyncing a file makes its CONTENTS
- * durable, not the directory entry naming it.
+ * On any failure BEFORE the rename the staged file is removed and the previous
+ * contract is left exactly as it was. The directory fsync is the step most
+ * often skipped, and the one that matters after the rename: fsyncing a file
+ * makes its CONTENTS durable, not the directory entry naming it.
+ *
+ * The rename is the commit point, and the two sides of it fail differently: a
+ * pre-rename failure means nothing changed and raises `InfraError`; a
+ * post-rename barrier failure means the write LANDED and only its durability is
+ * unproven, so it is reported through `onDurabilityWarning` and never as a
+ * failed write. See the comment at that boundary.
  */
 export async function writeContractFileAtomically(
   projectRoot: string,
@@ -188,8 +208,6 @@ export async function writeContractFileAtomically(
 
     await rename(staged, target);
     staged = undefined;
-
-    await syncDirectory(directory);
   } catch (cause) {
     throw new InfraError(
       `could not write ${contractRelativePath(epicId)}: ${describe(cause)}`,
@@ -201,6 +219,33 @@ export async function writeContractFileAtomically(
     if (stagingDir !== undefined) {
       await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  // PAST THIS LINE THE WRITE HAS COMMITTED. `rename(2)` is atomic, so the new
+  // contract IS the file on disk and every reader already sees it. A failure of
+  // the durability barrier below is therefore not a failed write, and it sits
+  // outside the try above for exactly that reason.
+  //
+  // It used to sit inside it (story 2.6), so a post-rename fsync failure
+  // reported "could not write .specwitness/contracts/<epic>.yaml" about a file
+  // that had in fact been replaced — a lie about state in the module whose
+  // entire purpose is that state is never ambiguous, and one that invites the
+  // operator to regenerate over a contract that already changed underneath
+  // them. Epic 2 retrospective §5a defect (ii), assigned to story 3.7 by the
+  // owner on 2026-08-31. Story 3.5's `result.json` finalize treats a
+  // post-rename failure the same way, agreed in cohort intent-sync, so the two
+  // stage-and-rename implementations in this epic cannot disagree about what a
+  // post-rename failure means.
+  //
+  // Non-fatal is not silent. What is unproven is survival of a power loss in
+  // the next moments, and a caller that wants to say so gets the reason
+  // verbatim rather than a swallowed exception.
+  try {
+    await (options.syncDirectory ?? syncDirectory)(directory);
+  } catch (cause) {
+    options.onDurabilityWarning?.(
+      `${contractRelativePath(epicId)} was written, but its directory entry could not be made durable: ${describe(cause)}`,
+    );
   }
 }
 
