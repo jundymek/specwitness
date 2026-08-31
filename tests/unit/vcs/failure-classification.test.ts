@@ -12,7 +12,7 @@
  * them to us as ordinary values.
  */
 
-import { rm } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -163,6 +163,47 @@ describe('a repository that breaks after root resolution is not a missing ref', 
     const result = await createGitVcs({ runner: real }).resolveRef(root, 'head', 'no-such-ref');
 
     expect(result.outcome).toBe('not-found');
+  });
+});
+
+describe('the ambiguity check must never degrade into "resolved"', () => {
+  it('refuses when the candidate enumeration itself could not run', async () => {
+    const { root } = await repoWithRoot('fail-candidates');
+
+    // `rev-parse` succeeds, then `for-each-ref` times out. Treating that as
+    // "no candidates" would return `resolved` carrying git's precedence pick —
+    // accepting a possibly-ambiguous answer BECAUSE the ambiguity check failed.
+    // Exactly backwards: a check that cannot run must fail closed.
+    const blind = createGitVcs({
+      runner: runnerFailing((o) => isSubcommand(o, 'for-each-ref'), 'timed-out'),
+    });
+
+    const result = await blind.resolveRef(root, 'head', 'main');
+
+    expect(result.outcome).not.toBe('resolved');
+    expect(result.outcome).toBe('git-unavailable');
+  });
+
+  it('refuses a pseudoref that collides with a real ref', async () => {
+    const { repo, root } = await repoWithRoot('fail-pseudoref');
+
+    // git's documented lookup order starts at `$GIT_DIR/<refname>`, one step
+    // BEFORE `refs/`. So a branch named FETCH_HEAD and a real `.git/FETCH_HEAD`
+    // at a different commit are two different answers to one name — git warns
+    // and returns the pseudoref, while an enumeration that only walks `refs/**`
+    // sees a single candidate and calls it unambiguous.
+    await git(repo.path, 'branch', 'FETCH_HEAD', repo.firstSha);
+    await writeFile(
+      join(repo.path, '.git', 'FETCH_HEAD'),
+      `${repo.headSha}\t\tbranch 'x' of somewhere\n`,
+      'utf8',
+    );
+
+    const result = await createGitVcs({ runner: real }).resolveRef(root, 'head', 'FETCH_HEAD');
+
+    // Which commit it would have picked matters less than that it refuses to
+    // pick one at all.
+    expect(result.outcome).toBe('ambiguous');
   });
 });
 

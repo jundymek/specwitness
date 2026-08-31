@@ -338,7 +338,7 @@ describe('removeWorktreeAtPath — the plain-string wrapper for clean (3.2)', ()
 
     // bob's shape: `clean` holds a project root and recorded paths, nothing
     // else, and must not have to resolve a root it might be refused.
-    await removeWorktreeAtPath(runnerOptions(), repo.path, created.path);
+    await removeWorktreeAtPath(repo.path, created.path);
 
     const entries = await vcs().listWorktrees(root);
     expect(entries.map((entry) => entry.path)).not.toContain(created.path);
@@ -349,7 +349,7 @@ describe('removeWorktreeAtPath — the plain-string wrapper for clean (3.2)', ()
     const { repo } = await repoWithRoot('wt-wrapper-absent');
 
     await expect(
-      removeWorktreeAtPath(runnerOptions(), repo.path, join(repo.scratch, 'nope')),
+      removeWorktreeAtPath(repo.path, join(repo.scratch, 'nope')),
     ).resolves.toBeUndefined();
   });
 });

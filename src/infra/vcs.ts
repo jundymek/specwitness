@@ -49,6 +49,8 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
 
 import { InfraError } from '../domain/errors.js';
 import type { ProcessResult, ProcessRunner } from '../domain/process-runner.js';
+import { SystemClock } from './clock.js';
+import { createProcessRunner } from './process-runner.js';
 import type {
   AddWorktreeHooks,
   CreatedWorktree,
@@ -590,22 +592,65 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
       // meaning their branch would get a verdict about a different revision,
       // and nothing in the output would say so.
       //
-      // So ambiguity is decided here rather than delegated: enumerate the
-      // candidates and compare the COMMITS they resolve to. Deciding on
-      // resolved commits rather than on git's warning text matters twice over
-      // — it does not break when git rewords the warning, and it correctly
-      // treats the common, harmless case (a local branch and its
-      // remote-tracking ref, both at the same commit) as unambiguous rather
-      // than refusing a run for no reason.
+      // So ambiguity is decided here, by TWO independent signals — either one
+      // is enough to refuse. Defence in depth, because each covers the other's
+      // blind spot:
+      //
+      //  (a) git's own warning. It is authoritative about git's lookup, which
+      //      includes namespaces this module does not enumerate — notably the
+      //      pseudorefs at `$GIT_DIR/<name>` (`FETCH_HEAD`, `ORIG_HEAD`,
+      //      `MERGE_HEAD`…), which are step ONE of the documented order. A
+      //      branch named `FETCH_HEAD` alongside a real `.git/FETCH_HEAD` at a
+      //      different commit is genuinely two answers to one name, and an
+      //      enumeration that walked only `refs/**` would call that
+      //      unambiguous. Matching prose is brittle on its own, which is why it
+      //      is not on its own.
+      //
+      //  (b) enumerating the `refs/**` candidates and comparing the COMMITS
+      //      they resolve to. This keeps working if git rewords or drops the
+      //      warning, and — because it compares commits rather than counting
+      //      refs — it does NOT refuse the everyday harmless case where a
+      //      branch and its remote-tracking ref sit at the same commit.
+      const warnedAmbiguous = /\bambiguous\b/i.test(call.result.stderr);
       const candidates = await candidateRefs(root, ref);
+      if (candidates === null) {
+        // The ambiguity check could not run. Returning `resolved` here would
+        // accept git's precedence pick BECAUSE the check that guards against it
+        // failed — exactly backwards. Fail closed.
+        return {
+          outcome: 'git-unavailable',
+          role,
+          ref,
+          detail: `could not enumerate the refs named '${ref}' to check for ambiguity`,
+        };
+      }
+
       const distinct = new Set(candidates.map((candidate) => candidate.commit));
-      if (distinct.size > 1) {
+
+      // Git's warning alone is NOT sufficient grounds to refuse, and this is
+      // the line that got it wrong first: git warns whenever more than one
+      // thing answers to a name, INCLUDING the everyday harmless case where a
+      // branch and its remote-tracking ref sit at the same commit. Refusing on
+      // the warning alone failed a run that had exactly one possible meaning.
+      //
+      // The precise question is not "did git see several candidates" but "did
+      // git resolve to something this module cannot account for". If the sha
+      // git returned is one of the commits the enumerated refs point at, the
+      // answer is unambiguous whatever git warned. If it is NOT, git resolved
+      // through a namespace invisible here — a pseudoref at `$GIT_DIR/<name>`,
+      // step one of its documented order — and there is no way to compare that
+      // candidate, so the only safe answer is to refuse.
+      const accountedFor = candidates.some((candidate) => candidate.commit === sha);
+      if (distinct.size > 1 || (warnedAmbiguous && !accountedFor)) {
         return {
           outcome: 'ambiguous',
           role,
           ref,
           candidates: candidates.map((candidate) => candidate.refname),
-          detail: `${distinct.size} refs named '${ref}' point at different commits`,
+          detail:
+            distinct.size > 1
+              ? `${distinct.size} refs named '${ref}' point at different commits`
+              : `git reports '${ref}' as ambiguous and resolved it outside refs/ (a pseudoref such as FETCH_HEAD)`,
         };
       }
 
@@ -648,24 +693,34 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
   };
 
   /**
-   * The refs a short name could mean, per git's documented lookup rules.
+   * The refs under `refs/**` that a short name could mean, or `null` when git
+   * could not answer.
    *
-   * These are exactly the six namespaces `gitrevisions(7)` searches, in its
-   * order. Spelling them out mirrors git's own rule rather than inventing a
+   * These are the five `refs/`-rooted namespaces `gitrevisions(7)` searches, in
+   * its order. Spelling them out mirrors git's rule rather than inventing a
    * looser one: a `**\/<ref>` glob would also match `refs/heads/topic/release`
    * for the input `release`, which git would never resolve, and refusing a run
    * over a ref git considers unrelated would be its own kind of wrong.
    *
+   * NOT covered here, deliberately: step ONE of git's order, the pseudorefs at
+   * `$GIT_DIR/<name>` (`FETCH_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`…). They are not
+   * refs and `for-each-ref` cannot see them. Rather than reimplementing git's
+   * pseudoref resolution — including `FETCH_HEAD`'s own multi-line format —
+   * `resolveRef` leans on git's own ambiguity warning for that case, which is
+   * authoritative about git's lookup by construction. The two signals together
+   * cover the whole documented order; this function alone does not, and an
+   * earlier version of this comment wrongly claimed it did.
+   *
    * `%(*objectname)` is the DEREFERENCED object — non-empty only for annotated
    * tags, where `%(objectname)` is the tag object rather than the commit. Using
-   * it is the same `^{commit}` peel the resolution itself performs, so a tag
-   * and a branch at the same commit compare equal instead of looking like two
+   * it applies the same `^{commit}` peel the resolution itself performs, so a
+   * tag and a branch at one commit compare equal instead of looking like two
    * different revisions.
    */
   const candidateRefs = async (
     root: RepoRoot,
     ref: string,
-  ): Promise<{ refname: string; commit: string }[]> => {
+  ): Promise<{ refname: string; commit: string }[] | null> => {
     const stdout = await query(root.worktreeRoot, [
       'for-each-ref',
       '--format=%(refname) %(objectname) %(*objectname)',
@@ -676,7 +731,13 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
       `refs/remotes/${ref}`,
       `refs/remotes/${ref}/HEAD`,
     ]);
-    if (stdout === null || stdout === '') {
+    // `null` is git failing to answer; `''` is git answering "no such refs".
+    // Collapsing the two is what let a failed ambiguity check read as "no
+    // candidates, therefore unambiguous".
+    if (stdout === null) {
+      return null;
+    }
+    if (stdout === '') {
       return [];
     }
 
@@ -874,11 +935,15 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
  * SpecWitness would agree to verify.
  */
 export async function removeWorktreeAtPath(
-  options: GitVcsOptions,
   repoRootPath: string,
   worktreePath: string,
+  options?: GitVcsOptions,
 ): Promise<void> {
-  const vcs = createGitVcs(options);
+  // The runner defaults so `clean` can call this with the two arguments bob
+  // asked for. Defaulting a port rather than requiring it is the shape the
+  // merged `createDoctorEffects(clock = new SystemClock())` already uses, and
+  // it keeps injection available for tests — which is what AD-9 is protecting.
+  const vcs = createGitVcs(options ?? { runner: createProcessRunner(new SystemClock()) });
   const root: RepoRoot = {
     worktreeRoot: repoRootPath,
     mainWorktreeRoot: repoRootPath,
