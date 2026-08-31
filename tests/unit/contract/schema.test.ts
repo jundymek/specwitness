@@ -374,6 +374,82 @@ describe('parseContract — a whitespace-only statement is not a requirement', (
   });
 });
 
+describe('parseContract — the amendment history must be a coherent audit chain', () => {
+  // FR-10 makes `meta.history` the auditable record of which version superseded
+  // which. Story 2.7's amend flow writes it and a future reader trusts it, so a
+  // chain contradicting `spec.version` misrepresents the audit trail inside a
+  // document that reads as authoritative. An incoherent trail is worse than an
+  // absent one, precisely because it looks like evidence.
+  const FP_A = 'a'.repeat(64);
+  const FP_B = 'b'.repeat(64);
+
+  const withHistory = (version: number, entries: ReadonlyArray<readonly [number, string]>): string => {
+    const rendered = entries
+      .map(
+        ([v, fp]) =>
+          `    - version: ${v}\n` +
+          `      fingerprint: ${fp}\n` +
+          `      timestamp: 2026-09-14T12:00:00.000Z\n` +
+          `      reason: an amendment\n`,
+      )
+      .join('');
+
+    return fixture('epic-7-amended-draft.yaml')
+      .replace('  version: 2', `  version: ${version}`)
+      .replace(/  history:\n(?:.*\n?)*$/, `  history:\n${rendered}`);
+  };
+
+  it('rejects a superseded version at or above the current one', () => {
+    expect(() => parseContract(withHistory(2, [[9, FP_A]]), 'p')).toThrow(ConfigError);
+    expect(() => parseContract(withHistory(2, [[2, FP_A]]), 'p')).toThrow(ConfigError);
+  });
+
+  it('rejects duplicate versions in the history', () => {
+    expect(() =>
+      parseContract(withHistory(3, [[1, FP_A], [1, FP_B]]), 'p'),
+    ).toThrow(ConfigError);
+  });
+
+  it('rejects history entries that are out of order', () => {
+    expect(() =>
+      parseContract(withHistory(4, [[2, FP_A], [1, FP_B]]), 'p'),
+    ).toThrow(ConfigError);
+  });
+
+  it('names the offending entry by path', () => {
+    try {
+      parseContract(withHistory(2, [[9, FP_A]]), 'contracts/epic-7.yaml');
+      expect.unreachable('expected a ConfigError');
+    } catch (err) {
+      expect((err as Error).message).toMatch(/meta\.history\.0/);
+    }
+  });
+
+  it('accepts an ascending history below the current version', () => {
+    const contract = parseContract(withHistory(3, [[1, FP_A], [2, FP_B]]), 'p');
+
+    expect(contract.meta.history.map((h) => h.version)).toEqual([1, 2]);
+    expect(contract.spec.version).toBe(3);
+  });
+
+  it('accepts a gap — a chain need not be contiguous', () => {
+    // Deliberately NOT requiring [1..V-1]. Story 2.7 appends exactly one entry
+    // per amendment, so its output is contiguous anyway; demanding contiguity
+    // would reject a legitimate contract whose earlier versions predate this
+    // file, and would add nothing the ordering rule does not already assert.
+    expect(() => parseContract(withHistory(5, [[1, FP_A], [3, FP_B]]), 'p')).not.toThrow();
+  });
+
+  it('still accepts an empty history on a fresh draft', () => {
+    expect(parseContract(fixture('epic-7-draft.yaml'), 'p').meta.history).toEqual([]);
+  });
+
+  it('still accepts the amend-output fixture unchanged', () => {
+    // The shape 2.6 asked me to pin: version 2, one entry for version 1.
+    expect(parseContract(fixture('epic-7-amended-draft.yaml'), 'p').meta.history).toHaveLength(1);
+  });
+});
+
 describe('parseContract — spec.epic must be the canonical epic id', () => {
   it.each([
     ['a padded id', 'epic-07'],
