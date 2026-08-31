@@ -42,6 +42,14 @@ export const SCHEMA_VERSIONS = Object.freeze({
    * because the reserved arrays are already part of the shape.
    */
   runManifest: 1,
+
+  /**
+   * The normalized `EpicSpec` produced by `src/ingest/` (story 2.1). Nothing
+   * persists one to disk in V0 — it is handed straight to contract generation —
+   * but the seam is versioned from day one, because the day a second ingestion
+   * source appears (question Q4) the shape must already be identifiable.
+   */
+  epicSpec: 1,
 } as const satisfies Record<string, number>);
 
 /** Keys of the registry. Derived — never hand-maintained. */

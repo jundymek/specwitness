@@ -45,13 +45,14 @@ development_status:
   epic-1-retrospective: done
 
   epic-2: in-progress
-  2-1-bmad-v6-ingestion-to-epicspec: ready-for-dev
+  2-1-bmad-v6-ingestion-to-epicspec: review
   2-2-contract-model-canonical-serialization-fingerprint: ready-for-dev
   2-3-agentprovider-port-roles-structured-output-gate: review
   2-4-claude-code-cli-adapter: ready-for-dev
   2-5-codex-cli-adapter: ready-for-dev
   2-6-specwitness-contract-epic-generate-review-freeze-status: ready-for-dev
   2-7-amendment-flow-runtime-integrity-provider-doctor-checks: ready-for-dev
+  2-8-hermetic-dependency-rules-test: ready-for-dev
   epic-2-retrospective: optional
 
   epic-3: backlog
