@@ -175,26 +175,23 @@ export async function scaffold(
   const configRelative = `${PROJECT_DIR}/config.yaml`;
   const configAbsolute = join(projectDir, 'config.yaml');
 
-  // lstat, NOT stat: stat follows symlinks, so a symlinked config.yaml would
-  // let --force overwrite whatever it points at — anywhere on the filesystem.
-  // Every write this module makes must stay inside .specwitness/.
-  const existingConfig = await lstat(configAbsolute).catch(() => undefined);
-  rejectSymlink(existingConfig, configRelative, configAbsolute);
-  if (existingConfig?.isDirectory() === true) {
-    throw new InfraError(
-      `${configRelative} exists but is a directory, not a file`,
-      `remove or rename ${configAbsolute}, then run 'specwitness init' again`,
-    );
-  }
-  const configPresent = existingConfig !== undefined;
+  // PHASE 1 — inspect everything, change nothing.
+  //
+  // Every reason this call can fail is discovered here, before a single byte is
+  // written. Validating lazily as we went meant `--force` could replace the
+  // user's config and only THEN discover that `contracts/` was a regular file:
+  // the command would fail having already destroyed the one thing it was told
+  // to be careful with.
+  const present = await inspectLayout(projectDir);
+  const configPresent = present.get(configRelative) !== undefined;
   const configWritten = !configPresent || options.force === true;
 
-  // Rendered BEFORE anything is created: a broken install (missing or
-  // malformed template) must fail while the repository is still untouched,
-  // rather than leaving a half-made `.specwitness/` for the user to clean up.
+  // Rendered here too, so a broken install (missing or malformed template)
+  // fails while the repository is still untouched.
   const configContents = configWritten ? await renderConfig(projectRoot) : undefined;
 
-  await ensureDirectory(projectDir, PROJECT_DIR, created, skipped);
+  // PHASE 2 — write. Nothing below throws for a reason phase 1 could have seen.
+  await ensureDirectory(projectDir, PROJECT_DIR, present, created, skipped);
 
   if (configContents === undefined) {
     skipped.push(configRelative);
@@ -208,15 +205,77 @@ export async function scaffold(
     join(projectDir, '.gitignore'),
     `${PROJECT_DIR}/.gitignore`,
     GITIGNORE_CONTENTS,
+    present,
     created,
     skipped,
   );
 
   for (const name of SUBDIRECTORIES) {
-    await ensureDirectory(join(projectDir, name), `${PROJECT_DIR}/${name}`, created, skipped);
+    await ensureDirectory(
+      join(projectDir, name),
+      `${PROJECT_DIR}/${name}`,
+      present,
+      created,
+      skipped,
+    );
   }
 
   return { created, skipped, replaced, configWritten };
+}
+
+/** What the scaffold expects at each path. */
+const LAYOUT: ReadonlyArray<{ relative: string; kind: 'directory' | 'file' }> = [
+  { relative: PROJECT_DIR, kind: 'directory' },
+  { relative: `${PROJECT_DIR}/config.yaml`, kind: 'file' },
+  { relative: `${PROJECT_DIR}/.gitignore`, kind: 'file' },
+  ...SUBDIRECTORIES.map((name) => ({ relative: `${PROJECT_DIR}/${name}`, kind: 'directory' as const })),
+];
+
+/**
+ * Checks every layout entry that already exists, and returns the ones that do.
+ *
+ * Uses `lstat`, never `stat`: `stat` follows symlinks, so a symlinked
+ * `config.yaml` would let `--force` overwrite whatever it points at — any file
+ * the user can write, anywhere on the filesystem. Every write this module makes
+ * must land inside `.specwitness/`.
+ *
+ * @throws {InfraError} for a symlink, or an entry of the wrong type.
+ */
+async function inspectLayout(projectDir: string): Promise<Map<string, true>> {
+  const present = new Map<string, true>();
+
+  for (const { relative, kind } of LAYOUT) {
+    // `relative` always starts with PROJECT_DIR, so this reconstructs the
+    // absolute path without re-deriving the project root.
+    const absolute = join(projectDir, '..', relative);
+    const entry = await lstat(absolute).catch(() => undefined);
+    if (entry === undefined) {
+      continue;
+    }
+
+    rejectSymlink(entry, relative, absolute);
+
+    // Naming what IS there beats "not a directory": the user has to find the
+    // offending entry, and a socket looks identical to a file in `ls`.
+    if (kind === 'directory' && !entry.isDirectory()) {
+      throw new InfraError(
+        `${relative} exists but is ${describeEntry(entry)}, not a directory`,
+        `remove or rename ${absolute}, then run 'specwitness init' again`,
+      );
+    }
+    if (kind === 'file' && !entry.isFile()) {
+      // Not just directories: a FIFO would make `--force` block forever, and
+      // `init` must never hang — it is called by agents with no TTY.
+      throw new InfraError(
+        `${relative} exists but is ${describeEntry(entry)}, not a regular file`,
+        `remove or rename ${absolute}, then run 'specwitness init' again`,
+      );
+    }
+
+    present.set(relative, true);
+  }
+
+  return present;
 }
 
 /** The shipped template with the base-branch placeholder resolved (D4/D12). */
@@ -293,24 +352,15 @@ async function findTemplate(): Promise<string | undefined> {
   }
 }
 
+/** Phase 2. Type validity was already established by `inspectLayout`. */
 async function ensureDirectory(
   absolute: string,
   relative: string,
+  present: ReadonlyMap<string, true>,
   created: string[],
   skipped: string[],
 ): Promise<void> {
-  const existing = await lstat(absolute).catch(() => undefined);
-  if (existing !== undefined) {
-    rejectSymlink(existing, relative, absolute);
-    if (!existing.isDirectory()) {
-      // Reporting this as "already there" would exit 0 on a layout that later
-      // commands cannot write into — an infra failure disguised as success,
-      // which is the one thing this product must never do.
-      throw new InfraError(
-        `${relative} exists but is not a directory`,
-        `remove or rename ${absolute}, then run 'specwitness init' again`,
-      );
-    }
+  if (present.has(relative)) {
     skipped.push(relative);
     return;
   }
@@ -326,22 +376,16 @@ async function ensureDirectory(
   created.push(relative);
 }
 
+/** Phase 2. Never overwrites: an existing file may carry the user's own edits. */
 async function ensureFile(
   absolute: string,
   relative: string,
   contents: string,
+  present: ReadonlyMap<string, true>,
   created: string[],
   skipped: string[],
 ): Promise<void> {
-  const existing = await lstat(absolute).catch(() => undefined);
-  if (existing !== undefined) {
-    rejectSymlink(existing, relative, absolute);
-    if (existing.isDirectory()) {
-      throw new InfraError(
-        `${relative} exists but is a directory, not a file`,
-        `remove or rename ${absolute}, then run 'specwitness init' again`,
-      );
-    }
+  if (present.has(relative)) {
     skipped.push(relative);
     return;
   }
@@ -359,6 +403,23 @@ async function write(absolute: string, contents: string): Promise<void> {
       'check the directory permissions and that the filesystem is not read-only',
     );
   }
+}
+
+/** Names what is actually at a path, so the error tells the user what to look for. */
+function describeEntry(entry: {
+  isDirectory(): boolean;
+  isFile(): boolean;
+  isFIFO(): boolean;
+  isSocket(): boolean;
+  isBlockDevice(): boolean;
+  isCharacterDevice(): boolean;
+}): string {
+  if (entry.isDirectory()) return 'a directory';
+  if (entry.isFile()) return 'a regular file';
+  if (entry.isFIFO()) return 'a named pipe';
+  if (entry.isSocket()) return 'a socket';
+  if (entry.isBlockDevice() || entry.isCharacterDevice()) return 'a device node';
+  return 'not a regular file or directory';
 }
 
 /**

@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -397,7 +398,63 @@ describe('symlinks never carry a write outside .specwitness/', () => {
   });
 });
 
+describe('nothing is written until the whole layout is known to be valid', () => {
+  it('does not replace the config under --force when a later entry is invalid', async () => {
+    // The nasty ordering bug: validating lazily meant --force overwrote the
+    // config and only THEN discovered contracts/ was a regular file. The
+    // command failed having already destroyed the one thing the user asked it
+    // to be careful with.
+    await makeGitDir();
+    await scaffold(root);
+
+    const precious = 'version: 1\nproject:\n  baseBranch: develop\n# hand-tuned\n';
+    await writeFile(configPath(), precious, 'utf8');
+    await rm(join(root, '.specwitness', 'contracts'), { recursive: true });
+    await writeFile(join(root, '.specwitness', 'contracts'), 'not a directory\n', 'utf8');
+
+    const err = await scaffold(root, { force: true }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(InfraError);
+    // The point: the config the user cared about is byte-for-byte intact.
+    expect(await readFile(configPath(), 'utf8')).toBe(precious);
+  });
+
+  it('does not create directories when the config entry is invalid', async () => {
+    await makeGitDir();
+    await mkdir(join(root, '.specwitness'), { recursive: true });
+    await mkdir(join(root, '.specwitness', 'config.yaml'), { recursive: true });
+
+    const err = await scaffold(root).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(InfraError);
+    for (const name of ['contracts', 'plans', 'runs', '.gitignore']) {
+      expect(await exists(join(root, '.specwitness', name)), `${name} must not exist`).toBe(false);
+    }
+  });
+});
+
 describe('scaffold failure modes', () => {
+  it('refuses a FIFO where a scaffold file belongs', async () => {
+    // `--force` writing to a FIFO with no reader blocks forever, and `init` is
+    // agent-callable: a command with no TTY that hangs is worse than one that
+    // fails. Rejecting anything that is not a regular file also stops a
+    // non-forced run reporting a scaffold that config loading cannot read.
+    const mkfifo = await execa('mkfifo', [join(root, 'probe-fifo')], { reject: false });
+    if (mkfifo.exitCode !== 0) {
+      return; // no mkfifo on this platform; the isFile() guard is still in place
+    }
+    await rm(join(root, 'probe-fifo'));
+
+    await makeGitDir();
+    await mkdir(join(root, '.specwitness'), { recursive: true });
+    await execa('mkfifo', [configPath()]);
+
+    const err = await scaffold(root, { force: true }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(InfraError);
+    expect((err as InfraError).message).toContain('is a named pipe');
+  });
+
   it.each([['contracts'], ['plans'], ['runs']])(
     'refuses when %s exists as a file rather than a directory',
     async (name) => {
@@ -422,7 +479,7 @@ describe('scaffold failure modes', () => {
     const err = await scaffold(root).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(InfraError);
-    expect((err as InfraError).message).toContain('is a directory');
+    expect((err as InfraError).message).toContain('is a directory, not a regular file');
   });
 
   it('creates no partial layout when the project directory cannot be made', async () => {
