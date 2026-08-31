@@ -255,7 +255,13 @@ async function probeUncached(runner: ProcessRunner, timeoutMs: number): Promise<
     return notFound(`${BINARY} did not respond within ${timeoutMs}ms — could not determine capability`);
   }
   if (version.outcome === 'spawn-failed') {
-    return notFound(`${BINARY} could not be started — contract generation unavailable`);
+    // NOT the same as "absent". Story 2.3's runner reports `spawn-failed` for a
+    // non-existent working directory as well as for a binary that could not be
+    // launched, so this must not claim the CLI is missing — telling an operator
+    // to install a CLI they already have is worse than saying we could not tell.
+    return notFound(
+      `${BINARY} could not be started — contract generation unavailable (the binary may not be executable, or the working directory may not exist)`,
+    );
   }
   if (version.exitCode !== 0) {
     return notFound(
@@ -552,7 +558,22 @@ async function generate(
         'raise the provider timeout, or reduce the size of the epic being authored',
       );
     }
-    if (result.outcome === 'spawn-failed' || result.exitCode !== 0) {
+    // `spawn-failed` is kept separate from a non-zero exit rather than folded in
+    // with it. The process never started, so there is no exit code to report —
+    // saying "exited null" would be noise — and story 2.3's runner classifies a
+    // non-existent working directory as `spawn-failed` too, since a bad `cwd`
+    // raises the same ENOENT as a missing binary. Naming the directory is
+    // therefore the difference between an actionable message and one that sends
+    // an operator off to reinstall a CLI they already have.
+    if (result.outcome === 'spawn-failed') {
+      throw new ProviderError(
+        `${BINARY} could not be started in ${cwd}${
+          result.stderr.trim() === '' ? '' : `: ${firstMeaningfulLine(result.stderr) ?? ''}`
+        }`,
+        `check that the directory exists and that '${BINARY}' is executable, then re-run 'specwitness doctor'`,
+      );
+    }
+    if (result.exitCode !== 0) {
       // stderr is included because it is where codex explains itself. It is NOT
       // used to decide success: see the note on the read below.
       throw new ProviderError(

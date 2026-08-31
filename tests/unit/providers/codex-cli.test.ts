@@ -422,6 +422,41 @@ describe('generate — failure classification', () => {
     ).rejects.toThrow(/did not finish within 900ms/);
   });
 
+  it('names the DIRECTORY when the process could not be started', async () => {
+    // Story 2.3's runner classifies a non-existent `cwd` as `spawn-failed`,
+    // because a bad working directory raises the same ENOENT as a missing
+    // binary. So this path must not say "exited null" (there was no exit) and
+    // must not imply the CLI is absent — that would send an operator off to
+    // reinstall a CLI they already have.
+    const runner = recordingRunner([
+      VERSION_OK,
+      HELP_OK,
+      result({ outcome: 'spawn-failed', exitCode: null, stderr: 'ENOENT: no such file or directory' }),
+    ]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() }, {
+      cwd: '/no/such/directory',
+    });
+
+    const error = await provider
+      .generate({ role: 'contract-author', prompt: 'p', jsonSchema: {} })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).message).toContain('/no/such/directory');
+    expect((error as ProviderError).message).not.toContain('null');
+  });
+
+  it('does not claim the binary is absent when the probe spawn fails', async () => {
+    const runner = recordingRunner([result({ outcome: 'spawn-failed', exitCode: null })]);
+
+    const capability = await probeCodexCapability(runner);
+
+    expect(capability.found).toBe(false);
+    // "could not start it" is a different claim from "it is not installed".
+    expect(capability.reason).not.toMatch(/not found on PATH/);
+    expect(capability.reason).toMatch(/could not be started/);
+  });
+
   it('classifies a non-zero exit as a provider error carrying what codex said', async () => {
     const runner = recordingRunner([
       VERSION_OK,
