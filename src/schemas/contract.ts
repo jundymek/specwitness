@@ -133,7 +133,19 @@ export const CriterionSchema = z
     // lint OR flagged for review" and epics.md story 2.6 AC1 chooses flagging:
     // a `structural` criterion may legitimately name a module, and a schema
     // that rejected it would make that criterion unwritable.
-    statement: z.string().min(1, { message: 'must not be empty' }),
+    //
+    // Emptiness is checked on the TRIMMED length while the value is stored
+    // untrimmed. `min(1)` alone accepts "   ", which `canonicalize` then trims
+    // to "" — so the criterion is FINGERPRINTED as `"statement":""`,
+    // byte-identical to the empty statement rejected on this same line, and
+    // frozen as authoritative. A criterion that asserts nothing can never fail:
+    // a green result that means nothing, which is the outcome this product
+    // exists to make impossible. Trimming itself stays a canonicalization
+    // concern, so the model keeps the original text and serialization stays
+    // lossless.
+    statement: z.string().refine((value) => value.trim().length > 0, {
+      message: 'must not be empty or only whitespace',
+    }),
     kind: KindSchema,
     severity: SeveritySchema,
     verifiability: VerifiabilitySchema,
@@ -282,7 +294,42 @@ export const ContractSchema = z
     spec: ContractSpecSchema,
     meta: ContractMetaSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((contract, ctx) => {
+    // FR-10 makes `meta.history` the auditable record of which version
+    // superseded which. Story 2.7's amend flow writes it and a future reader
+    // trusts it, so a chain that contradicts `spec.version` misrepresents the
+    // audit trail inside a document that reads as authoritative — an incoherent
+    // trail is worse than an absent one, precisely because it looks like
+    // evidence.
+    //
+    // The check lives on the document rather than on `ContractMetaSchema`
+    // because it needs `spec.version`, which meta cannot see.
+    //
+    // Contiguity is deliberately NOT required. Story 2.7 appends exactly one
+    // entry per amendment, so its output is contiguous anyway; demanding
+    // [1..V-1] would reject a legitimate contract whose earlier versions
+    // predate this file, and would assert nothing the ordering rule does not.
+    let previous = 0;
+
+    contract.meta.history.forEach((entry, index) => {
+      if (entry.version >= contract.spec.version) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['meta', 'history', index, 'version'],
+          message: `superseded version ${entry.version} is not below the contract version ${contract.spec.version}`,
+        });
+      }
+      if (entry.version <= previous) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['meta', 'history', index, 'version'],
+          message: `history must ascend: version ${entry.version} follows ${previous}`,
+        });
+      }
+      previous = entry.version;
+    });
+  });
 
 /** Human-readable rendering of a zod failure: `spec.criteria.0.owner: message`. */
 function describeIssues(error: z.ZodError): string {

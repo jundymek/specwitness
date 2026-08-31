@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, rm, rmdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, rmdir, writeFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -198,19 +198,18 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
     expect(exitCode).toBe(0);
   });
 
-  it('lets src/schemas use node:crypto', async () => {
-    // Story 2.2's exact shape. AD-5 names `schemas/canonical.ts` as THE single
-    // implementation of the contract fingerprint, and a fingerprint needs
-    // SHA-256. The carve-out lives on `schemas-core-only` rather than in a rule
-    // of its own because dependency-cruiser's `forbidden` rules are OR-ed: a
-    // later rule cannot un-forbid what an earlier one forbids. If that ever
-    // changes, this test still passes and the narrowing test below still fails
-    // loudly, which is the ordering we want.
-    await writeModule(
-      'schemas/__probe-canonical.ts',
-      "import { createHash } from 'node:crypto';\n" +
-        'export const h = (s: string) => createHash("sha256").update(s).digest("hex");\n',
-    );
+  it('lets src/schemas/canonical.ts use node:crypto, and only that file', async () => {
+    // AD-5 names `schemas/canonical.ts` as THE single implementation of the
+    // contract fingerprint, and a fingerprint needs SHA-256. The permission is
+    // scoped to that one path rather than to the directory: a second module
+    // hashing contract content would be a second answer to "has this changed",
+    // which is the one question the product cannot have two answers to.
+    //
+    // The real `src/schemas/canonical.ts` is the proof that the allowance
+    // works — it imports `node:crypto` today and the baseline cruise below is
+    // clean. The narrowing half is the next test.
+    const canonical = await readFile(join(SRC, 'schemas', 'canonical.ts'), 'utf8');
+    expect(canonical).toContain("from 'node:crypto'");
 
     const { exitCode, output } = await depcruise();
 
@@ -303,6 +302,24 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     await writeModule(
       'schemas/__probe-fs.ts',
       "import { readFileSync } from 'node:fs';\nexport const r = readFileSync;\n",
+    );
+
+    const { exitCode, output } = await depcruise();
+
+    expect(output).toContain('schemas-core-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks node:crypto in a schemas module that is NOT canonical.ts', async () => {
+    // The finding this test exists for: the first version of the carve-out was
+    // scoped `from: ^src/schemas/`, so it silently granted every present and
+    // future schema module access to crypto — while its own comment claimed to
+    // be the narrowest possible exception. AD-5 wants ONE fingerprint
+    // implementation, and a rule that permits a second one is not enforcing it.
+    await writeModule(
+      'schemas/__probe-second-hash.ts',
+      "import { createHash } from 'node:crypto';\n" +
+        'export const h = (s: string) => createHash("sha256").update(s).digest("hex");\n',
     );
 
     const { exitCode, output } = await depcruise();

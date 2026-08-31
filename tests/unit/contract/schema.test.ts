@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { ConfigError, IntegrityError } from '../../../src/domain/errors.js';
-import { fingerprint } from '../../../src/schemas/canonical.js';
+import type { ContractSpec } from '../../../src/domain/contract.js';
+import { canonicalize, fingerprint } from '../../../src/schemas/canonical.js';
 import {
   CONTRACT_SCHEMA_VERSION,
   ContractSchema,
@@ -304,6 +305,148 @@ describe("parseContract — story 2.7's amend output is a legitimate draft", () 
     expect(result.meta.history).toEqual(contract.meta.history);
     expect(result.spec.version).toBe(2);
     expect(contractState(result)).toBe('frozen');
+  });
+});
+
+describe('parseContract — a whitespace-only statement is not a requirement', () => {
+  it.each([
+    ['spaces', '"   "'],
+    ['a tab', '"\t"'],
+    ['newlines', '"\n\n"'],
+    ['mixed whitespace', '" \t \n "'],
+  ])('rejects a statement made only of %s', (_name, literal) => {
+    const text = fixture('epic-7-draft.yaml').replace(
+      'statement: A new company appears in the companies list after onboarding completes.',
+      `statement: ${literal}`,
+    );
+
+    expect(() => parseContract(text, 'p')).toThrow(ConfigError);
+  });
+
+  it('is refused BEFORE it can be canonicalized — the reason the rule exists', () => {
+    // This is the consequence, not merely the rejection. `min(1)` accepts
+    // "   ", but `canonicalize` trims it, so the criterion would be
+    // FINGERPRINTED as `"statement":""` — byte-identical to the empty statement
+    // the schema already rejects, and frozen as authoritative. A criterion that
+    // asserts nothing can never fail: a green result that means nothing, which
+    // is the one outcome this product exists to make impossible.
+    const whitespaceOnly: ContractSpec = {
+      epic: 'epic-7',
+      version: 1,
+      criteria: [
+        {
+          id: 'E7-01',
+          statement: '   ',
+          kind: 'behavioral',
+          severity: 'critical',
+          verifiability: 'automated',
+        },
+      ],
+    };
+    const empty: ContractSpec = {
+      ...whitespaceOnly,
+      criteria: [{ ...whitespaceOnly.criteria[0]!, statement: '' }],
+    };
+
+    // The two are indistinguishable once hashed — which is exactly why the
+    // schema must not let the first one through when it rejects the second.
+    expect(canonicalize(whitespaceOnly)).toContain('"statement":""');
+    expect(fingerprint(whitespaceOnly)).toBe(fingerprint(empty));
+
+    // And so the document carrying it never parses.
+    const text = fixture('epic-7-draft.yaml').replace(
+      'statement: A new company appears in the companies list after onboarding completes.',
+      'statement: "   "',
+    );
+    expect(() => parseContract(text, 'p')).toThrow(ConfigError);
+  });
+
+  it('still accepts a statement that merely has padding around real text', () => {
+    // Trimming stays a canonicalization concern (DECISIONS D-5): the parser is
+    // faithful, so padded text survives into the model unchanged and
+    // serialization stays lossless.
+    const text = fixture('epic-7-draft.yaml').replace(
+      'statement: A new company appears in the companies list after onboarding completes.',
+      'statement: "  a real expectation  "',
+    );
+
+    expect(parseContract(text, 'p').spec.criteria[0]?.statement).toBe('  a real expectation  ');
+  });
+});
+
+describe('parseContract — the amendment history must be a coherent audit chain', () => {
+  // FR-10 makes `meta.history` the auditable record of which version superseded
+  // which. Story 2.7's amend flow writes it and a future reader trusts it, so a
+  // chain contradicting `spec.version` misrepresents the audit trail inside a
+  // document that reads as authoritative. An incoherent trail is worse than an
+  // absent one, precisely because it looks like evidence.
+  const FP_A = 'a'.repeat(64);
+  const FP_B = 'b'.repeat(64);
+
+  const withHistory = (version: number, entries: ReadonlyArray<readonly [number, string]>): string => {
+    const rendered = entries
+      .map(
+        ([v, fp]) =>
+          `    - version: ${v}\n` +
+          `      fingerprint: ${fp}\n` +
+          `      timestamp: 2026-09-14T12:00:00.000Z\n` +
+          `      reason: an amendment\n`,
+      )
+      .join('');
+
+    return fixture('epic-7-amended-draft.yaml')
+      .replace('  version: 2', `  version: ${version}`)
+      .replace(/  history:\n(?:.*\n?)*$/, `  history:\n${rendered}`);
+  };
+
+  it('rejects a superseded version at or above the current one', () => {
+    expect(() => parseContract(withHistory(2, [[9, FP_A]]), 'p')).toThrow(ConfigError);
+    expect(() => parseContract(withHistory(2, [[2, FP_A]]), 'p')).toThrow(ConfigError);
+  });
+
+  it('rejects duplicate versions in the history', () => {
+    expect(() =>
+      parseContract(withHistory(3, [[1, FP_A], [1, FP_B]]), 'p'),
+    ).toThrow(ConfigError);
+  });
+
+  it('rejects history entries that are out of order', () => {
+    expect(() =>
+      parseContract(withHistory(4, [[2, FP_A], [1, FP_B]]), 'p'),
+    ).toThrow(ConfigError);
+  });
+
+  it('names the offending entry by path', () => {
+    try {
+      parseContract(withHistory(2, [[9, FP_A]]), 'contracts/epic-7.yaml');
+      expect.unreachable('expected a ConfigError');
+    } catch (err) {
+      expect((err as Error).message).toMatch(/meta\.history\.0/);
+    }
+  });
+
+  it('accepts an ascending history below the current version', () => {
+    const contract = parseContract(withHistory(3, [[1, FP_A], [2, FP_B]]), 'p');
+
+    expect(contract.meta.history.map((h) => h.version)).toEqual([1, 2]);
+    expect(contract.spec.version).toBe(3);
+  });
+
+  it('accepts a gap — a chain need not be contiguous', () => {
+    // Deliberately NOT requiring [1..V-1]. Story 2.7 appends exactly one entry
+    // per amendment, so its output is contiguous anyway; demanding contiguity
+    // would reject a legitimate contract whose earlier versions predate this
+    // file, and would add nothing the ordering rule does not already assert.
+    expect(() => parseContract(withHistory(5, [[1, FP_A], [3, FP_B]]), 'p')).not.toThrow();
+  });
+
+  it('still accepts an empty history on a fresh draft', () => {
+    expect(parseContract(fixture('epic-7-draft.yaml'), 'p').meta.history).toEqual([]);
+  });
+
+  it('still accepts the amend-output fixture unchanged', () => {
+    // The shape 2.6 asked me to pin: version 2, one entry for version 1.
+    expect(parseContract(fixture('epic-7-amended-draft.yaml'), 'p').meta.history).toHaveLength(1);
   });
 });
 
