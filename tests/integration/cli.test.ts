@@ -1,29 +1,47 @@
 import { constants } from 'node:fs';
-import { access, readFile, stat } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { execa } from 'execa';
 import { describe, expect, it } from 'vitest';
 
 const CLI = fileURLToPath(new URL('../../dist/cli.js', import.meta.url));
-const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 /**
  * Runs the built binary exactly as a shell would: no TTY, piped stdio,
  * never throwing on a non-zero exit so we can assert on the code itself.
+ *
+ * Runs in a throwaway directory by default. This used to be `cwd: REPO_ROOT`,
+ * which was harmless while every command was a stub that touched nothing, and
+ * wrong the moment one did real work: story 1.4's `init` scaffolded a live
+ * `.specwitness/` into this repository on every `pnpm test`, and `git add -A`
+ * would have staged it — only `runs/` and `scorecard.jsonl` are git-ignored,
+ * because in a real target project config.yaml, contracts/ and plans/ are
+ * meant to be committed.
+ *
+ * Tests that genuinely need the repository itself pass `cwd` explicitly.
  */
-async function runCli(args: string[]) {
-  const result = await execa(process.execPath, [CLI, ...args], {
-    reject: false,
-    cwd: REPO_ROOT,
-    // Prompt-free by contract: nothing may block on stdin.
-    input: '',
-  });
-  return {
-    exitCode: result.exitCode,
-    stdout: result.stdout,
-    stderr: result.stderr,
-  };
+async function runCli(args: string[], options: { cwd?: string } = {}) {
+  const scratch = options.cwd ?? (await mkdtemp(join(tmpdir(), 'specwitness-cli-')));
+  try {
+    const result = await execa(process.execPath, [CLI, ...args], {
+      reject: false,
+      cwd: scratch,
+      // Prompt-free by contract: nothing may block on stdin.
+      input: '',
+    });
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
+  } finally {
+    if (options.cwd === undefined) {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  }
 }
 
 /** House style: `ERROR: <what>` then optionally `HINT: <how to fix>`. */
@@ -115,33 +133,11 @@ describe('usage errors exit 64 (AC1)', () => {
   });
 });
 
-// Stories 1.6 and 1.5 removed 'report' and 'doctor' from these lists: both are
-// implemented now and covered by tests/integration/report.test.ts and
-// tests/integration/doctor.test.ts. Story 1.4 removes 'init' the same way, and
-// takes the whole block with it — nothing is left to assert once every command
-// is real.
-describe('stub commands exit 3 (AC2)', () => {
-  it.each([['init']])(
-    '%s reports not-implemented on stderr and exits 3',
-    async (command) => {
-      const { exitCode, stdout, stderr } = await runCli([command]);
-
-      expect(exitCode).toBe(3);
-      expect(stderr).toContain(`ERROR: '${command}' is not implemented yet`);
-      expect(stderr).toContain('HINT: it arrives later in Epic 1');
-      expect(stdout).toBe('');
-    },
-  );
-
-  it.each([['init']])(
-    '%s never exits 0, 1 or 2 (fail closed)',
-    async (command) => {
-      const { exitCode } = await runCli([command]);
-
-      expect([0, 1, 2]).not.toContain(exitCode);
-    },
-  );
-});
+// The `stub commands exit 3` block is gone: every command it covered (init,
+// doctor, report) is implemented and carries its own integration coverage, so
+// there was nothing left for it to assert. Its purpose — proving an AD-7 error
+// still maps to exit 3 — lives on in each command's own tests and in
+// scripts/pack-smoke.sh.
 
 describe('prompt-free operation', () => {
   it('does not block on stdin when stdin is closed', async () => {

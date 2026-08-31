@@ -39,7 +39,7 @@ development_status:
   1-1-cli-package-skeleton-with-exit-code-contract: review
   1-2-domain-core-result-taxonomy-errors-verdict-aggregation: review
   1-3-project-configuration-model-validation: review
-  1-4-specwitness-init: ready-for-dev
+  1-4-specwitness-init: review
   1-5-specwitness-doctor-runtime-project-diagnostics: review
   1-6-run-storage-foundation-run-identifiers: review
   epic-1-retrospective: optional
