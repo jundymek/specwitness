@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -315,6 +315,85 @@ describe('branch names that are not plain YAML strings', () => {
     await scaffold(root);
 
     expect(await readFile(configPath(), 'utf8')).toContain('baseBranch: main');
+  });
+});
+
+describe('a hostile .git/HEAD cannot inject YAML', () => {
+  // HEAD is attacker-controlled in a repository you did not write, and its
+  // content is copied into the generated config.yaml. A crafted value must not
+  // be able to add keys, change the document's shape, or escape the scalar —
+  // otherwise cloning a repository and running `init` would let that repository
+  // decide part of your SpecWitness configuration.
+  it.each([
+    ['quote injection', 'ref: refs/heads/a"\nevil: injected\n'],
+    ['structure break-out', 'ref: refs/heads/x\nproject:\n  evil: yes\n'],
+    ['colon and comment', 'ref: refs/heads/a: b #c'],
+    ['leading dash', 'ref: refs/heads/-x'],
+    ['tab', 'ref: refs/heads/a\tb'],
+    ['indent injection', 'ref: refs/heads/x\n  nested: 1'],
+    ['very long name', `ref: refs/heads/${'a'.repeat(500)}`],
+  ])('%s produces a plain string and no extra keys', async (_label, head) => {
+    await makeGitDir(head);
+
+    await scaffold(root);
+
+    const doc = parse(await readFile(configPath(), 'utf8'), { uniqueKeys: true }) as {
+      project: { baseBranch: unknown };
+    };
+
+    expect(Object.keys(doc).sort()).toEqual(['project', 'version']);
+    expect(typeof doc.project.baseBranch).toBe('string');
+  });
+});
+
+describe('symlinks never carry a write outside .specwitness/', () => {
+  it('refuses to overwrite through a symlinked config.yaml under --force', async () => {
+    // The destructive case: stat() follows symlinks, so without an lstat check
+    // `init --force` would overwrite whatever the link points at — any file the
+    // user can write. This module promises every write stays inside
+    // .specwitness/, and a symlink breaks that promise silently.
+    await makeGitDir();
+    await mkdir(join(root, '.specwitness'), { recursive: true });
+
+    const outsider = join(root, 'precious.txt');
+    await writeFile(outsider, 'do not touch\n', 'utf8');
+    await symlink(outsider, configPath());
+
+    const err = await scaffold(root, { force: true }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(InfraError);
+    expect((err as InfraError).message).toContain('symbolic link');
+    // The point of the test: the target survived.
+    expect(await readFile(outsider, 'utf8')).toBe('do not touch\n');
+  });
+
+  it.each([['contracts'], ['plans'], ['runs']])(
+    'refuses when %s is a symlink to a directory elsewhere',
+    async (name) => {
+      await makeGitDir();
+      await mkdir(join(root, '.specwitness'), { recursive: true });
+
+      const outsideDir = join(root, 'elsewhere');
+      await mkdir(outsideDir, { recursive: true });
+      await symlink(outsideDir, join(root, '.specwitness', name));
+
+      const err = await scaffold(root).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(InfraError);
+      expect((err as InfraError).message).toContain('symbolic link');
+    },
+  );
+
+  it('refuses when .specwitness itself is a symlink', async () => {
+    await makeGitDir();
+    const outsideDir = join(root, 'elsewhere');
+    await mkdir(outsideDir, { recursive: true });
+    await symlink(outsideDir, join(root, '.specwitness'));
+
+    const err = await scaffold(root).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(InfraError);
+    expect((err as InfraError).message).toContain('symbolic link');
   });
 });
 

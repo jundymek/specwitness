@@ -17,7 +17,7 @@
  * boundary (confirmed with the owner of story 1.6).
  */
 
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -175,7 +175,11 @@ export async function scaffold(
   const configRelative = `${PROJECT_DIR}/config.yaml`;
   const configAbsolute = join(projectDir, 'config.yaml');
 
-  const existingConfig = await stat(configAbsolute).catch(() => undefined);
+  // lstat, NOT stat: stat follows symlinks, so a symlinked config.yaml would
+  // let --force overwrite whatever it points at — anywhere on the filesystem.
+  // Every write this module makes must stay inside .specwitness/.
+  const existingConfig = await lstat(configAbsolute).catch(() => undefined);
+  rejectSymlink(existingConfig, configRelative, configAbsolute);
   if (existingConfig?.isDirectory() === true) {
     throw new InfraError(
       `${configRelative} exists but is a directory, not a file`,
@@ -295,8 +299,9 @@ async function ensureDirectory(
   created: string[],
   skipped: string[],
 ): Promise<void> {
-  const existing = await stat(absolute).catch(() => undefined);
+  const existing = await lstat(absolute).catch(() => undefined);
   if (existing !== undefined) {
+    rejectSymlink(existing, relative, absolute);
     if (!existing.isDirectory()) {
       // Reporting this as "already there" would exit 0 on a layout that later
       // commands cannot write into — an infra failure disguised as success,
@@ -328,8 +333,9 @@ async function ensureFile(
   created: string[],
   skipped: string[],
 ): Promise<void> {
-  const existing = await stat(absolute).catch(() => undefined);
+  const existing = await lstat(absolute).catch(() => undefined);
   if (existing !== undefined) {
+    rejectSymlink(existing, relative, absolute);
     if (existing.isDirectory()) {
       throw new InfraError(
         `${relative} exists but is a directory, not a file`,
@@ -351,6 +357,28 @@ async function write(absolute: string, contents: string): Promise<void> {
     throw new InfraError(
       `cannot write ${absolute}: ${describe(err)}`,
       'check the directory permissions and that the filesystem is not read-only',
+    );
+  }
+}
+
+/**
+ * Refuses to treat a symlink as part of the scaffold layout.
+ *
+ * This module promises that every write lands inside `<projectRoot>/.specwitness/`.
+ * A symlink breaks that promise silently: `--force` on a symlinked `config.yaml`
+ * would overwrite the link's target, which may be any file the user can write,
+ * and a symlinked directory would put run evidence and contracts somewhere the
+ * user never named. Fail closed and say why, rather than following it.
+ */
+function rejectSymlink(
+  entry: { isSymbolicLink(): boolean } | undefined,
+  relative: string,
+  absolute: string,
+): void {
+  if (entry?.isSymbolicLink() === true) {
+    throw new InfraError(
+      `${relative} is a symbolic link; SpecWitness will not write through it`,
+      `replace ${absolute} with a real file or directory, then run 'specwitness init' again`,
     );
   }
 }
