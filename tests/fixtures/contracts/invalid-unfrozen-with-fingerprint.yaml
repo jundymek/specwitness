@@ -1,0 +1,23 @@
+# The mirror image: claims to be a draft while carrying a fingerprint. Also
+# contradictory, and also what a partial hand-edit of a frozen file produces.
+spec:
+  epic: epic-7
+  version: 1
+  criteria:
+    - id: E7-01
+      statement: A new company appears in the companies list after onboarding completes.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: false
+  fingerprint: 4f7f9292551ac1cf01d2b77d4e845561b6e6f4331d34ae5c07e7730312d1f184
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: null
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
+  history: []

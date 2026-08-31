@@ -1,0 +1,55 @@
+# Cosmetic reformat #4: COMMENTS AND BLANK LINES.
+# Same contract as epic-7-frozen.yaml, heavily commented — the shape a
+# reviewer's annotations would leave behind in a PR. Comments are not data:
+# they must not reach the fingerprint, or a reviewer explaining a criterion
+# would look exactly like an agent weakening one.
+
+spec:
+  # Canonical epic id, normalised by domain/ids.ts.
+  epic: epic-7
+
+  version: 1   # integer, monotonic; freezing does not bump it
+
+  criteria:
+    # --- onboarding ------------------------------------------------------
+    - id: E7-01
+      statement: A new company appears in the companies list after onboarding completes.
+      kind: behavioral       # externally observable
+      severity: critical
+      verifiability: automated
+
+    # --- authorization ---------------------------------------------------
+    - id: E7-02
+      statement: |-
+        Only an owner may invite a member.
+        A member who tries receives 403 and no invitation is created.
+      kind: security
+      severity: critical
+      verifiability: automated
+
+    # --- copy ------------------------------------------------------------
+    # Reviewer note: kept as human verifiability on purpose, this one cannot
+    # be adjudicated mechanically and must resolve to NEEDS_HUMAN.
+    - id: E7-03
+      statement: The onboarding confirmation copy reads naturally to a native speaker — café, ☕.
+      kind: human
+      severity: normal
+      verifiability: human
+
+meta:
+  schemaVersion: 1
+  frozen: true
+
+  # Printed by `specwitness contract epic-7 --freeze`.
+  fingerprint: 4f7f9292551ac1cf01d2b77d4e845561b6e6f4331d34ae5c07e7730312d1f184
+
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: 2026-08-31T09:05:00.000Z
+
+  provenance:
+    provider: codex
+    model: null    # the codex path cannot report one; recorded as absent, not omitted
+    providerCliVersion: 0.144.4
+    generatedAt: 2026-08-31T09:00:00.000Z
+
+  history: []

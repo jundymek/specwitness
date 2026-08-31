@@ -1,0 +1,20 @@
+# Written by a newer specwitness. The version is read BEFORE the full parse, so
+# the operator is told to upgrade rather than shown a list of shape errors
+# caused by fields this build has never heard of.
+spec:
+  epic: epic-7
+  version: 1
+  criteria: []
+  rationale: added in a later schema version
+meta:
+  schemaVersion: 99
+  frozen: false
+  fingerprint: null
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: null
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
+  history: []
