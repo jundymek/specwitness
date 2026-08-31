@@ -1,3 +1,8 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { createProcessRunner } from '../../src/infra/process-runner.js';
@@ -225,5 +230,101 @@ describe('ProcessRunner: stdin and timing', () => {
 
     expect(result.durationMs).toBe(2250);
     expect(Number.isInteger(result.durationMs)).toBe(true);
+  });
+});
+
+describe('ProcessRunner: a bad cwd is not a missing binary', () => {
+  it('reports an invalid cwd as spawn-failed, not not-found', async () => {
+    // execa surfaces BOTH "the binary is not on PATH" and "the cwd does not
+    // exist" as code ENOENT, so a classifier that trusts ENOENT alone tells the
+    // operator to install a CLI that is already installed. `not-found` is the
+    // input to doctor's "install it and reopen your shell" diagnosis, which is
+    // the single most consequential thing doctor says.
+    const result = await runner().run({
+      ...base,
+      binary: NODE, // definitely exists
+      args: ['-e', ''],
+      cwd: '/definitely/not/a/directory/specwitness-9f3c',
+    });
+
+    expect(result.outcome).toBe('spawn-failed');
+    expect(result.stderr).toMatch(/cwd/i);
+  });
+
+  it('still reports a missing binary as not-found when the cwd is fine', async () => {
+    // The other half of the distinction: fixing the above must not blunt this.
+    const result = await runner().run({
+      ...base,
+      binary: 'specwitness-no-such-binary-9f3c',
+      args: ['--version'],
+    });
+
+    expect(result.outcome).toBe('not-found');
+  });
+
+  it('reports a cwd that exists but is a file as spawn-failed', async () => {
+    const result = await runner().run({
+      ...base,
+      binary: NODE,
+      args: ['-e', ''],
+      cwd: fileURLToPath(import.meta.url),
+    });
+
+    expect(result.outcome).toBe('spawn-failed');
+  });
+});
+
+describe('ProcessRunner: a timeout fires even when the child forks', () => {
+  it('classifies a forking child as timed-out instead of hanging forever', async () => {
+    // Reported by story 2.5 with a reproduction, confirmed here: execa's own
+    // timeout kills the direct child, but a grandchild inherits the stdio pipes
+    // and holds them open, so execa never settles. Before this was handled, a
+    // call like this one did not return after 90 seconds.
+    //
+    // It matters well beyond provider adapters: Epic 3 runs project-declared
+    // gates through this port, and `npm test` / `docker compose up` exist to
+    // spawn children. A gate that hangs must fail cleanly, not wedge `verify`.
+    const dir = await mkdtemp(join(tmpdir(), 'specwitness-hang-'));
+    const script = join(dir, 'forks-and-hangs.sh');
+    // `while ... sleep` rather than `exec sleep`: the shell stays alive as the
+    // parent of a `sleep` grandchild, which is the whole point.
+    await writeFile(script, '#!/bin/sh\nwhile true; do sleep 3600; done\n', { mode: 0o755 });
+
+    try {
+      const startedAt = Date.now();
+      const result = await runner().run({
+        ...base,
+        binary: '/bin/sh',
+        args: [script],
+        timeoutMs: 500,
+      });
+      const wallClock = Date.now() - startedAt;
+
+      expect(result.outcome).toBe('timed-out');
+      expect(result.exitCode).toBeNull();
+      // The load-bearing assertion: it RETURNED. Without the settlement
+      // watchdog this promise never resolves at all.
+      expect(wallClock).toBeLessThan(10_000);
+      // And it says why, so an operator is not left guessing.
+      expect(result.stderr).toMatch(/descendant|timed out/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still settles promptly for a single-process child, with no grace penalty', async () => {
+    // The common case must not pay for the watchdog: a well-behaved child that
+    // honours its kill should settle at roughly timeoutMs, not timeoutMs + grace.
+    const startedAt = Date.now();
+
+    const result = await runner().run({
+      ...base,
+      binary: NODE,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      timeoutMs: 300,
+    });
+
+    expect(result.outcome).toBe('timed-out');
+    expect(Date.now() - startedAt).toBeLessThan(1_200);
   });
 });
