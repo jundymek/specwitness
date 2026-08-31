@@ -91,12 +91,25 @@ export interface ScaffoldResult {
  * never named (`--root` arrives in Epic 3).
  */
 export async function isGitRepository(projectRoot: string): Promise<boolean> {
-  try {
-    await stat(join(projectRoot, '.git'));
-    return true;
-  } catch {
+  const dotGit = join(projectRoot, '.git');
+  const entry = await stat(dotGit).catch(() => undefined);
+  if (entry === undefined) {
     return false;
   }
+  if (entry.isDirectory()) {
+    return true;
+  }
+
+  // A `.git` FILE is only a repository when it actually points at a real
+  // gitdir. A stale or unrelated file of that name is junk, and scaffolding
+  // into it would contradict AC3 — the directory genuinely is not a working
+  // tree. Resolution stays filesystem-only.
+  //
+  // Deliberately NOT stricter than that: a `.git` DIRECTORY is accepted on
+  // existence alone, without requiring a readable HEAD. The spec's rule is
+  // "presence of a `.git` entry", `git init` always writes HEAD, and doctor's
+  // git checks are the right place to diagnose a corrupted repository.
+  return (await resolveGitDir(projectRoot)) !== undefined;
 }
 
 /**
@@ -222,7 +235,7 @@ export async function scaffold(
   if (configContents === undefined) {
     skipped.push(configRelative);
   } else {
-    await write(configAbsolute, configContents);
+    await write(configAbsolute, configContents, !configPresent);
     // Replaced, not created: the user had a file there and now does not.
     (configPresent ? replaced : created).push(configRelative);
   }
@@ -410,13 +423,30 @@ async function ensureFile(
     return;
   }
 
-  await write(absolute, contents);
+  await write(absolute, contents, true);
   created.push(relative);
 }
 
-async function write(absolute: string, contents: string): Promise<void> {
+/**
+ * Writes a scaffold file.
+ *
+ * `exclusive` uses `wx`, which fails if the path exists at open time — a
+ * symlink included. That closes the check-then-write gap for files we believe
+ * are absent: `inspectLayout` saw nothing there, so if something has appeared
+ * by now the write must not proceed, and certainly must not follow it out of
+ * `.specwitness/`.
+ *
+ * The replacing write (`--force` over an existing config) cannot use `wx`, and
+ * a narrow race remains there: an entry validated as a regular file could be
+ * swapped for a symlink before the write lands. That is accepted rather than
+ * fixed. Closing it needs `O_NOFOLLOW` plus directory-handle-relative writes,
+ * which Node does not expose portably, and it buys little: the attacker must
+ * already have write access to `.specwitness/` inside the user's own working
+ * tree, at which point they can corrupt the config directly without a race.
+ */
+async function write(absolute: string, contents: string, exclusive = false): Promise<void> {
   try {
-    await writeFile(absolute, contents, 'utf8');
+    await writeFile(absolute, contents, { encoding: 'utf8', flag: exclusive ? 'wx' : 'w' });
   } catch (err) {
     throw new InfraError(
       `cannot write ${absolute}: ${describe(err)}`,

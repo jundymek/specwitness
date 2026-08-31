@@ -51,13 +51,47 @@ describe('isGitRepository (AC3, filesystem-only)', () => {
 
   it('accepts a .git FILE — linked worktrees and submodules use one', async () => {
     // This is not a hypothetical: every agent in this cohort works inside a
-    // linked worktree, so rejecting it would make init unusable here.
-    await writeFile(join(root, '.git'), 'gitdir: /somewhere/.git/worktrees/wt\n', 'utf8');
+    // linked worktree, so rejecting it would make init unusable here. The
+    // gitdir must really exist — see the stale-pointer cases below.
+    const gitdir = join(root, '.git-worktrees', 'wt');
+    await mkdir(gitdir, { recursive: true });
+    await writeFile(join(root, '.git'), `gitdir: ${gitdir}\n`, 'utf8');
+
     await expect(isGitRepository(root)).resolves.toBe(true);
   });
 
   it('rejects a directory with no .git entry at all', async () => {
     await expect(isGitRepository(root)).resolves.toBe(false);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['not a gitdir pointer', 'this is not a git file\n'],
+    ['gitdir pointing nowhere', 'gitdir: /nonexistent/path/.git\n'],
+    ['gitdir with no path', 'gitdir:\n'],
+  ])('rejects a .git file that is %s', async (_label, contents) => {
+    // AC3 is about whether this IS a working tree. A stale or unrelated file
+    // named .git is junk, and scaffolding into it would be the documented
+    // exit-3 case silently turning into a success.
+    await writeFile(join(root, '.git'), contents, 'utf8');
+
+    await expect(isGitRepository(root)).resolves.toBe(false);
+  });
+
+  it('accepts a .git file whose gitdir really exists', async () => {
+    const gitdir = join(root, 'real-gitdir');
+    await mkdir(gitdir, { recursive: true });
+    await writeFile(join(root, '.git'), `gitdir: ${gitdir}\n`, 'utf8');
+
+    await expect(isGitRepository(root)).resolves.toBe(true);
+  });
+
+  it('accepts a .git directory without demanding a readable HEAD', async () => {
+    // Deliberately not stricter than the spec's "presence of a .git entry":
+    // diagnosing a corrupted repository is doctor's job, not init's.
+    await mkdir(join(root, '.git'), { recursive: true });
+
+    await expect(isGitRepository(root)).resolves.toBe(true);
   });
 
   it('does not search upward for a parent repository', async () => {
@@ -384,6 +418,30 @@ describe('symlinks never carry a write outside .specwitness/', () => {
       expect((err as InfraError).message).toContain('symbolic link');
     },
   );
+
+  it('will not create a file through a symlink that appears after inspection', async () => {
+    // The check-then-write gap: inspectLayout saw nothing at .gitignore, so the
+    // write uses exclusive create (`wx`), which fails on an existing path —
+    // symlink included — rather than following it out of .specwitness/.
+    //
+    // The remaining gap is documented and accepted: `--force` REPLACING an
+    // existing config cannot use `wx`, and closing that needs O_NOFOLLOW plus
+    // directory-relative writes, which Node does not expose portably. The
+    // attacker must already have write access inside the user's own working
+    // tree, where they can corrupt the config directly without racing.
+    await makeGitDir();
+    await mkdir(join(root, '.specwitness'), { recursive: true });
+
+    const outsider = join(root, 'outside.txt');
+    await writeFile(outsider, 'untouched\n', 'utf8');
+    await symlink(outsider, join(root, '.specwitness', '.gitignore'));
+
+    // inspectLayout rejects it up front; the point is that no write reaches
+    // the link's target under any path through the function.
+    await scaffold(root).catch(() => undefined);
+
+    expect(await readFile(outsider, 'utf8')).toBe('untouched\n');
+  });
 
   it('refuses when .specwitness itself is a symlink', async () => {
     await makeGitDir();
