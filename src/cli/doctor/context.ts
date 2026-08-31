@@ -83,6 +83,9 @@ function presentBillingRiskVariables(): readonly string[] {
   if (process.env['ANTHROPIC_API_KEY'] !== undefined) {
     present.push('ANTHROPIC_API_KEY');
   }
+  if (process.env['ANTHROPIC_AUTH_TOKEN'] !== undefined) {
+    present.push('ANTHROPIC_AUTH_TOKEN');
+  }
   if (process.env['OPENAI_API_KEY'] !== undefined) {
     present.push('OPENAI_API_KEY');
   }

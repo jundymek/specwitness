@@ -135,6 +135,23 @@ describe('billing-risk-env check', () => {
     expect(result.detail).toContain('no AI provider is configured');
   });
 
+  it('warns about ANTHROPIC_AUTH_TOKEN, which the claude adapter also withholds', async () => {
+    // Story 2.4 withholds ANTHROPIC_AUTH_TOKEN alongside the API key because it
+    // authenticates a billed Anthropic account just as directly. Doctor missed
+    // it at first: the product treated it as a hazard while the diagnostic
+    // stayed silent, which is the two halves of FR-15 disagreeing.
+    const { ctx } = await testContext({
+      config: configWith('claude-code-cli', 'claude'),
+      billingRiskEnv: ['ANTHROPIC_AUTH_TOKEN'],
+    });
+
+    const result = await billingRiskEnvCheck.run(ctx);
+
+    expect(result.status).toBe('warn');
+    expect(result.detail).toContain('ANTHROPIC_AUTH_TOKEN');
+    expect(result.detail).toContain('could bill your API account');
+  });
+
   it('does not warn about a key no configured provider could ever spend', async () => {
     // Only claude is configured, so `codex` is never invoked and nothing
     // SpecWitness does can bill an OpenAI account. Warning anyway would be a

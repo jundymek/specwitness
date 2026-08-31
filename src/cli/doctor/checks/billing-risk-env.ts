@@ -41,7 +41,11 @@ import type { DoctorCheck } from '../registry.js';
  * costs money.
  */
 const SPENDABLE_BY: Readonly<Record<string, readonly string[]>> = {
-  'claude-code-cli': ['ANTHROPIC_API_KEY'],
+  // Both, because story 2.4's adapter withholds both: `ANTHROPIC_AUTH_TOKEN`
+  // authenticates a billed Anthropic account exactly as the API key does, and a
+  // diagnostic that warned about only one of them would be silent on a real
+  // hazard the product itself already recognises.
+  'claude-code-cli': ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
   'codex-cli': ['OPENAI_API_KEY'],
   fake: [],
 };
@@ -55,7 +59,7 @@ function spendable(adapters: readonly string[]): Set<string> {
       // An adapter this build does not recognise — a newer config, or one this
       // check has not been taught about. Assume it could spend anything rather
       // than silently clearing a real risk.
-      return new Set(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+      return new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY']);
     }
     for (const name of known) {
       names.add(name);
