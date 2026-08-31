@@ -1,0 +1,25 @@
+# A never-frozen draft: `frozen: false`, no fingerprint, no frozenAt.
+# This is what story 2.6 writes before the human reviews it. It parses cleanly
+# and `contractState` reports `draft` — it is not an error, and `isFrozen` must
+# answer `false` without throwing.
+spec:
+  epic: epic-7
+  version: 1
+  criteria:
+    - id: E7-01
+      statement: A new company appears in the companies list after onboarding completes.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: false
+  fingerprint: null
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: null
+  provenance:
+    provider: claude-code
+    model: claude-opus-5
+    providerCliVersion: 2.1.0
+    generatedAt: 2026-08-31T09:00:00.000Z
+  history: []

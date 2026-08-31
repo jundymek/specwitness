@@ -16,6 +16,7 @@
 
 import { z } from 'zod';
 
+import { KINDS, SEVERITIES, VERIFIABILITIES } from '../domain/contract.js';
 import { CRITERION_STATUSES, GATE_STATUSES } from '../domain/result.js';
 import { INFRA_ERROR_CLASSIFICATIONS, VERDICTS } from '../domain/run-outcome.js';
 
@@ -30,3 +31,20 @@ export const VerdictSchema = z.enum(VERDICTS);
 
 /** `config | ingest | integrity | provider | infra` (never `usage` — see run-outcome.ts). */
 export const InfraErrorClassificationSchema = z.enum(INFRA_ERROR_CLASSIFICATIONS);
+
+/**
+ * The contract vocabularies (AD-5), added by story 2.2 — the same derivation
+ * discipline as everything above. Story 2.6 composes its provider-response
+ * schema from these rather than re-listing the literals: a draft whose `kind`
+ * the model invented must be rejected by the gate, not written into a
+ * fingerprinted file.
+ */
+
+/** `behavioral | integration | invariant | security | structural | performance | human` */
+export const KindSchema = z.enum(KINDS);
+
+/** `critical | normal` */
+export const SeveritySchema = z.enum(SEVERITIES);
+
+/** `automated | human` */
+export const VerifiabilitySchema = z.enum(VERIFIABILITIES);

@@ -1,0 +1,23 @@
+# `E07-1` — the near-miss the canonical format exists to catch: epic number
+# padded, sequence not. domain/ids.ts rejects it and so must the schema.
+spec:
+  epic: epic-7
+  version: 1
+  criteria:
+    - id: E07-1
+      statement: A new company appears in the companies list after onboarding completes.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: false
+  fingerprint: null
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: null
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
+  history: []

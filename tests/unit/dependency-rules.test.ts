@@ -197,6 +197,41 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
     expect(output).not.toContain('ingest-core-only');
     expect(exitCode).toBe(0);
   });
+
+  it('lets src/schemas use node:crypto', async () => {
+    // Story 2.2's exact shape. AD-5 names `schemas/canonical.ts` as THE single
+    // implementation of the contract fingerprint, and a fingerprint needs
+    // SHA-256. The carve-out lives on `schemas-core-only` rather than in a rule
+    // of its own because dependency-cruiser's `forbidden` rules are OR-ed: a
+    // later rule cannot un-forbid what an earlier one forbids. If that ever
+    // changes, this test still passes and the narrowing test below still fails
+    // loudly, which is the ordering we want.
+    await writeModule(
+      'schemas/__probe-canonical.ts',
+      "import { createHash } from 'node:crypto';\n" +
+        'export const h = (s: string) => createHash("sha256").update(s).digest("hex");\n',
+    );
+
+    const { exitCode, output } = await depcruise();
+
+    expect(output).not.toContain('schemas-core-only');
+    expect(exitCode).toBe(0);
+  });
+
+  it('lets src/schemas import yaml', async () => {
+    // Story 2.2 again: AD-5 makes contracts human-readable YAML, and
+    // `schemas/contract.ts` owns `parseContract`/`serializeContract`. A pure
+    // text codec is not "reaching out"; the forbidding half is pinned below.
+    await writeModule(
+      'schemas/__probe-yaml.ts',
+      "import { stringify } from 'yaml';\nexport const s = stringify;\n",
+    );
+
+    const { exitCode, output } = await depcruise();
+
+    expect(output).not.toContain('schemas-npm-allowlist');
+    expect(exitCode).toBe(0);
+  });
 });
 
 describe('AD-1 rules still forbid what they are meant to forbid', () => {
@@ -225,8 +260,17 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     expect(exitCode).not.toBe(0);
   });
 
-  it('blocks an npm package other than zod inside src/schemas', async () => {
-    await writeModule('schemas/__probe-bad.ts', "import { parse } from 'yaml';\nexport const p = parse;\n");
+  it('blocks an npm package outside the schemas allowlist', async () => {
+    // Was `yaml` until story 2.2, which moved yaml onto the allowlist (AD-5
+    // makes contracts human-readable YAML and `schemas/contract.ts` owns the
+    // text<->model conversion). `execa` replaces it deliberately: a subprocess
+    // runner inside `src/schemas/**` is precisely the "schemas do not reach
+    // out" violation this rule exists to catch, so the guarantee is unchanged
+    // in substance — only the example moved.
+    await writeModule(
+      'schemas/__probe-bad.ts',
+      "import { execa } from 'execa';\nexport const e = execa;\n",
+    );
 
     const { exitCode, output } = await depcruise();
 
@@ -248,6 +292,22 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     const { exitCode, output } = await depcruise();
 
     expect(output).toContain('ingest-core-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks a Node built-in other than crypto inside src/schemas', async () => {
+    // The other half of story 2.2's `node:crypto` carve-out. Without this the
+    // allowance could widen to "src/schemas may use built-ins" and nothing
+    // would fail — schemas would be free to read the filesystem, and the whole
+    // point of a pure core is that it cannot.
+    await writeModule(
+      'schemas/__probe-fs.ts',
+      "import { readFileSync } from 'node:fs';\nexport const r = readFileSync;\n",
+    );
+
+    const { exitCode, output } = await depcruise();
+
+    expect(output).toContain('schemas-core-only');
     expect(exitCode).not.toBe(0);
   });
 

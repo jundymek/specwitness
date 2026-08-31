@@ -1,0 +1,36 @@
+# Cosmetic reformat #2: QUOTING STYLE.
+# Same contract as epic-7-frozen.yaml with every scalar quoted — single quotes
+# in some places, double quotes in others, and the multi-line statement written
+# as a double-quoted scalar with an explicit \n escape. Quoting style is a YAML
+# presentation detail; the parsed strings are identical, so the fingerprint is.
+spec:
+  epic: "epic-7"
+  version: 1
+  criteria:
+    - id: 'E7-01'
+      statement: "A new company appears in the companies list after onboarding completes."
+      kind: 'behavioral'
+      severity: "critical"
+      verifiability: 'automated'
+    - id: "E7-02"
+      statement: "Only an owner may invite a member.\nA member who tries receives 403 and no invitation is created."
+      kind: "security"
+      severity: 'critical'
+      verifiability: "automated"
+    - id: 'E7-03'
+      statement: 'The onboarding confirmation copy reads naturally to a native speaker — café, ☕.'
+      kind: "human"
+      severity: "normal"
+      verifiability: 'human'
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: "4f7f9292551ac1cf01d2b77d4e845561b6e6f4331d34ae5c07e7730312d1f184"
+  createdAt: '2026-08-31T09:00:00.000Z'
+  frozenAt: "2026-08-31T09:05:00.000Z"
+  provenance:
+    provider: 'codex'
+    model: null
+    providerCliVersion: "0.144.4"
+    generatedAt: '2026-08-31T09:00:00.000Z'
+  history: []

@@ -57,18 +57,38 @@ module.exports = {
     {
       name: 'schemas-core-only',
       comment:
-        'AD-1: src/schemas/** may import src/domain/**, its own siblings, and zod. ' +
-        'Nothing else — schemas validate, they do not reach out.',
+        'AD-1: src/schemas/** may import src/domain/**, its own siblings, zod, and ' +
+        '`node:crypto`. Nothing else — schemas validate, they do not reach out.',
       severity: 'error',
       from: { path: '^src/schemas/' },
       to: {
-        pathNot: '^src/(domain|schemas)/',
+        pathNot: [
+          '^src/(domain|schemas)/',
+          // AD-5 names `schemas/canonical.ts` as THE single implementation of
+          // the contract fingerprint, and a fingerprint needs SHA-256. This is
+          // the narrowest possible carve-out: `crypto` and nothing else.
+          //
+          // It has to be an exception on THIS rule rather than a new rule of
+          // its own, because dependency-cruiser's `forbidden` rules are OR-ed —
+          // a later rule cannot un-forbid what an earlier one forbids. Verified
+          // empirically: a probe module importing `node:crypto` from
+          // `src/schemas/` fails as `schemas-core-only`, not as
+          // `no-side-effect-builtins-in-core` (whose SIDE_EFFECT_BUILTINS list
+          // has never contained `crypto`, hashing being pure computation).
+          //
+          // `node:fs` and every other builtin stay blocked here, and
+          // `tests/unit/dependency-rules.test.ts` asserts both halves so this
+          // carve-out cannot quietly widen.
+          '^(node:)?crypto$',
+        ],
         dependencyTypesNot: ['npm'],
       },
     },
     {
       name: 'schemas-npm-allowlist',
-      comment: 'AD-1: zod is the only npm dependency permitted inside src/schemas/**.',
+      comment:
+        'AD-1: zod and yaml are the only npm dependencies permitted inside ' +
+        'src/schemas/**. Both are pure in-memory codecs; neither reaches out.',
       severity: 'error',
       from: { path: '^src/schemas/' },
       to: {
@@ -76,7 +96,17 @@ module.exports = {
         // Substring rather than an anchored path: pnpm resolves through its
         // content-addressable store (node_modules/.pnpm/zod@4.5.4/node_modules/zod/…),
         // so an anchored `^node_modules/zod/` would never match under pnpm.
-        pathNot: 'node_modules/zod/',
+        //
+        // `yaml` was added by story 2.2. AD-5 makes contracts human-readable
+        // YAML, and their schema module owns the text<->model conversion that
+        // `parseContract`/`serializeContract` perform — a pure string
+        // transformation with no I/O in it, which is why the rule's actual
+        // subject ("schemas validate, they do not reach out") is untouched.
+        // The line this rule defends is side effects and layer inversion, not
+        // the package count: `execa`, `node:fs` and every adapter import stay
+        // forbidden here, and `tests/unit/dependency-rules.test.ts` pins both
+        // halves so the allowlist cannot drift into "npm is fine in schemas".
+        pathNot: ['node_modules/zod/', 'node_modules/yaml/'],
       },
     },
     {

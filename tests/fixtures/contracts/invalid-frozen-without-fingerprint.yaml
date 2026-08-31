@@ -1,0 +1,24 @@
+# Internally contradictory: claims to be frozen but carries no fingerprint to
+# check against. This is what hand-deleting the fingerprint line produces, and
+# treating it as a plain draft would launder a tamper into a redraft.
+spec:
+  epic: epic-7
+  version: 1
+  criteria:
+    - id: E7-01
+      statement: A new company appears in the companies list after onboarding completes.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: null
+  createdAt: 2026-08-31T09:00:00.000Z
+  frozenAt: 2026-08-31T09:05:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
+  history: []

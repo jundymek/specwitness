@@ -1,0 +1,6 @@
+# Story 2.2 (AD-5): `tests/fixtures/contracts/epic-7-reformatted-crlf.yaml` is a
+# CRLF-line-ending twin of the canonical contract fixture. Its whole purpose is
+# to prove that a Windows checkout's line endings do not change a contract's
+# fingerprint, so git must never normalise it — normalising would turn the test
+# green for the wrong reason, which is worse than not having it.
+tests/fixtures/contracts/epic-7-reformatted-crlf.yaml -text
