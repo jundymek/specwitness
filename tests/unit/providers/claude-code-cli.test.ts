@@ -441,6 +441,31 @@ describe('createClaudeCodeCliProvider — billing safety (FR-15)', () => {
     });
   });
 
+  it('warns BEFORE the first subprocess, and even when the probe fails', async () => {
+    // The capability probe spawns `claude` itself. If the warning came after it,
+    // the first subprocess of the session would run unannounced — and a probe
+    // that failed would throw with no warning at all, so an operator whose key
+    // is set would never learn it. The variable is withheld from the probe
+    // either way; this is about the warning contract, not about safety.
+    await withKey('not-a-real-key-unit-fixture', async () => {
+      const warn = vi.fn();
+      const { runner } = runnerReturning({
+        outcome: 'not-found',
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 1,
+      });
+      const provider = createClaudeCodeCliProvider(descriptor(), deps(runner, warn));
+
+      await expect(
+        provider.generate({ role: 'contract-author', prompt: 'x' }),
+      ).rejects.toBeInstanceOf(ProviderError);
+
+      expect(warn.mock.calls.flat().join('\n')).toContain('ANTHROPIC_API_KEY');
+    });
+  });
+
   it('withholds caller-configured equivalents too', async () => {
     const { runner, calls } = runnerReturning(VERSION_OK, ok(CAPABLE_ENVELOPE), ok(CAPABLE_ENVELOPE));
     const provider = createClaudeCodeCliProvider(descriptor(), deps(runner), {

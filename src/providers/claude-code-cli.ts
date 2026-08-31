@@ -396,6 +396,14 @@ export function createClaudeCodeCliProvider(
     adapter: descriptor.adapter,
 
     async generate(prompt: AgentPrompt): Promise<string> {
+      // BEFORE the capability probe, which spawns `claude` itself. Warning
+      // afterwards would let the session's first subprocess run unannounced, and
+      // a probe that failed would throw with no warning at all — so an operator
+      // whose key is set would never learn it. The variable is withheld from
+      // every spawn either way, probe included; this is the warning contract
+      // (FR-15), not the safety property.
+      warnAboutBilling();
+
       const capability = await probeClaudeCapability(deps.processRunner, {
         ...options,
         billingEnvVars,
@@ -406,8 +414,6 @@ export function createClaudeCodeCliProvider(
           'install or update Claude Code, then re-run `specwitness doctor`',
         );
       }
-
-      warnAboutBilling();
 
       const text = composePrompt(prompt);
 
