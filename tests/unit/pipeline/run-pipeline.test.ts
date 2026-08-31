@@ -208,6 +208,27 @@ describe('runPipeline — a stage that throws (infrastructure)', () => {
     expect(result.outcome).toEqual({ infraError: 'infra' });
   });
 
+  it('redacts a secret that a stage put in its error message', async () => {
+    // Timeline details are persisted to result.json and rendered to a terminal, so they
+    // are capture in AD-10's sense. A gate that fails while echoing the environment can
+    // easily end up with a key in its InfraError message; without redaction here, the
+    // error path would quietly bypass the protection that covers evidence beside it.
+    const seeded = `ANTHROPIC_API_KEY=${['sk', 'ant', 'api03'].join('-')}-timelineleak`;
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: fakeStage('gates', ran, async () => {
+        throw new InfraError(`the gate command failed with ${seeded} in its environment`);
+      }),
+    });
+
+    const result = await run(stages);
+
+    expect(JSON.stringify(result.stages)).not.toContain('timelineleak');
+    expect(result.stages.find((entry) => entry.stage === 'gates')?.detail).toContain(
+      '[REDACTED]',
+    );
+  });
+
   it('records the failure reason in the timeline without leaking a stack trace', async () => {
     const ran: StageName[] = [];
     const stages = stagesWith(ran, {

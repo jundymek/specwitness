@@ -39,6 +39,7 @@
  * reused.
  */
 
+import { redactText } from '../domain/evidence.js';
 import {
   ConfigError,
   InfraError,
@@ -173,7 +174,18 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     durationMs: number,
     detail?: string,
   ): void => {
-    timeline.set(stage, detail === undefined ? { stage, status, durationMs } : { stage, status, durationMs, detail });
+    // Timeline details are PERSISTED to result.json and RENDERED to a terminal, which
+    // makes them capture in AD-10's sense. A stage that fails while running a project
+    // command may well put that command's output in its error message — the gates stage
+    // is the obvious future case — and without this the redaction that protects evidence
+    // would be bypassed by the error path beside it. Redacting here rather than trusting
+    // every present and future stage to remember is the difference between a guarantee
+    // and a convention.
+    const safe = detail === undefined ? undefined : redactText(detail);
+    timeline.set(
+      stage,
+      safe === undefined ? { stage, status, durationMs } : { stage, status, durationMs, detail: safe },
+    );
   };
 
   const skip = (from: number, to: number, detail: string): void => {
