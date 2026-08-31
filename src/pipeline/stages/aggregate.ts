@@ -1,18 +1,38 @@
 /**
- * The `aggregate` stage — AD-6's ONE converter from stage results to a `RunOutcome`.
+ * The `aggregate` stage — AD-6's ONE converter from stage results to a `RunOutcome`, and
+ * the point at which the run's answer is made complete.
  *
- * It calls the merged `aggregate()` in `src/domain/verdict.ts` and does nothing else. That
- * function is the product's trust anchor: pure, total, tested, with its own property
- * suite. Re-implementing any part of the precedence here would give the product two
- * answers to "did this branch pass", and the two would disagree exactly once, in
- * production, on the run somebody cared about.
+ * It does exactly two things:
  *
- * This stage is also the reason a gate failure is a stage RESULT rather than an
- * exception. The gates stage records its `GateResult`s on the accumulator and returns
- * `product-negative`; the pipeline skips ahead to here; and the conversion to
- * FAIL + `gateFailed` happens in one place, once.
+ *  1. **Completes the criterion set.** Every criterion the frozen contract declares must
+ *     appear exactly once in the result; any that no probe resolved is `skipped`.
+ *  2. **Calls the merged `aggregate()`** in `src/domain/verdict.ts` — the product's trust
+ *     anchor: pure, total, tested, with its own property suite. Re-implementing any part
+ *     of its precedence here would give the product two answers to "did this branch
+ *     pass", and the two would disagree exactly once, in production, on the run somebody
+ *     cared about.
+ *
+ * Step 1 lives HERE, and not in the probes stage, because of ADR-003. When a gate fails,
+ * the pipeline stops early and jumps straight to this stage — `probes` is `skipped`, by
+ * design, so that a branch which does not build costs no AI or browser spend. If the
+ * skipped criterion results were materialised in the probes stage, they would exist on
+ * the happy path and be **missing in exactly the case ADR-003 is about**: a gate-failed
+ * run, whose report is supposed to show every criterion as `skipped`, would show none at
+ * all.
+ *
+ * That was a real defect in the first version of this file. It survived my own tests
+ * because they asserted the criterion set only on the path where it happened to work —
+ * the same shape of mistake as asserting a guard is green without ever watching it fail.
+ * Putting the completion in the one stage every completed run passes through means there
+ * is one code path rather than two.
+ *
+ * The status still comes from `deriveCriterionResult`, so AD-13's "exactly one producer
+ * of a CriterionResult" holds: this stage decides WHICH criteria still need deriving,
+ * never what their status is.
  */
 
+import { deriveCriterionResult } from '../../domain/criterion-result.js';
+import type { DerivedCriterionResult } from '../../domain/criterion-result.js';
 import { aggregate } from '../../domain/verdict.js';
 import type { Stage } from '../stage.js';
 import { stageOk } from '../stage.js';
@@ -21,9 +41,33 @@ export function createAggregateStage(): Stage {
   return {
     name: 'aggregate',
     run: async (context) => {
+      const resolved = new Map<string, DerivedCriterionResult>(
+        context.run.criteria.map((criterion) => [criterion.criterionId, criterion]),
+      );
+
+      // Contract order, because that is the order a human reviewed and the order a report
+      // should read in. A criterion some probe resolved keeps its result; one nothing
+      // reached derives from zero attempts, which is `skipped`.
+      const complete = context.run.contractCriteria.map(
+        (criterion) => resolved.get(criterion.criterionId) ?? deriveCriterionResult(criterion, []),
+      );
+
+      // A result for a criterion the contract does not declare is kept rather than
+      // dropped. It should not happen — and silently discarding it would hide the bug
+      // that produced it, while keeping it makes that bug visible in the report.
+      const declared = new Set(
+        context.run.contractCriteria.map((criterion) => criterion.criterionId),
+      );
+      const undeclared = context.run.criteria.filter(
+        (criterion) => !declared.has(criterion.criterionId),
+      );
+
+      context.run.criteria = [...complete, ...undeclared];
+
       const outcome = aggregate(context.run.gates, context.run.criteria);
       // The only write to `outcome` anywhere in the pipeline (AD-6).
       context.run.outcome = outcome;
+
       return stageOk(
         outcome.verdict === undefined
           ? `infra error: ${outcome.infraError}`

@@ -307,6 +307,78 @@ describe('a full gates-only run through the real stages', () => {
     ]);
   });
 
+  it('records every criterion as skipped on the GATE-FAILED path too (ADR-003)', async () => {
+    // The case my first version got wrong, and the one ADR-003 is actually about. A gate
+    // failure jumps the pipeline straight to aggregate, so `probes` is skipped by design
+    // — which meant the criterion set was materialised only on the path where it did not
+    // matter, and a gate-failed report listed no criteria at all. Asserting the happy
+    // path alone is what hid it.
+    const stages = createStages({ assertVerifiableContract: () => frozenContract() });
+    stages[STAGE_NAMES.indexOf('gates')] = {
+      name: 'gates',
+      run: async (context) => {
+        context.run.gates.push({ gateId: 'lint', status: 'fail', durationMs: 12 });
+        context.run.gates.push({ gateId: 'build', status: 'skipped' });
+        return { status: 'product-negative', detail: "gate 'lint' failed" };
+      },
+    };
+
+    const result = await runPipeline({
+      runId: 'run-20260831T200000Z-a3f9',
+      epic: 'epic-3',
+      baseSha: 'b'.repeat(40),
+      headSha: 'c'.repeat(40),
+      environment: ENVIRONMENT,
+      clock: new FixedClock('2026-08-31T20:00:00.000Z'),
+      stages,
+    });
+
+    expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+    expect(statusOf(result, 'probes')).toBe('skipped');
+    // Every criterion the contract declares is present and skipped — not an empty array.
+    expect(result.criteria.map((criterion) => criterion.criterionId)).toEqual([
+      'E3-01',
+      'E3-02',
+    ]);
+    expect(result.criteria.every((criterion) => criterion.status === 'skipped')).toBe(true);
+    expect(result.criteria[0]?.statement).toBe('the health endpoint answers 200');
+  });
+
+  it('keeps criteria in contract order and never drops an undeclared result', async () => {
+    const stages = createStages({ assertVerifiableContract: () => frozenContract() });
+    stages[STAGE_NAMES.indexOf('probes')] = {
+      name: 'probes',
+      run: async (context) => {
+        // Resolved out of contract order, plus one the contract does not declare — which
+        // should be kept rather than silently dropped, so the bug that produced it shows
+        // up in the report instead of vanishing.
+        context.run.criteria = [
+          { criterionId: 'E3-02', status: 'pass', statement: 'second', severity: 'normal' },
+          { criterionId: 'E3-99', status: 'pass', statement: 'stray', severity: 'normal' },
+        ];
+        return { status: 'ok' };
+      },
+    };
+
+    const result = await runPipeline({
+      runId: 'run-20260831T200000Z-a3f9',
+      epic: 'epic-3',
+      baseSha: 'b'.repeat(40),
+      headSha: 'c'.repeat(40),
+      environment: ENVIRONMENT,
+      clock: new FixedClock('2026-08-31T20:00:00.000Z'),
+      stages,
+    });
+
+    expect(result.criteria.map((criterion) => criterion.criterionId)).toEqual([
+      'E3-01',
+      'E3-02',
+      'E3-99',
+    ]);
+    expect(result.criteria[0]?.status).toBe('skipped');
+    expect(result.criteria[1]?.status).toBe('pass');
+  });
+
   it('produces an empty providerUsage — verify is AI-free (FR-18, Q66)', async () => {
     const { result } = await verify(() => frozenContract());
 

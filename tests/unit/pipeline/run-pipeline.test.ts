@@ -418,6 +418,53 @@ describe('runPipeline — onComplete, the post-teardown write', () => {
     expect(seen[0]?.finishedAt).toBe(result.finishedAt);
   });
 
+  it('stamps one finishedAt, even when it has to rebuild the result', async () => {
+    // The result is built twice when onComplete fails. A clock read inside the builder
+    // would give the retry a later instant than the document already handed to the
+    // persister, so the stored run and the returned run would disagree about when the
+    // run ended. An advancing clock is what makes this observable at all.
+    const ran: StageName[] = [];
+    const clock = new FixedClock(
+      '2026-08-31T20:00:00.000Z',
+      '2026-08-31T20:00:01.000Z',
+      '2026-08-31T20:00:02.000Z',
+      '2026-08-31T20:00:03.000Z',
+      '2026-08-31T20:00:04.000Z',
+      '2026-08-31T20:00:05.000Z',
+      '2026-08-31T20:00:06.000Z',
+      '2026-08-31T20:00:07.000Z',
+      '2026-08-31T20:00:08.000Z',
+      '2026-08-31T20:00:09.000Z',
+      '2026-08-31T20:00:10.000Z',
+      '2026-08-31T20:00:11.000Z',
+      '2026-08-31T20:00:12.000Z',
+      '2026-08-31T20:00:13.000Z',
+      '2026-08-31T20:00:14.000Z',
+      '2026-08-31T20:00:15.000Z',
+      '2026-08-31T20:00:16.000Z',
+      '2026-08-31T20:00:17.000Z',
+      '2026-08-31T20:00:18.000Z',
+      '2026-08-31T20:00:19.000Z',
+      '2026-08-31T20:00:20.000Z',
+      '2026-08-31T20:00:21.000Z',
+      '2026-08-31T20:00:22.000Z',
+      '2026-08-31T20:00:23.000Z',
+      '2026-08-31T20:00:24.000Z',
+      '2026-08-31T20:00:25.000Z',
+    );
+    const seen: RunResult[] = [];
+
+    const result = await run(stagesWith(ran, { aggregate: passingAggregate(ran) }), {
+      clock,
+      onComplete: async (finished) => {
+        seen.push(finished);
+        throw new InfraError('disk full');
+      },
+    });
+
+    expect(seen[0]?.finishedAt).toBe(result.finishedAt);
+  });
+
   it('records its own failure on the persist entry without rewriting the outcome', async () => {
     const ran: StageName[] = [];
 

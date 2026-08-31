@@ -284,13 +284,19 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     );
   }
 
+  // Read ONCE, before the result is built. `build()` runs a second time if `onComplete`
+  // fails, and a clock read inside it would stamp the retry with a different instant —
+  // so the document already handed to the persister and the one returned to the caller
+  // would disagree about when the run ended. A run has one finishing time.
+  const finishedAt = clock.now().toISOString();
+
   const build = (): RunResult => ({
     runId: input.runId,
     epic: accumulator.epic,
     baseSha: accumulator.baseSha,
     headSha: accumulator.headSha,
     startedAt: startedAt.toISOString(),
-    finishedAt: clock.now().toISOString(),
+    finishedAt,
     outcome,
     // Emitted in STAGE_NAMES order regardless of the order stages actually finished, so
     // the timeline always reads as the pipeline is defined.
