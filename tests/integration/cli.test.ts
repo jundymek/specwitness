@@ -115,11 +115,13 @@ describe('usage errors exit 64 (AC1)', () => {
   });
 });
 
-// Story 1.6 removed 'report' from these lists: it is implemented now and has
-// its own coverage in tests/integration/report.test.ts. 1.4 and 1.5 remove
-// 'init' and 'doctor' the same way, and the block goes with the last of them.
+// Stories 1.6 and 1.5 removed 'report' and 'doctor' from these lists: both are
+// implemented now and covered by tests/integration/report.test.ts and
+// tests/integration/doctor.test.ts. Story 1.4 removes 'init' the same way, and
+// takes the whole block with it — nothing is left to assert once every command
+// is real.
 describe('stub commands exit 3 (AC2)', () => {
-  it.each([['init'], ['doctor']])(
+  it.each([['init']])(
     '%s reports not-implemented on stderr and exits 3',
     async (command) => {
       const { exitCode, stdout, stderr } = await runCli([command]);
@@ -131,7 +133,7 @@ describe('stub commands exit 3 (AC2)', () => {
     },
   );
 
-  it.each([['init'], ['doctor']])(
+  it.each([['init']])(
     '%s never exits 0, 1 or 2 (fail closed)',
     async (command) => {
       const { exitCode } = await runCli([command]);
