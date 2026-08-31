@@ -63,7 +63,7 @@ development_status:
   3-5-runresult-persistence-specwitness-report: ready-for-dev
   3-6-terminal-json-renderers: ready-for-dev
   3-7-end-to-end-gates-only-verify: ready-for-dev
-  3-8-provider-provenance-wiring: ready-for-dev
+  3-8-provider-provenance-wiring: done
   epic-3-retrospective: optional
 
   epic-4: backlog
