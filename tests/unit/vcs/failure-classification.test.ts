@@ -217,6 +217,64 @@ describe('an operational git failure is not "this is not a repository"', () => {
   });
 });
 
+describe('the repository re-probe must not invent a diagnosis either', () => {
+  it('reports git-unavailable when the re-probe itself cannot run', async () => {
+    const { root } = await repoWithRoot('fail-reprobe');
+
+    // `rev-parse --verify <ref>` returns non-zero (no such ref), and the
+    // follow-up `--is-inside-work-tree` probe then times out. Reporting
+    // `not-a-repo` would be a confident claim built on a question that was
+    // never answered. This one was introduced BY the fix for the previous
+    // finding — `kind !== 'ok'` lumped `unavailable` in with `said-no` — which
+    // is why only `said-no` may produce a repository verdict.
+    let seen = 0;
+    const flaky: ProcessRunner = {
+      async run(options: ProcessRunOptions): Promise<ProcessResult> {
+        const result = await real.run(options);
+        if (options.args.includes('--is-inside-work-tree')) {
+          seen += 1;
+          return { ...result, outcome: 'timed-out', exitCode: null, stderr: 'simulated hang' };
+        }
+        return result;
+      },
+    };
+
+    const outcome = await createGitVcs({ runner: flaky }).resolveRef(root, 'head', 'no-such-ref');
+
+    expect(seen).toBeGreaterThan(0);
+    expect(outcome.outcome).toBe('git-unavailable');
+  });
+});
+
+describe('worktree paths containing a newline', () => {
+  it('parses and removes a worktree whose path has a newline in it', async () => {
+    const { repo, root } = await repoWithRoot('fail-newline-path');
+
+    // A newline is a legal POSIX filename character, and `git worktree list
+    // --porcelain` writes it verbatim — so a line-based parser truncates the
+    // path and reads the remainder as another attribute. In THIS function that
+    // is the worst available outcome: `mainWorktreeRoot` comes from the first
+    // record, so a wrong parse means verifying a tree nobody asked about, and
+    // registration checks silently stop finding the worktree.
+    const weird = join(repo.scratch, 'a\nb');
+    await git(repo.path, 'worktree', 'add', '--quiet', '--detach', weird, repo.headSha);
+
+    const entries = await createGitVcs({ runner: real }).listWorktrees(root);
+    const paths = entries.map((entry) => entry.path);
+
+    // The main worktree must still be first and intact.
+    expect(paths[0]).toBe(repo.path);
+    expect(paths.some((path) => path.includes('a\nb'))).toBe(true);
+    // And nothing may have been split into a bogus extra record.
+    expect(entries).toHaveLength(2);
+
+    // The registration check has to find it too, or `clean` could never reap it.
+    await createGitVcs({ runner: real }).removeWorktreeAt(root, weird);
+    const after = await createGitVcs({ runner: real }).listWorktrees(root);
+    expect(after).toHaveLength(1);
+  });
+});
+
 describe('the ambiguity check must never degrade into "resolved"', () => {
   it('refuses when the candidate enumeration itself could not run', async () => {
     const { root } = await repoWithRoot('fail-candidates');

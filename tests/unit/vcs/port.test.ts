@@ -172,7 +172,7 @@ describe('the declared minimum git version', () => {
     // compatibility, so the floor moved instead.
     //
     // If a later change adds a newer flag, this is the line that moves with it.
-    expect(compareVersions(MIN_GIT_VERSION, '2.24.0')).toBeGreaterThanOrEqual(0);
+    expect(compareVersions(MIN_GIT_VERSION, '2.36.0')).toBeGreaterThanOrEqual(0);
     expect(revParseCommitArgs('main')).toContain('--end-of-options');
   });
 

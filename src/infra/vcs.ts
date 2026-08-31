@@ -85,27 +85,33 @@ export const GIT_WORKTREE_TIMEOUT_MS = 300_000;
 /**
  * The oldest git whose behaviour this module actually relies on.
  *
- * Chosen from the features rather than from a round number, and it moved once
- * during development, which is worth recording:
+ * Chosen from the features rather than from a round number, and it moved twice
+ * during development — both times because a CORRECTNESS guard outranked the
+ * previous floor, which is the order those two things belong in:
  *
- *   - `git worktree list --porcelain`   2.7
- *   - `git worktree remove --force`     2.17
- *   - **`--end-of-options`**            **2.24**  <- the binding constraint
+ *   - `git worktree list --porcelain`     2.7
+ *   - `git worktree remove --force`       2.17
+ *   - `--end-of-options`                  2.24
+ *   - **`worktree list --porcelain -z`**  **2.36**  <- the binding constraint
  *
- * The first draft said 2.17, counting only the worktree features. But
- * `revParseCommitArgs` passes `--end-of-options`, and that is an
- * argument-injection guard rather than a convenience: `--head` is operator
- * input, git refnames may begin with a dash, and without the separator a ref
- * named `--output=…` would be parsed as an OPTION to `rev-parse` instead of as
- * a revision. Dropping the guard to reach an older git would trade a security
- * property for compatibility with releases from before 2019, so the floor
- * moves instead.
+ * The first draft said 2.17, counting only the worktree features. Then
+ * `revParseCommitArgs`'s `--end-of-options` (2.24) turned out to outrank it —
+ * an argument-injection guard, since `--head` is operator input and a git
+ * refname may begin with a dash, so without the separator a ref named
+ * `--output=…` parses as an OPTION to `rev-parse` rather than a revision.
+ * Then `-z` (2.36) outranked that: without it a worktree path containing a
+ * newline is split across lines and mis-parsed, and since `mainWorktreeRoot`
+ * comes from the first record, a mis-parse means verifying the wrong tree.
+ *
+ * Both times the alternative was to drop the guard and keep compatibility with
+ * a git from 2019 or 2022. Neither trade is worth making for a tool whose only
+ * job is to be right about what it verified.
  *
  * PROBED at runtime, never assumed — "a wrong answer from a git too old to
  * support the flag" is precisely the failure this story cannot have. Verified
  * present on the development machine (2.50.1, 2026-08-31).
  */
-export const MIN_GIT_VERSION = '2.24.0';
+export const MIN_GIT_VERSION = '2.36.0';
 
 /** Prefix of the `mkdtemp` container each worktree is created inside. */
 const CONTAINER_PREFIX = 'specwitness-worktree-';
@@ -155,9 +161,23 @@ export function worktreeRemoveArgs(worktreePath: string): readonly string[] {
   return ['worktree', 'remove', '--force', '--', worktreePath];
 }
 
-/** `git worktree list --porcelain` — main worktree first, by git's contract. */
+/**
+ * `git worktree list --porcelain -z` — main worktree first, by git's contract.
+ *
+ * `-z` is not optional politeness. Without it the porcelain format separates
+ * attributes with newlines and writes paths VERBATIM, so a worktree whose path
+ * contains a newline — legal on every POSIX filesystem — is split across two
+ * lines, and a line-based parser reads the tail as a separate attribute.
+ *
+ * That is the worst outcome available in this module rather than a curiosity:
+ * `RepoRoot.mainWorktreeRoot` is taken from the FIRST record, so a corrupted
+ * parse means verifying a tree nobody asked about, and the registration checks
+ * that guard removal silently stop finding the worktree they are meant to reap.
+ * With `-z` every field is NUL-terminated and a record ends at an empty field,
+ * so no filename character can be mistaken for a delimiter.
+ */
 export function worktreeListArgs(): readonly string[] {
-  return ['worktree', 'list', '--porcelain'];
+  return ['worktree', 'list', '--porcelain', '-z'];
 }
 
 // ---------------------------------------------------------------------------
@@ -165,13 +185,17 @@ export function worktreeListArgs(): readonly string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Parses `git worktree list --porcelain`.
+ * Parses `git worktree list --porcelain -z`.
  *
- * The format is stanzas separated by blank lines, each beginning with
- * `worktree <path>`, followed by some of `HEAD <sha>`, `branch <ref>`,
- * `detached`, `bare`, `prunable <reason>`. Parsed by line prefix rather than by
- * position, because git adds attribute lines over time and a positional parser
- * would silently mis-read a newer git's output.
+ * The format is records of attributes, each attribute NUL-terminated and each
+ * record ended by an empty attribute. A record begins with `worktree <path>`
+ * and may carry `HEAD <sha>`, `branch <ref>`, `detached`, `bare`,
+ * `prunable <reason>`.
+ *
+ * Split on NUL, never on newline: a path may legally CONTAIN a newline, and the
+ * non-`-z` format writes it verbatim. Parsed by attribute PREFIX rather than by
+ * position, because git adds attributes over time and a positional parser would
+ * silently mis-read a newer git's output.
  */
 export function parseWorktreeList(stdout: string): WorktreeEntry[] {
   const entries: WorktreeEntry[] = [];
@@ -185,8 +209,7 @@ export function parseWorktreeList(stdout: string): WorktreeEntry[] {
     }
   };
 
-  for (const rawLine of stdout.split('\n')) {
-    const line = rawLine.replace(/\r$/, '');
+  for (const line of stdout.split('\0')) {
     if (line === '') {
       flush();
       continue;
@@ -723,7 +746,15 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // code path can produce is a sign the classification is wrong, not that
     // the arm is spare.
     const stillARepository = await query(root.worktreeRoot, ['rev-parse', '--is-inside-work-tree']);
-    if (stillARepository.kind !== 'ok') {
+    if (stillARepository.kind === 'unavailable') {
+      // The re-probe could not run, so it answered nothing. Claiming
+      // `not-a-repo` here would be a confident diagnosis built on a question
+      // that was never asked — the same mistake one layer up. (This arm was
+      // itself a defect once: an earlier version tested `kind !== 'ok'`, which
+      // lumped `unavailable` in with `said-no`.)
+      return { outcome: 'git-unavailable', role, ref, detail: stillARepository.detail };
+    }
+    if (stillARepository.kind === 'said-no') {
       return {
         outcome: 'not-a-repo',
         role,
