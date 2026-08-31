@@ -1,10 +1,10 @@
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, rmdir, writeFile } from 'node:fs/promises';
-import { join, relative, sep } from 'node:path';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, cp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { execa } from 'execa';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const SRC = join(REPO_ROOT, 'src');
@@ -25,121 +25,221 @@ const SRC = join(REPO_ROOT, 'src');
  * upgrade that silently drops group matching fails here instead of blocking a
  * story author with a rule that looks correct.
  *
- * Cleanup discipline: these tests write scratch modules under `src/`, which is
- * also where stories 1.2/1.3/1.6 put real, tracked source. So we remove
- * exactly the files we created and only those directories we created
- * ourselves, non-recursively. Never `rm -r` a `src/` subdirectory: once
- * `src/config`, `src/infra` or `src/schemas` hold real modules, that would
- * delete another agent's work on every `pnpm test`.
+ * Hermetic by construction (story 2.8). Until 2.8 these tests wrote scratch
+ * modules with FIXED names into the real `src/` and cruised the whole tree.
+ * The harness runs `pnpm test` from Codex on every push, inside the agent's
+ * own worktree, concurrently with whatever the agent is running — so two
+ * vitest processes in one worktree is the normal condition, and process B
+ * routinely saw process A's deliberately-violating probe. A red verdict then
+ * said nothing about the rules, only about who else was running tests.
+ *
+ * Every probe now lives in a per-test copy of the tracked source under the OS
+ * temp directory, and `depcruise` runs with its `cwd` set there. Nothing is
+ * ever written under the real `src/`: concurrent processes have disjoint
+ * directories, and a `SIGKILL` — which runs no `afterEach` and no signal
+ * handler — can leave nothing behind in the worktree, because nothing in the
+ * worktree was ever touched.
+ *
+ * What the copy must contain, and why each part matters (getting this wrong
+ * makes every case pass for the wrong reason, which is worse than failing):
+ *
+ *  - the TRACKED `src/` only (`git ls-files src`), so a stray `__probe-*.ts`
+ *    from an older checkout can never enter the copy;
+ *  - `tsconfig.json`, because `tsConfig` + `tsPreCompilationDeps` are what let
+ *    the rules see type-only imports at all — the property
+ *    `domain-is-dependency-free` rests on;
+ *  - `package.json`, because without it dependency-cruiser does not classify
+ *    an import of zod or yaml as `dependencyTypes: ['npm']`, and
+ *    `schemas-core-only` then fires on the five legitimate core imports —
+ *    a clean copy reporting violations, which would make the permit cases
+ *    meaningless;
+ *  - `node_modules` as a SYMLINK (109 MB; copying it per test is not an
+ *    option, and with `package.json` present the classification is correct).
+ *
+ * The `the temp copy reproduces the real tree` describe below asserts the copy
+ * resolves correctly — a clean verdict, identical counts across two
+ * independent copies, and every tracked module actually cruised — so a future
+ * config addition this copy misses fails loudly instead of quietly weakening
+ * every case.
  */
 
-const createdFiles: string[] = [];
-/** Directories this test actually created, shallowest first. */
-const createdDirs: string[] = [];
+/** Every temp copy this file made, so `afterEach` can remove them. */
+const tempCopies: string[] = [];
 
-/** Creates missing path segments under src/, recording only the new ones. */
-async function ensureDir(dir: string): Promise<void> {
-  const rel = relative(SRC, dir);
-  if (rel === '' || rel.startsWith('..')) return;
+/** Files the copy needs beyond `src/`; see the header for why each is here. */
+const COPIED_ROOT_FILES = ['tsconfig.json', 'package.json', '.dependency-cruiser.cjs'] as const;
 
-  let current = SRC;
-  for (const segment of rel.split(sep)) {
-    current = join(current, segment);
-    if (!existsSync(current)) {
-      await mkdir(current);
-      createdDirs.push(current);
-    }
+/** The tracked source file list, read once — `git ls-files` is not free. */
+let trackedSources: string[] = [];
+
+beforeAll(async () => {
+  const { stdout } = await execa('git', ['ls-files', 'src'], { cwd: REPO_ROOT });
+  trackedSources = stdout.split('\n').filter(Boolean);
+  expect(trackedSources.length).toBeGreaterThan(0);
+});
+
+/**
+ * A fresh copy of the tracked source tree in the OS temp directory. Per test,
+ * so two cases never see each other's probes even inside one process, and two
+ * processes never share a directory at all.
+ */
+async function makeTempTree(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'specwitness-depcruise-'));
+  tempCopies.push(dir);
+
+  for (const file of trackedSources) {
+    const target = join(dir, file);
+    await mkdir(dirname(target), { recursive: true });
+    await cp(join(REPO_ROOT, file), target);
   }
+  for (const file of COPIED_ROOT_FILES) {
+    await cp(join(REPO_ROOT, file), join(dir, file));
+  }
+  await symlink(join(REPO_ROOT, 'node_modules'), join(dir, 'node_modules'));
+
+  return dir;
 }
 
-async function writeModule(relativePath: string, contents: string): Promise<void> {
-  const full = join(SRC, relativePath);
-
-  // Belt and braces. Every scratch module is named `__probe-*` so it cannot
-  // collide with a real one, but if that ever stopped being true we must fail
-  // loudly rather than overwrite — and then delete — another story's source.
-  if (existsSync(full)) {
-    throw new Error(
-      `refusing to overwrite existing module src/${relativePath}: ` +
-        'scratch modules must use the __probe- prefix and must not collide with real source',
-    );
-  }
-
-  await ensureDir(join(full, '..'));
+/** Writes a scratch module into a temp copy. Never touches the real `src/`. */
+async function writeModule(tree: string, relativePath: string, contents: string): Promise<void> {
+  const full = join(tree, 'src', relativePath);
+  await mkdir(dirname(full), { recursive: true });
   await writeFile(full, contents, 'utf8');
-  createdFiles.push(full);
 }
 
-async function depcruise(): Promise<{ exitCode: number | undefined; output: string }> {
+/**
+ * The `depcruise` binary is invoked directly rather than through `pnpm exec`.
+ * `pnpm exec` in a directory whose `node_modules` is a symlink out of the tree
+ * runs a dependency-status check and tries to `pnpm install`, which fails with
+ * ERR_PNPM_UNSAFE_MODULES_DIR. It happens to work under `pnpm test` only
+ * because vitest inherits pnpm's own environment — a test that passes because
+ * of how it was launched is exactly the kind of accident this story removes.
+ */
+const DEPCRUISE_BIN = join(REPO_ROOT, 'node_modules', '.bin', 'depcruise');
+
+async function depcruise(tree: string): Promise<{ exitCode: number | undefined; output: string }> {
   const result = await execa(
-    'pnpm',
-    ['exec', 'depcruise', 'src', '--config', '.dependency-cruiser.cjs'],
-    { cwd: REPO_ROOT, reject: false },
+    DEPCRUISE_BIN,
+    ['src', '--config', '.dependency-cruiser.cjs'],
+    { cwd: tree, reject: false },
   );
   return { exitCode: result.exitCode, output: `${result.stdout}\n${result.stderr}` };
 }
 
 afterEach(async () => {
-  for (const file of createdFiles.splice(0)) {
-    await rm(file, { force: true });
-  }
-  // Deepest first, and non-recursive: a directory that turns out to hold real
-  // source (because a later story added some) fails with ENOTEMPTY and is
-  // correctly left alone.
-  for (const dir of createdDirs.splice(0).reverse()) {
-    try {
-      await rmdir(dir);
-    } catch {
-      // Not empty, or already gone — either way, leave it.
-    }
+  for (const dir of tempCopies.splice(0)) {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
-describe('scratch-file cleanup is non-destructive', () => {
-  it('leaves a pre-existing directory and its real modules alone', async () => {
-    // Simulates story 1.3 having landed src/config/ before this suite runs.
-    const configDir = join(SRC, 'config');
-    const realModule = join(configDir, 'real-module.ts');
-    const preExisted = existsSync(configDir);
+/*
+ * On the one thing this cleanup deliberately does NOT guarantee: a `SIGKILL`
+ * mid-test leaves its temp copy behind, because no `afterEach` runs. That is
+ * the accepted trade-off, not an oversight. AC3 is about the worktree — a
+ * scratch module sitting where real source lives is what corrupts another
+ * process's cruise and what `git status` reports as a dirty tree. An abandoned
+ * directory under the OS temp dir does neither: it is invisible to git, cannot
+ * be picked up by any cruise (each copy is a fresh `mkdtemp`), and is reaped by
+ * the OS. Nothing in-process can survive a `SIGKILL`, which is precisely why
+ * the design moves the writes out of `src/` instead of trying to clean up
+ * better.
+ */
 
-    if (!preExisted) await mkdir(configDir);
-    await writeFile(realModule, 'export const real = 1;\n', 'utf8');
+describe('the temp copy reproduces the real tree', () => {
+  it('cruises the whole tracked tree, cleanly, and identically across copies', async () => {
+    // The failure this guards against is the worst one available here: a copy
+    // that resolves differently from the real tree makes every case below pass
+    // for the wrong reason. A copy missing `package.json`, for instance, stops
+    // classifying zod and yaml as `npm` and reports five violations that are
+    // not there; a copy missing `tsconfig.json` loses the type-only imports
+    // that `domain-is-dependency-free` rests on.
+    //
+    // Deliberately NOT compared against a live `pnpm depcruise` of the real
+    // `src/`. That was the first version of this test and it was wrong: the
+    // real tree is mutable, so any file another process or another story was
+    // holding there — a probe from an older checkout, a module being written
+    // right now — changed the module count and turned this red for reasons
+    // that have nothing to do with the rules. That is the exact defect story
+    // 2.8 exists to remove, reintroduced in the guard meant to protect it.
+    //
+    // Two independent copies are compared instead. Both are built from
+    // `git ls-files src`, so both are deterministic regardless of what the
+    // worktree happens to contain, and any divergence in resolution shows up
+    // as a count mismatch.
+    const [first, second] = await Promise.all([makeTempTree(), makeTempTree()]);
 
-    try {
-      // A scratch file in that same directory, created the normal way.
-      await writeModule('config/__probe-scratch.ts', 'export const scratch = 1;\n');
+    const a = await depcruise(first);
+    const b = await depcruise(second);
 
-      // Run the same cleanup the suite performs between tests.
-      for (const file of createdFiles.splice(0)) await rm(file, { force: true });
-      for (const dir of createdDirs.splice(0).reverse()) {
-        try {
-          await rmdir(dir);
-        } catch {
-          /* not empty */
-        }
-      }
+    const counts = (output: string): string | undefined =>
+      output.match(/(\d+) modules, (\d+) dependencies cruised/)?.[0];
 
-      // The scratch file is gone; the real module and its directory survive.
-      expect(existsSync(join(configDir, '__probe-scratch.ts'))).toBe(false);
-      expect(existsSync(realModule)).toBe(true);
-      expect(existsSync(configDir)).toBe(true);
-    } finally {
-      await rm(realModule, { force: true });
-      if (!preExisted) await rmdir(configDir).catch(() => {});
-    }
+    expect(a.output).toContain('no dependency violations found');
+    expect(a.exitCode).toBe(0);
+    expect(counts(a.output)).toBeDefined();
+    expect(counts(b.output)).toBe(counts(a.output));
+
+    // A cruise that silently found nothing would also report "no violations",
+    // so the tree must demonstrably be non-trivial: every tracked module is
+    // expected to be cruised.
+    const trackedModuleCount = trackedSources.filter((f) => f.endsWith('.ts')).length;
+    const modulesCruised = Number(a.output.match(/(\d+) modules/)?.[1]);
+    expect(modulesCruised).toBeGreaterThanOrEqual(trackedModuleCount);
+  });
+
+  it('sees a violating probe written into the copy', async () => {
+    // The other half: a clean baseline alone proves nothing, because an empty
+    // or unresolvable tree is also clean.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'domain/__probe-canary.ts',
+      "import { readFileSync } from 'node:fs';\nexport const r = readFileSync;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('domain-is-dependency-free');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('writes nothing under the real src/', async () => {
+    // A name unique to this process, so the assertion below is about THIS
+    // test's probe and nothing else. Asserting on `__probe-` in general — let
+    // alone on an empty `git status` — would go red because of a file some
+    // other process or story left in the worktree, which is the very disease
+    // this story cures: a verdict about who else is touching the tree rather
+    // than about the rules.
+    const unique = `__probe-elsewhere-${process.pid}-${Date.now()}`;
+    const tree = await makeTempTree();
+    await writeModule(tree, `domain/${unique}.ts`, 'export const x = 1;\n');
+    await depcruise(tree);
+
+    // The AC3 claim, stated exactly: no scratch module of ours survives where
+    // real source lives.
+    const { stdout } = await execa('git', ['status', '--porcelain', 'src/'], { cwd: REPO_ROOT });
+    expect(stdout.split('\n').filter((line) => line.includes(unique))).toEqual([]);
+
+    // And the probe exists only in the copy.
+    await expect(readFile(join(SRC, 'domain', `${unique}.ts`), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(tree, 'src', 'domain', `${unique}.ts`), 'utf8')).resolves.toContain(
+      'export const x = 1;',
+    );
   });
 });
 
 describe('AD-1 rules permit what later stories legitimately need', () => {
   it('lets an adapter import its own siblings', async () => {
     // Story 1.3's exact shape. If this fails, `$1` group-matching broke.
-    await writeModule('config/__probe-schema.ts', 'export const schema = 1;\n');
+    const tree = await makeTempTree();
+    await writeModule(tree, 'config/__probe-schema.ts', 'export const schema = 1;\n');
     await writeModule(
+      tree,
       'config/__probe-load.ts',
       "import { schema } from './__probe-schema.js';\nexport const load = schema;\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).not.toContain('adapters-core-only');
     expect(exitCode).toBe(0);
@@ -148,7 +248,9 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
   it('lets src/infra use Node built-ins', async () => {
     // Story 1.6's exact shape: RunStore is the sole writer under
     // .specwitness/runs/ (AD-8) and Ids needs randomness.
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'infra/__probe-run-store.ts',
       "import { randomBytes } from 'node:crypto';\n" +
         "import { mkdirSync } from 'node:fs';\n" +
@@ -157,19 +259,21 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
         'export const mk = (d: string) => mkdirSync(join(d, "runs"), { recursive: true });\n',
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).not.toContain('no-side-effect-builtins-in-core');
     expect(exitCode).toBe(0);
   });
 
   it('lets src/schemas import zod', async () => {
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'schemas/__probe-manifest.ts',
       "import { z } from 'zod';\nexport const s = z.string();\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).not.toContain('schemas-npm-allowlist');
     expect(exitCode).toBe(0);
@@ -179,8 +283,10 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
     // Story 2.1's exact shape: ingestion is application-layer, it reads
     // planning artifacts off disk, and it composes the domain model with its
     // zod mirror. If this fails, the ingest reader cannot be written at all.
-    await writeModule('ingest/__probe-source.ts', 'export const source = 1;\n');
+    const tree = await makeTempTree();
+    await writeModule(tree, 'ingest/__probe-source.ts', 'export const source = 1;\n');
     await writeModule(
+      tree,
       'ingest/__probe-reader.ts',
       "import { readFileSync } from 'node:fs';\n" +
         "import { join } from 'node:path';\n" +
@@ -192,7 +298,7 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
         'export const fail = () => new IngestError("x");\n',
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).not.toContain('ingest-core-only');
     expect(exitCode).toBe(0);
@@ -208,10 +314,11 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
     // The real `src/schemas/canonical.ts` is the proof that the allowance
     // works — it imports `node:crypto` today and the baseline cruise below is
     // clean. The narrowing half is the next test.
-    const canonical = await readFile(join(SRC, 'schemas', 'canonical.ts'), 'utf8');
+    const tree = await makeTempTree();
+    const canonical = await readFile(join(tree, 'src', 'schemas', 'canonical.ts'), 'utf8');
     expect(canonical).toContain("from 'node:crypto'");
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).not.toContain('schemas-core-only');
     expect(exitCode).toBe(0);
@@ -221,12 +328,14 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
     // Story 2.2 again: AD-5 makes contracts human-readable YAML, and
     // `schemas/contract.ts` owns `parseContract`/`serializeContract`. A pure
     // text codec is not "reaching out"; the forbidding half is pinned below.
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'schemas/__probe-yaml.ts',
       "import { stringify } from 'yaml';\nexport const s = stringify;\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).not.toContain('schemas-npm-allowlist');
     expect(exitCode).toBe(0);
@@ -235,25 +344,29 @@ describe('AD-1 rules permit what later stories legitimately need', () => {
 
 describe('AD-1 rules still forbid what they are meant to forbid', () => {
   it('blocks one adapter importing another', async () => {
-    await writeModule('infra/__probe-runner.ts', 'export const runner = 1;\n');
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/__probe-runner.ts', 'export const runner = 1;\n');
     await writeModule(
+      tree,
       'config/__probe-cross.ts',
       "import { runner } from '../infra/__probe-runner.js';\nexport const bad = runner;\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).toContain('adapters-core-only');
     expect(exitCode).not.toBe(0);
   });
 
   it('blocks anything importing the cli edge', async () => {
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'config/__probe-to-edge.ts',
       "import { EXIT } from '../cli/exit.js';\nexport const bad = EXIT;\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).toContain('nothing-imports-cli');
     expect(exitCode).not.toBe(0);
@@ -266,12 +379,14 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     // runner inside `src/schemas/**` is precisely the "schemas do not reach
     // out" violation this rule exists to catch, so the guarantee is unchanged
     // in substance — only the example moved.
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'schemas/__probe-bad.ts',
       "import { execa } from 'execa';\nexport const e = execa;\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).toContain('schemas-npm-allowlist');
     expect(exitCode).not.toBe(0);
@@ -283,12 +398,14 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     // guardrail, and Epic 1's retrospective names this lesson explicitly.
     // `src/config` rather than `src/cli`, so the failure can only be
     // `ingest-core-only` and not `nothing-imports-cli`.
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'ingest/__probe-leak.ts',
       "import { loadConfig } from '../config/load.js';\nexport const bad = loadConfig;\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).toContain('ingest-core-only');
     expect(exitCode).not.toBe(0);
@@ -299,12 +416,14 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     // allowance could widen to "src/schemas may use built-ins" and nothing
     // would fail — schemas would be free to read the filesystem, and the whole
     // point of a pure core is that it cannot.
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'schemas/__probe-fs.ts',
       "import { readFileSync } from 'node:fs';\nexport const r = readFileSync;\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).toContain('schemas-core-only');
     expect(exitCode).not.toBe(0);
@@ -316,27 +435,29 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     // future schema module access to crypto — while its own comment claimed to
     // be the narrowest possible exception. AD-5 wants ONE fingerprint
     // implementation, and a rule that permits a second one is not enforcing it.
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'schemas/__probe-second-hash.ts',
       "import { createHash } from 'node:crypto';\n" +
         'export const h = (s: string) => createHash("sha256").update(s).digest("hex");\n',
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).toContain('schemas-core-only');
     expect(exitCode).not.toBe(0);
   });
 
   it('blocks a side-effectful built-in inside src/domain', async () => {
-    // src/domain already holds shipped code, so this file is removed by name
-    // and the directory is never touched.
+    const tree = await makeTempTree();
     await writeModule(
+      tree,
       'domain/__probe-scratch.ts',
       "import { readFileSync } from 'node:fs';\nexport const r = readFileSync;\n",
     );
 
-    const { exitCode, output } = await depcruise();
+    const { exitCode, output } = await depcruise(tree);
 
     expect(output).toContain('domain-is-dependency-free');
     expect(exitCode).not.toBe(0);
