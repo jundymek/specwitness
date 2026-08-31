@@ -57,30 +57,35 @@ module.exports = {
     {
       name: 'schemas-core-only',
       comment:
-        'AD-1: src/schemas/** may import src/domain/**, its own siblings, zod, and ' +
-        '`node:crypto`. Nothing else — schemas validate, they do not reach out.',
+        'AD-1: src/schemas/** may import src/domain/**, its own siblings and zod. ' +
+        'Nothing else — schemas validate, they do not reach out. `node:crypto` is ' +
+        'permitted in exactly one file; see `schemas-canonical-is-the-only-hasher`.',
       severity: 'error',
-      from: { path: '^src/schemas/' },
+      // `canonical.ts` is excluded here and constrained by its own rule below.
+      // dependency-cruiser's `forbidden` rules are OR-ed, so an exception cannot
+      // be added by a later rule — the file has to be lifted out of this one.
+      from: { path: '^src/schemas/', pathNot: '^src/schemas/canonical\\.ts$' },
       to: {
-        pathNot: [
-          '^src/(domain|schemas)/',
-          // AD-5 names `schemas/canonical.ts` as THE single implementation of
-          // the contract fingerprint, and a fingerprint needs SHA-256. This is
-          // the narrowest possible carve-out: `crypto` and nothing else.
-          //
-          // It has to be an exception on THIS rule rather than a new rule of
-          // its own, because dependency-cruiser's `forbidden` rules are OR-ed —
-          // a later rule cannot un-forbid what an earlier one forbids. Verified
-          // empirically: a probe module importing `node:crypto` from
-          // `src/schemas/` fails as `schemas-core-only`, not as
-          // `no-side-effect-builtins-in-core` (whose SIDE_EFFECT_BUILTINS list
-          // has never contained `crypto`, hashing being pure computation).
-          //
-          // `node:fs` and every other builtin stay blocked here, and
-          // `tests/unit/dependency-rules.test.ts` asserts both halves so this
-          // carve-out cannot quietly widen.
-          '^(node:)?crypto$',
-        ],
+        pathNot: '^src/(domain|schemas)/',
+        dependencyTypesNot: ['npm'],
+      },
+    },
+    {
+      name: 'schemas-canonical-is-the-only-hasher',
+      comment:
+        'AD-5: `schemas/canonical.ts` is THE single implementation of the contract ' +
+        'fingerprint, and a fingerprint needs SHA-256. It may import the core, its ' +
+        'siblings, zod and `node:crypto` — nothing else. Scoping the allowance to ' +
+        'this one path rather than to `src/schemas/**` is the point: a second module ' +
+        'hashing contract content would be a second answer to "has this contract ' +
+        'changed", and that is the one question the product cannot have two answers ' +
+        'to. Every other schema module importing crypto still fails as ' +
+        '`schemas-core-only`, and `tests/unit/dependency-rules.test.ts` pins both ' +
+        'directions so this cannot quietly widen back to the whole directory.',
+      severity: 'error',
+      from: { path: '^src/schemas/canonical\\.ts$' },
+      to: {
+        pathNot: ['^src/(domain|schemas)/', '^(node:)?crypto$'],
         dependencyTypesNot: ['npm'],
       },
     },
