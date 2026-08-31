@@ -4,7 +4,7 @@ SpecWitness is an independent verification gate for agentic software development
 
 ## Current phase
 
-**Epic 1 merged 2026-08-31 (`b5377b0`); Epic 2 stories authored, cohort not yet launched.** Production code exists under `src/` (CLI skeleton + exit-code table, domain core, config model, `init`, `doctor`, run storage) with its tests under `tests/`. Implementation is executed by a multi-agent cohort (one agent per story, ~7 parallel, plus a supervisor) reading the artifacts below; per-epic retrospectives live in `docs/findings/`. Epic 2 story specs are in `docs/implementation-artifacts/epic-2-verification-contracts/`.
+**Epic 1 merged 2026-08-31 (`b5377b0`); Epic 2 merged 2026-08-31 (`fbdd359`, 8 stories including follow-up 2.8); Epic 3 stories authored, cohort not yet launched.** Production code under `src/` now covers the CLI edge (skeleton, single exit-code table, `init`, `doctor`, `contract`, `report` stub), the domain core, the config model, BMAD ingestion, contract authoring (generate/freeze/amend/integrity) and the provider adapters — with its tests under `tests/`. Implementation is executed by a multi-agent cohort (one agent per story, ~7 parallel, plus a supervisor) reading the artifacts below. Per-epic retrospectives and the harness-defect record live in `docs/findings/`. Epic 3 story specs are in `docs/implementation-artifacts/epic-3-isolated-deterministic-verification/`.
 
 ## Authoritative documents (read in this order)
 

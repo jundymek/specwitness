@@ -97,7 +97,7 @@ Dependencies:
 Epic 2 (frozen contracts gate verify; integrity check at runtime).
 
 Can run in parallel:
-Wave A: 3.1 (infra/git) + 3.2 (infra/process-runner, run-store manifest side) + 3.3 (src/pipeline over faked stages; also lands RunResult + SurfaceExecutor/ProbeAttempt domain types) · Wave B: 3.4 (gates stage) + 3.5 (persistence + report cmd) + 3.6 (src/report).
+Wave A: 3.1 (infra/git) + 3.2 (infra/process-runner **lifecycle extension** — the file already exists from story 2.3, which created it minimally; 3.2 owns process groups, teardown and `clean` — plus the run-store manifest side) + 3.3 (src/pipeline over faked stages; also lands RunResult + SurfaceExecutor/ProbeAttempt domain types) · Wave B: 3.4 (gates stage) + 3.5 (persistence + report cmd) + 3.6 (src/report).
 
 Must run sequentially:
 Waves A → B → 3.7 (integration story).
