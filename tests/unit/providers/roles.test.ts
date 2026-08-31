@@ -108,12 +108,28 @@ describe('createProvider: the adapter registry', () => {
     expect(() => createProvider(descriptor, deps())).toThrow(/gpt-cli/);
   });
 
+  it('builds the claude adapter now that story 2.4 has landed', () => {
+    const provider = createProvider(
+      { name: 'claude', adapter: 'claude-code-cli', mode: 'subscription' },
+      deps(),
+    );
+
+    // Construction alone spawns nothing: `deps()` supplies the forbidden runner,
+    // so probing at build time would fail this test rather than pass it.
+    expect(provider).toMatchObject({ id: 'claude', adapter: 'claude-code-cli' });
+  });
+
   it('rejects an adapter that is declared but not yet implemented, clearly', () => {
-    // `claude-code-cli` and `codex-cli` are valid config values (the enum has
-    // carried them since story 1.3) but have no implementation until stories
-    // 2.4 and 2.5 land. Failing loudly beats a stub that pretends to work.
+    // `codex-cli` is a valid config value (the enum has carried it since story
+    // 1.3) but has no implementation until story 2.5 lands. Failing loudly beats
+    // a stub that pretends to work.
+    //
+    // Story 2.5: when your adapter lands, this test has no subject left — every
+    // declared adapter will be implemented — so DELETE it rather than hunting
+    // for another victim. The unknown-adapter test above already covers the
+    // `default:` branch durably, and permanently.
     expect(() =>
-      createProvider({ name: 'c', adapter: 'claude-code-cli', mode: 'subscription' }, deps()),
+      createProvider({ name: 'c', adapter: 'codex-cli', mode: 'chatgpt' }, deps()),
     ).toThrow(ProviderError);
   });
 });

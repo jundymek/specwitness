@@ -30,12 +30,13 @@
 import type { AgentProvider, ProviderDeps, ProviderDescriptor } from '../domain/agent-provider.js';
 import { ProviderError } from '../domain/errors.js';
 
+import { createClaudeCodeCliProvider } from './claude-code-cli.js';
 import { createFakeProvider } from './fake.js';
 
 export type { ProviderDeps } from '../domain/agent-provider.js';
 
 /** Adapter kinds this build can actually construct. Grows with 2.4 and 2.5. */
-const IMPLEMENTED_ADAPTERS = ['fake'] as const;
+const IMPLEMENTED_ADAPTERS = ['fake', 'claude-code-cli'] as const;
 
 /**
  * Build the adapter a descriptor names.
@@ -52,8 +53,11 @@ export function createProvider(descriptor: ProviderDescriptor, deps: ProviderDep
     case 'fake':
       return createFakeProvider(descriptor, deps);
 
-    // ↓ Stories 2.4 (claude-code-cli) and 2.5 (codex-cli) each add ONE case
-    //   here, immediately above `default:`. Nothing else in this file moves.
+    case 'claude-code-cli':
+      return createClaudeCodeCliProvider(descriptor, deps);
+
+    // ↓ Story 2.5 (codex-cli) adds ONE case here, immediately above `default:`.
+    //   Nothing else in this file moves.
 
     default:
       throw new ProviderError(
