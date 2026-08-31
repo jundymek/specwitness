@@ -316,6 +316,24 @@ describe('createClaudeCodeCliProvider — the invocation', () => {
     expect(calls[calls.length - 1]?.cwd).toBe('/tmp/project');
   });
 
+  it('probes in the SAME cwd it generates in', async () => {
+    // Otherwise the probe answers a question about a different directory than
+    // the one the work runs in: story 2.3 classifies a bad working directory as
+    // `spawn-failed`, so a provider could be approved from the ambient cwd and
+    // then fail in the configured one — or rejected for the mirror reason.
+    const { runner, calls } = runnerReturning(VERSION_OK, ok(CAPABLE_ENVELOPE), ok(CAPABLE_ENVELOPE));
+    const provider = createClaudeCodeCliProvider(descriptor(), deps(runner), {
+      cwd: '/tmp/project',
+    });
+
+    await provider.generate({ role: 'contract-author', prompt: 'x' });
+
+    expect(calls.length).toBeGreaterThan(1);
+    for (const call of calls) {
+      expect(call.cwd).toBe('/tmp/project');
+    }
+  });
+
   it('appends contextFiles to the prompt rather than inventing a flag', async () => {
     const { runner, calls } = runnerReturning(VERSION_OK, ok(CAPABLE_ENVELOPE), ok(CAPABLE_ENVELOPE));
     const provider = createClaudeCodeCliProvider(descriptor(), deps(runner));

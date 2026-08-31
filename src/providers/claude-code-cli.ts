@@ -135,12 +135,12 @@ export interface ClaudeAdapterOptions {
 }
 
 /**
- * Capability results are cached PER RUNNER rather than in a module-level
+ * Capability results are cached per RUNNER and cwd rather than in a module-level
  * variable. One runner is built per process, so this is the per-session cache
  * AD-4 and Q56/Q57 ask for — while a test that builds its own runner gets a
  * fresh probe automatically, with no reset hook to forget to call.
  */
-const capabilityCache = new WeakMap<ProcessRunner, Promise<ClaudeCapability>>();
+const capabilityCache = new WeakMap<ProcessRunner, Map<string, Promise<ClaudeCapability>>>();
 
 /** The child environment: inherited, minus the billing variables. Never mutates the parent. */
 function childEnvironment(billingEnvVars: readonly string[]): {
@@ -154,11 +154,12 @@ async function probeOnce(
   runner: ProcessRunner,
   args: readonly string[],
   billingEnvVars: readonly string[],
+  cwd: string,
 ): Promise<ProcessResult> {
   return await runner.run({
     binary: BINARY,
     args,
-    cwd: process.cwd(),
+    cwd,
     timeoutMs: PROBE_TIMEOUT_MS,
     env: childEnvironment(billingEnvVars),
     input: '',
@@ -224,7 +225,14 @@ export function probeClaudeCapability(
   runner: ProcessRunner,
   options: ClaudeAdapterOptions = {},
 ): Promise<ClaudeCapability> {
-  const cached = capabilityCache.get(runner);
+  // Keyed by cwd as well as runner: the probe must answer for the directory the
+  // work will actually run in, and 2.3 classifies a bad working directory as
+  // `spawn-failed`, so two directories can legitimately disagree.
+  const cwd = options.cwd ?? process.cwd();
+  const perCwd = capabilityCache.get(runner) ?? new Map<string, Promise<ClaudeCapability>>();
+  capabilityCache.set(runner, perCwd);
+
+  const cached = perCwd.get(cwd);
   if (cached !== undefined) {
     return cached;
   }
@@ -232,7 +240,7 @@ export function probeClaudeCapability(
   const billingEnvVars = options.billingEnvVars ?? DEFAULT_BILLING_ENV_VARS;
 
   const probe = (async (): Promise<ClaudeCapability> => {
-    const version = await probeOnce(runner, ['--version'], billingEnvVars);
+    const version = await probeOnce(runner, ['--version'], billingEnvVars, cwd);
 
     const versionProblem = outcomeReason(version, PROBE_TIMEOUT_MS);
     if (versionProblem !== undefined) {
@@ -265,6 +273,7 @@ export function probeClaudeCapability(
       runner,
       [...BASELINE_ARGS, 'Reply with the single word: ok'],
       billingEnvVars,
+      cwd,
     );
 
     const capableProblem = outcomeReason(capable, PROBE_TIMEOUT_MS);
@@ -336,7 +345,7 @@ export function probeClaudeCapability(
     };
   })();
 
-  capabilityCache.set(runner, probe);
+  perCwd.set(cwd, probe);
   return probe;
 }
 
@@ -356,6 +365,7 @@ export async function probeClaudeAuth(
     runner,
     [...BASELINE_ARGS, 'Reply with the single word: ok'],
     billingEnvVars,
+    options.cwd ?? process.cwd(),
   );
 
   const problem = outcomeReason(result, PROBE_TIMEOUT_MS);
