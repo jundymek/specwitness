@@ -31,11 +31,12 @@ import type {
 
 import { assertInsideRoot, realPathOrUndefined, repoPath } from '../repo-path.js';
 
+import type { MarkdownDoc } from './markdown.js';
 import {
   extractCriteria,
   headingText,
   joinTrimmed,
-  readMarkdownLines,
+  readMarkdown,
   sectionEnd,
 } from './markdown.js';
 
@@ -130,6 +131,8 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
       notes.push(`${relativeDirectory} exists but contains no story files`);
     }
   }
+
+  reportDuplicateIds(stories, problems);
 
   // Numeric ordering, not lexicographic: '7.10' sorts before '7.2' as a string.
   const ordered = [...stories].sort(compareStoryIds);
@@ -231,10 +234,10 @@ function readStoryFile(
   problems: string[],
   realRoot: string | undefined,
 ): ReadStory {
-  const lines = readMarkdownLines(absolutePath, relativePath, realRoot);
+  const doc = readMarkdown(absolutePath, relativePath, realRoot);
 
-  const narrative = readSection(lines, STORY_SECTION);
-  const criteriaSection = findSection(lines, CRITERIA_SECTION);
+  const narrative = readSection(doc, STORY_SECTION);
+  const criteriaSection = findSection(doc, CRITERIA_SECTION);
 
   if (criteriaSection === undefined) {
     notes.push(`${relativePath} has no '## ${CRITERIA_SECTION}' heading`);
@@ -243,7 +246,7 @@ function readStoryFile(
   const criteria: AcceptanceCriterion[] =
     criteriaSection === undefined
       ? []
-      : extractCriteria(lines, criteriaSection.start, criteriaSection.end).map(
+      : extractCriteria(doc, criteriaSection.start, criteriaSection.end).map(
           (scanned, position) => ({
             ordinal: position + 1,
             text: scanned.text,
@@ -255,7 +258,7 @@ function readStoryFile(
     notes.push(`${relativePath} has an empty '## ${CRITERIA_SECTION}' section`);
   }
 
-  const heading = findStoryHeading(lines);
+  const heading = findStoryHeading(doc);
 
   // A file named 7.1-*.md whose H1 says `# Story 8.1` is a copied-and-renamed
   // artifact. Trusting the filename would attribute another story's acceptance
@@ -290,9 +293,10 @@ interface StoryHeading {
 }
 
 /** The file's H1, with whatever it claims about which story it is. */
-function findStoryHeading(lines: readonly string[]): StoryHeading | undefined {
-  for (let index = 0; index < lines.length; index += 1) {
-    const text = headingText(lines[index] as string, 1);
+function findStoryHeading(doc: MarkdownDoc): StoryHeading | undefined {
+  for (let index = 0; index < doc.lines.length; index += 1) {
+    if (doc.fenced[index] === true) continue;
+    const text = headingText(doc.lines[index] as string, 1);
     if (text === undefined) continue;
 
     const match = STORY_TITLE.exec(text);
@@ -312,17 +316,43 @@ interface Section {
   readonly end: number;
 }
 
-function findSection(lines: readonly string[], name: string): Section | undefined {
-  for (let index = 0; index < lines.length; index += 1) {
-    if (headingText(lines[index] as string, 2)?.toLowerCase() !== name.toLowerCase()) continue;
-    return { start: index + 1, end: sectionEnd(lines, index + 1, 2) };
+function findSection(doc: MarkdownDoc, name: string): Section | undefined {
+  for (let index = 0; index < doc.lines.length; index += 1) {
+    if (doc.fenced[index] === true) continue;
+    if (headingText(doc.lines[index] as string, 2)?.toLowerCase() !== name.toLowerCase()) continue;
+    return { start: index + 1, end: sectionEnd(doc, index + 1, 2) };
   }
   return undefined;
 }
 
-function readSection(lines: readonly string[], name: string): string {
-  const section = findSection(lines, name);
-  return section === undefined ? '' : joinTrimmed(lines, section.start, section.end);
+function readSection(doc: MarkdownDoc, name: string): string {
+  const section = findSection(doc, name);
+  return section === undefined ? '' : joinTrimmed(doc.lines, section.start, section.end);
+}
+
+/**
+ * Two files claiming the same story is ambiguous, so it is refused.
+ *
+ * It happens when two `epic-7-*` directories both match, or one directory holds
+ * `7.1-old.md` and `7.1-new.md`. Keeping whichever the filesystem happened to
+ * list last would make the contract depend on directory order and drop the
+ * other story's acceptance criteria without a word. Cross-SOURCE precedence is
+ * different and deliberate — a per-story file supersedes the epics file — but
+ * within one source there is no rule that says which wins, so there must not be
+ * a silent one.
+ */
+function reportDuplicateIds(stories: readonly ReadStory[], problems: string[]): void {
+  const seen = new Map<string, string>();
+  for (const story of stories) {
+    const previous = seen.get(story.id);
+    if (previous !== undefined) {
+      problems.push(
+        `story ${story.id} is defined twice: ${previous} and ${story.source.path}`,
+      );
+      continue;
+    }
+    seen.set(story.id, story.source.path);
+  }
 }
 
 /** Orders `7.1 < 7.2 < 7.10` — by number, never as strings. */

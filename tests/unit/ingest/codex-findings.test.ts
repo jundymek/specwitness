@@ -289,6 +289,111 @@ describe('P2 (round 3) — the story source line is the heading, not line 1', ()
   });
 });
 
+describe('P1 (round 4) — a duplicate story id refuses the ingest', () => {
+  it('refuses rather than keeping whichever declaration came last', () => {
+    // Map.set kept the last one, so the contract depended on document order and
+    // the other declaration's criteria vanished without a word.
+    expect(() =>
+      ingestEpic({
+        projectRoot: join(FIXTURES, 'duplicate'),
+        epicId: '7',
+        planningArtifacts: 'docs/planning-artifacts',
+        implementationArtifacts: 'docs/implementation-artifacts',
+      }),
+    ).toThrow(/story 7\.1 is declared twice/);
+  });
+
+  it('refuses two story FILES claiming the same id', () => {
+    // 7.1-old.md and 7.1-new.md in one directory: whichever readdir listed last
+    // would have won, so the contract depended on filesystem order.
+    expect(() =>
+      ingestEpic({
+        projectRoot: join(FIXTURES, 'duplicate-files'),
+        epicId: '7',
+        planningArtifacts: 'docs/planning-artifacts',
+        implementationArtifacts: 'docs/implementation-artifacts',
+      }),
+    ).toThrow(/story 7\.1 is defined twice/);
+  });
+
+  it('still lets a per-story file supersede the epics file for the same id', () => {
+    // Cross-source precedence is deliberate (AC2) and must not be caught by the
+    // duplicate rule — only ambiguity WITHIN one source is refused.
+    const spec = ingestEpic({
+      projectRoot: join(FIXTURES, 'both'),
+      epicId: '7',
+      planningArtifacts: 'docs/planning-artifacts',
+      implementationArtifacts: 'docs/implementation-artifacts',
+    });
+
+    expect(spec.stories.map((story) => story.id)).toEqual(['7.1', '7.2', '7.3']);
+    expect(spec.stories.find((story) => story.id === '7.1')?.source.layout).toBe('story-file');
+  });
+});
+
+describe('P2 (round 4) — markdown inside a fenced block is not document structure', () => {
+  function ingestFenced() {
+    return ingestEpic({
+      projectRoot: join(FIXTURES, 'fenced'),
+      epicId: '7',
+      planningArtifacts: 'docs/planning-artifacts',
+      implementationArtifacts: 'docs/implementation-artifacts',
+    });
+  }
+
+  it('does not invent a story from a heading inside an example', () => {
+    // `### Story 7.2` lives inside a fenced example. Without fence tracking it
+    // is a phantom story — or, as it happens here, the fenced
+    // `## Acceptance Criteria` above it truncates the epic section first and
+    // the phantom never appears. Both are wrong, so assert the whole shape
+    // rather than only the story list, or this test passes for the wrong
+    // reason.
+    const spec = ingestFenced();
+
+    expect(spec.stories.map((story) => story.id)).toEqual(['7.1']);
+    expect(spec.stories[0]?.acceptanceCriteria).toHaveLength(2);
+    // Every criterion is a real one, not a stray fence line promoted to a
+    // criterion by a truncated section.
+    expect(
+      spec.stories[0]?.acceptanceCriteria.every((criterion) =>
+        criterion.text.startsWith('**Given**'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not let a fenced `## Acceptance Criteria` truncate the real section', () => {
+    // The count alone is not a discriminator: truncation also yields two, the
+    // second being the literal fence line. Assert what they SAY.
+    const criteria = ingestFenced().stories[0]?.acceptanceCriteria ?? [];
+
+    expect(criteria[0]?.text.startsWith('**Given** a criterion containing a fenced example')).toBe(
+      true,
+    );
+    expect(criteria[1]?.text.startsWith('**Given** a second real criterion after the fence')).toBe(
+      true,
+    );
+  });
+
+  it('does not let a fenced --- end the epic section early', () => {
+    const spec = ingestFenced();
+
+    expect(spec.title).toBe('Fences');
+    expect(spec.stories[0]?.acceptanceCriteria[1]?.text).toContain(
+      'a second real criterion after the fence',
+    );
+  });
+
+  it('keeps the fenced example inside the criterion text, verbatim', () => {
+    // Structure is read from unfenced lines; TEXT is always verbatim, because a
+    // criterion may legitimately contain a code block.
+    const text = ingestFenced().stories[0]?.acceptanceCriteria[0]?.text ?? '';
+
+    expect(text).toContain('```markdown');
+    expect(text).toContain('### Story 7.2: A phantom story');
+    expect(text).toContain('```');
+  });
+});
+
 describe('P2 — containment holds through a symlink inside the root', () => {
   it('refuses a symlinked epics file pointing outside the project', () => {
     // The root-level realpath check passes here: the root itself is fine, and

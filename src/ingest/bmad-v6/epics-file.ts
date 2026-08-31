@@ -32,11 +32,12 @@ import type {
 
 import { realPathOrUndefined, repoPath } from '../repo-path.js';
 
+import type { MarkdownDoc } from './markdown.js';
 import {
   extractCriteria,
   headingText,
   joinTrimmed,
-  readMarkdownLines,
+  readMarkdown,
   sectionEnd,
 } from './markdown.js';
 
@@ -83,8 +84,9 @@ export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
     return { stories: [], searched, notes: [`${relativePath} does not exist`] };
   }
 
-  const lines = readMarkdownLines(absolutePath, relativePath, realPathOrUndefined(rootPath));
-  const epicIndex = findEpicHeading(lines, request.epicNumber);
+  const doc = readMarkdown(absolutePath, relativePath, realPathOrUndefined(rootPath));
+  const { lines } = doc;
+  const epicIndex = findEpicHeading(doc, request.epicNumber);
 
   if (epicIndex === undefined) {
     return {
@@ -92,18 +94,18 @@ export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
       searched,
       notes: [
         `${relativePath} exists but contains no '## Epic ${request.epicNumber}' heading` +
-          describeEpicsPresent(lines),
+          describeEpicsPresent(doc),
       ],
     };
   }
 
-  const epicEnd = sectionEnd(lines, epicIndex + 1, 2);
+  const epicEnd = sectionEnd(doc, epicIndex + 1, 2);
   const title = headingText(lines[epicIndex] as string, 2) ?? '';
   const epicTitle = EPIC_HEADING.exec(title)?.[2]?.trim() ?? '';
 
   const problems: string[] = [];
   const storyStarts = findStoryHeadings(
-    lines,
+    doc,
     epicIndex + 1,
     epicEnd,
     request.epicNumber,
@@ -114,12 +116,14 @@ export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
 
   const stories = storyStarts.map((start, position) =>
     readStory(
-      lines,
+      doc,
       start,
       storyStarts[position + 1]?.index ?? epicEnd,
       relativePath,
     ),
   );
+
+  reportDuplicateIds(stories, relativePath, problems);
 
   const notes: string[] = [];
   if (stories.length === 0) {
@@ -144,9 +148,10 @@ export const epicsFileSource: EpicSource = {
 };
 
 /** Index of the `## Epic <n>` heading for exactly `epicNumber`. */
-function findEpicHeading(lines: readonly string[], epicNumber: number): number | undefined {
-  for (let index = 0; index < lines.length; index += 1) {
-    const text = headingText(lines[index] as string, 2);
+function findEpicHeading(doc: MarkdownDoc, epicNumber: number): number | undefined {
+  for (let index = 0; index < doc.lines.length; index += 1) {
+    if (doc.fenced[index] === true) continue;
+    const text = headingText(doc.lines[index] as string, 2);
     if (text === undefined) continue;
     const match = EPIC_HEADING.exec(text);
     if (match !== null && Number(match[1]) === epicNumber) return index;
@@ -172,7 +177,7 @@ interface StoryStart {
  * cannot go missing without anyone being told.
  */
 function findStoryHeadings(
-  lines: readonly string[],
+  doc: MarkdownDoc,
   start: number,
   end: number,
   epicNumber: number,
@@ -181,7 +186,8 @@ function findStoryHeadings(
 ): StoryStart[] {
   const starts: StoryStart[] = [];
   for (let index = start; index < end; index += 1) {
-    const text = headingText(lines[index] as string, 3);
+    if (doc.fenced[index] === true) continue;
+    const text = headingText(doc.lines[index] as string, 3);
     if (text === undefined) continue;
 
     const match = STORY_HEADING.exec(text);
@@ -213,18 +219,19 @@ function findStoryHeadings(
 }
 
 function readStory(
-  lines: readonly string[],
+  doc: MarkdownDoc,
   start: StoryStart,
   end: number,
   relativePath: string,
 ): ReadStory {
-  const criteriaMarker = findCriteriaMarker(lines, start.index + 1, end);
+  const { lines } = doc;
+  const criteriaMarker = findCriteriaMarker(doc, start.index + 1, end);
   const narrativeEnd = criteriaMarker ?? end;
 
   const criteria: AcceptanceCriterion[] =
     criteriaMarker === undefined
       ? []
-      : extractCriteria(lines, criteriaMarker + 1, end).map((scanned, position) => ({
+      : extractCriteria(doc, criteriaMarker + 1, end).map((scanned, position) => ({
           ordinal: position + 1,
           text: scanned.text,
           source: sourceRef(relativePath, scanned.index),
@@ -239,13 +246,34 @@ function readStory(
   };
 }
 
-function findCriteriaMarker(
-  lines: readonly string[],
-  start: number,
-  end: number,
-): number | undefined {
+/**
+ * The same `### Story 7.1` heading twice inside one epic is ambiguous.
+ *
+ * The merge keeps the last one, which would make the contract depend on
+ * document order and drop the other heading's acceptance criteria silently.
+ * Cross-SOURCE precedence is deliberate — a per-story file supersedes the epics
+ * file — but within one document there is no rule saying which wins, so there
+ * must not be a silent one.
+ */
+function reportDuplicateIds(
+  stories: readonly ReadStory[],
+  relativePath: string,
+  problems: string[],
+): void {
+  const seen = new Set<string>();
+  for (const story of stories) {
+    if (seen.has(story.id)) {
+      problems.push(`${relativePath}:${story.source.line}: story ${story.id} is declared twice`);
+      continue;
+    }
+    seen.add(story.id);
+  }
+}
+
+function findCriteriaMarker(doc: MarkdownDoc, start: number, end: number): number | undefined {
   for (let index = start; index < end; index += 1) {
-    if (CRITERIA_MARKER.test((lines[index] as string).trim())) return index;
+    if (doc.fenced[index] === true) continue;
+    if (CRITERIA_MARKER.test((doc.lines[index] as string).trim())) return index;
   }
   return undefined;
 }
@@ -261,9 +289,10 @@ function sourceRef(path: string, index: number): SourceRef {
  * actually declares turns "epic 7 not found" into a diagnosis — usually "you
  * meant 6" or "you are pointed at the wrong repository".
  */
-function describeEpicsPresent(lines: readonly string[]): string {
+function describeEpicsPresent(doc: MarkdownDoc): string {
   const present: string[] = [];
-  for (const line of lines) {
+  for (const [index, line] of doc.lines.entries()) {
+    if (doc.fenced[index] === true) continue;
     const text = headingText(line, 2);
     if (text === undefined) continue;
     const match = EPIC_HEADING.exec(text);

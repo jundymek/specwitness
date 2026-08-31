@@ -16,6 +16,53 @@ import { readFileSync } from 'node:fs';
 import { IngestError } from '../../domain/errors.js';
 import { assertInsideRoot } from '../repo-path.js';
 
+/** An opening or closing fence: three or more backticks or tildes. */
+const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
+
+/**
+ * A markdown file plus, for each line, whether it sits inside a fenced code
+ * block.
+ *
+ * The distinction is load-bearing rather than pedantic. This repository's own
+ * story files contain shell examples whose comment lines start with `#`, and
+ * one of them opens a fenced block with `# Repeat this pattern ...` — which a
+ * heading matcher reads as an H1. A `## Acceptance Criteria` inside an example
+ * would truncate a real section, and a `### Story 7.2` would invent a story
+ * that does not exist. Structure is read from unfenced lines only; TEXT is
+ * always taken verbatim from `lines`, fences included, because a criterion may
+ * legitimately contain a code block.
+ */
+export interface MarkdownDoc {
+  /** Every line, verbatim, BOM-stripped and CRLF-normalised. */
+  readonly lines: readonly string[];
+  /** Parallel to `lines`: true where the line is fence syntax or inside one. */
+  readonly fenced: readonly boolean[];
+}
+
+/** Marks fence delimiters and everything between them. */
+export function fenceMask(lines: readonly string[]): boolean[] {
+  const mask = lines.map(() => false);
+  let open: string | undefined;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const marker = FENCE.exec(lines[index] as string)?.[1];
+
+    if (open === undefined) {
+      if (marker !== undefined) {
+        open = marker[0];
+        mask[index] = true;
+      }
+      continue;
+    }
+
+    mask[index] = true;
+    // Only a fence of the same kind closes; a ``` inside a ~~~ block is content.
+    if (marker !== undefined && marker[0] === open) open = undefined;
+  }
+
+  return mask;
+}
+
 /** `1. `, `1) `, `- `, `* `, `+ ` — with the indent that precedes it. */
 const LIST_ITEM = /^(\s*)((?:\d+[.)])|[-*+])(\s+)(.*)$/;
 
@@ -37,11 +84,11 @@ const ATX_HEADING = /^(#{1,6})\s+(.*)$/;
  * unclassified crash, which would still exit 3 but with "this is a SpecWitness
  * bug" text that sends the user to the wrong place entirely.
  */
-export function readMarkdownLines(
+export function readMarkdown(
   absolutePath: string,
   relativePath: string,
   realRoot?: string,
-): string[] {
+): MarkdownDoc {
   // Containment is per-file, not just per-root: a symlinked `epics.md` inside a
   // legitimate root still reads outside the repository.
   assertInsideRoot(realRoot, absolutePath, relativePath);
@@ -58,7 +105,8 @@ export function readMarkdownLines(
     );
   }
 
-  return splitLines(stripBom(raw));
+  const lines = splitLines(stripBom(raw));
+  return { lines, fenced: fenceMask(lines) };
 }
 
 /** Removes a leading UTF-8 byte-order mark, if present. */
@@ -99,14 +147,15 @@ export function isThematicBreak(line: string): boolean {
  * `## Epic`, so without it the last story of an epic runs into the next epic
  * (or, for the final epic, to end of file).
  */
-export function sectionEnd(lines: readonly string[], start: number, level: number): number {
-  for (let index = start; index < lines.length; index += 1) {
-    const line = lines[index] as string;
+export function sectionEnd(doc: MarkdownDoc, start: number, level: number): number {
+  for (let index = start; index < doc.lines.length; index += 1) {
+    if (doc.fenced[index] === true) continue;
+    const line = doc.lines[index] as string;
     if (isThematicBreak(line)) return index;
     const found = headingLevel(line);
     if (found > 0 && found <= level) return index;
   }
-  return lines.length;
+  return doc.lines.length;
 }
 
 /** One criterion as scanned out of a section: its text and where it began. */
@@ -145,19 +194,22 @@ export interface ScannedCriterion {
  * matter, and the paragraphs before it are the criteria.
  */
 export function extractCriteria(
-  lines: readonly string[],
+  doc: MarkdownDoc,
   start: number,
   end: number,
 ): ScannedCriterion[] {
-  const blocks = findBlocks(lines, start, end);
-  const firstList = blocks.findIndex((block) => LIST_ITEM.test(lines[block.start] as string));
+  const { lines } = doc;
+  const blocks = findBlocks(doc, start, end);
+  const firstList = blocks.findIndex(
+    (block) => doc.fenced[block.start] !== true && LIST_ITEM.test(lines[block.start] as string),
+  );
 
   if (firstList === 0) {
-    return extractListBlock(lines, (blocks[0] as Block).start, end);
+    return extractListBlock(doc, (blocks[0] as Block).start, end);
   }
 
   if (firstList === 1 && isLeadIn(lines, blocks[0] as Block)) {
-    return extractListBlock(lines, (blocks[1] as Block).start, end);
+    return extractListBlock(doc, (blocks[1] as Block).start, end);
   }
 
   // No list, or a list far enough down to be trailing matter: the paragraphs
@@ -165,7 +217,7 @@ export function extractCriteria(
   // is at the list, or at the lead-in paragraph that introduces it
   // (`Clarifications (detail only, no weakening):` and friends), since that
   // lead-in belongs to the list rather than to the criteria.
-  if (firstList === -1) return extractParagraphBlocks(lines, start, end);
+  if (firstList === -1) return extractParagraphBlocks(doc, start, end);
 
   const preceding = blocks[firstList - 1];
   const boundary =
@@ -173,7 +225,7 @@ export function extractCriteria(
       ? preceding.start
       : (blocks[firstList] as Block).start;
 
-  return extractParagraphBlocks(lines, start, boundary);
+  return extractParagraphBlocks(doc, start, boundary);
 }
 
 /** A blank-line-separated run of non-blank lines. */
@@ -182,12 +234,13 @@ interface Block {
   readonly end: number;
 }
 
-function findBlocks(lines: readonly string[], start: number, end: number): Block[] {
+function findBlocks(doc: MarkdownDoc, start: number, end: number): Block[] {
   const blocks: Block[] = [];
   let blockStart: number | undefined;
 
   for (let index = start; index < end; index += 1) {
-    const blank = (lines[index] as string).trim() === '';
+    // A blank line inside a fenced block is code, not a paragraph break.
+    const blank = doc.fenced[index] !== true && (doc.lines[index] as string).trim() === '';
     if (blank) {
       if (blockStart !== undefined) blocks.push({ start: blockStart, end: index });
       blockStart = undefined;
@@ -231,11 +284,8 @@ function isLeadIn(lines: readonly string[], block: Block): boolean {
  * the same list — same indent, same marker kind. That keeps a loose list intact
  * without letting the paragraph after the list pull the next list in with it.
  */
-function extractListBlock(
-  lines: readonly string[],
-  start: number,
-  end: number,
-): ScannedCriterion[] {
+function extractListBlock(doc: MarkdownDoc, start: number, end: number): ScannedCriterion[] {
+  const { lines } = doc;
   const first = LIST_ITEM.exec(lines[start] as string);
   /* c8 ignore next */
   if (first === null) return [];
@@ -257,12 +307,26 @@ function extractListBlock(
 
   for (let index = start; index < end; index += 1) {
     const line = lines[index] as string;
+    const fenced = doc.fenced[index] === true;
 
-    if (line.trim() === '') {
-      const next = nextNonBlank(lines, index + 1, end);
-      if (next === undefined || !resumesList(lines[next] as string, baseIndent, ordered)) break;
+    if (!fenced && line.trim() === '') {
+      const next = nextNonBlank(doc, index + 1, end);
+      if (next === undefined) break;
+      // A fenced example after a blank line belongs to the item above it.
+      if (doc.fenced[next] === true && buffer.length > 0) {
+        buffer.push('');
+        continue;
+      }
+      if (!resumesList(lines[next] as string, baseIndent, ordered)) break;
       // A loose list: keep the blank inside the current item and continue.
       buffer.push('');
+      continue;
+    }
+
+    // Inside a fence, nothing is a list item or prose — it is criterion text.
+    if (fenced) {
+      const indent = line.length - line.trimStart().length;
+      buffer.push(line.slice(Math.min(indent, contentIndent)));
       continue;
     }
 
@@ -289,11 +353,8 @@ function extractListBlock(
 }
 
 /** Blank-line-separated blocks; one block is one criterion. */
-function extractParagraphBlocks(
-  lines: readonly string[],
-  start: number,
-  end: number,
-): ScannedCriterion[] {
+function extractParagraphBlocks(doc: MarkdownDoc, start: number, end: number): ScannedCriterion[] {
+  const { lines } = doc;
   const criteria: ScannedCriterion[] = [];
   let buffer: string[] = [];
   let bufferIndex = start;
@@ -306,7 +367,16 @@ function extractParagraphBlocks(
 
   for (let index = start; index < end; index += 1) {
     const line = lines[index] as string;
-    if (line.trim() === '') {
+    if (doc.fenced[index] !== true && line.trim() === '') {
+      // A blank line before a fenced example does not end the criterion: the
+      // example belongs to the criterion it illustrates. Splitting there would
+      // emit the code block on its own as a criterion with no Given/When/Then
+      // in it at all.
+      const next = nextNonBlank(doc, index + 1, end);
+      if (next !== undefined && doc.fenced[next] === true && buffer.length > 0) {
+        buffer.push('');
+        continue;
+      }
       flush();
       continue;
     }
@@ -319,9 +389,10 @@ function extractParagraphBlocks(
 }
 
 /** Index of the next non-blank line in `[from, end)`, or undefined. */
-function nextNonBlank(lines: readonly string[], from: number, end: number): number | undefined {
+function nextNonBlank(doc: MarkdownDoc, from: number, end: number): number | undefined {
   for (let index = from; index < end; index += 1) {
-    if ((lines[index] as string).trim() !== '') return index;
+    if (doc.fenced[index] === true) return index;
+    if ((doc.lines[index] as string).trim() !== '') return index;
   }
   return undefined;
 }
