@@ -363,3 +363,114 @@ describe('amend', () => {
     });
   });
 });
+
+/**
+ * Story 3.8 — what an amendment does to provenance, now that provenance is real.
+ *
+ * Until 3.8, `meta.provenance.model` and `.providerCliVersion` were `null` in
+ * every contract ever written, so "amend preserves provenance" was a statement
+ * about two nulls and one provider name. It is worth something now, and the
+ * story asked for the behaviour to be decided, stated and pinned.
+ *
+ * THE DECISION: an amended contract PRESERVES the original generation
+ * provenance, and today's code already does. That is correct, and not merely
+ * convenient. `meta.provenance` answers one question — what generated this
+ * draft — and an amendment is a human act with no provider behind it:
+ * `amend()` is pure, spawns nothing, and never sees an `AgentProvider`.
+ * Overwriting provenance with the amending run's details would claim a provider
+ * authored content it never saw, in the one field whose entire purpose is to be
+ * trustworthy. The amendment is recorded where amendments belong — in
+ * `meta.history`, with the superseded version, its fingerprint, the instant and
+ * the operator's reason.
+ *
+ * So the test is the deliverable. `amend()` keeps provenance through a
+ * `...contract.meta` spread, which means preservation is currently a property of
+ * a spread operator rather than of a stated intention — exactly the "unasserted
+ * half of a decision" that Epic 2's retrospective named as where bugs live. If
+ * someone later reaches for `provenance: freshProvenance` in that object, these
+ * assertions are what stops them.
+ */
+describe('amend — provenance is preserved, never re-attributed (AD-5, story 3.8)', () => {
+  /** What story 3.8 writes on a claude path where the CLI reported a version. */
+  const AUTHORED = {
+    provider: 'claude',
+    model: null,
+    providerCliVersion: '2.1.251 (Claude Code)',
+    generatedAt: '2026-08-30T00:00:00.000Z',
+  } as const;
+
+  function frozenWithRealProvenance(): Contract {
+    const base = frozenContract();
+    return { ...base, meta: { ...base.meta, provenance: AUTHORED } };
+  }
+
+  it('carries populated provenance through the amendment untouched', () => {
+    const current = frozenWithRealProvenance();
+
+    const result = amend({ contract: current, reason: 'scope reduced', at: LATER });
+
+    expect(result.meta.provenance).toEqual(AUTHORED);
+    // Field by field, so a partial overwrite cannot hide behind a deep equal on
+    // an object that happens to match.
+    expect(result.meta.provenance.providerCliVersion).toBe('2.1.251 (Claude Code)');
+    expect(result.meta.provenance.provider).toBe('claude');
+    expect(result.meta.provenance.model).toBeNull();
+  });
+
+  it('does not re-stamp generatedAt with the amending instant', () => {
+    // The sharpest form of the mistake: `generatedAt` is the one provenance
+    // field an amendment has an obvious wrong answer for, because the amending
+    // instant is right there in the call. It belongs to the ORIGINAL generation.
+    const current = frozenWithRealProvenance();
+
+    const result = amend({ contract: current, reason: 'scope reduced', at: LATER });
+
+    expect(result.meta.provenance.generatedAt).toBe('2026-08-30T00:00:00.000Z');
+    expect(result.meta.provenance.generatedAt).not.toBe(LATER.toISOString());
+  });
+
+  it('records the amendment in history rather than in provenance', () => {
+    // Where the amendment DOES get recorded, so the two are not confused: the
+    // audit trail grows, provenance does not move.
+    const current = frozenWithRealProvenance();
+
+    const result = amend({ contract: current, reason: 'scope reduced', at: LATER });
+
+    expect(result.meta.history).toHaveLength(1);
+    expect(result.meta.history[0]?.timestamp).toBe(LATER.toISOString());
+    expect(result.meta.history[0]?.reason).toBe('scope reduced');
+    expect(result.meta.provenance).toEqual(current.meta.provenance);
+  });
+
+  it('survives a second amendment, still naming the original generation', () => {
+    // Provenance must not decay over a chain of amendments — after two, the
+    // contract still says what drafted it, and the history has two entries.
+    const first = amend({
+      contract: frozenWithRealProvenance(),
+      reason: 'scope reduced',
+      at: AT,
+    });
+    const refrozen = freeze(first, LATER);
+
+    const second = amend({ contract: refrozen, reason: 'wording corrected', at: LATER });
+
+    expect(second.meta.provenance).toEqual(AUTHORED);
+    expect(second.meta.history).toHaveLength(2);
+  });
+
+  it('leaves the amended draft ready to re-freeze with provenance intact', () => {
+    // End to end through the real serializer: amend, write, read back. An
+    // amendment must not be the place a version string quietly disappears.
+    const amended = amend({
+      contract: frozenWithRealProvenance(),
+      reason: 'scope reduced',
+      at: LATER,
+    });
+
+    const reparsed = parseContract(serializeContract(amended), 'contracts/epic-7.yaml');
+
+    expect(reparsed.meta.provenance).toEqual(AUTHORED);
+    expect(reparsed.spec.version).toBe(amended.spec.version);
+    expect(reparsed.meta.frozen).toBe(false);
+  });
+});
