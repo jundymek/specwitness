@@ -1,0 +1,2 @@
+# Empty on purpose: an epic directory that exists but holds no story files.
+# The AC3 error must name it as searched. Git does not track empty directories.
