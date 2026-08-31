@@ -52,6 +52,7 @@ development_status:
   2-5-codex-cli-adapter: ready-for-dev
   2-6-specwitness-contract-epic-generate-review-freeze-status: ready-for-dev
   2-7-amendment-flow-runtime-integrity-provider-doctor-checks: ready-for-dev
+  2-8-hermetic-dependency-rules-test: ready-for-dev
   epic-2-retrospective: optional
 
   epic-3: backlog
