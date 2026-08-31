@@ -26,6 +26,43 @@
 
 import type { DoctorCheck } from '../registry.js';
 
+/**
+ * Which adapter could actually spend which key.
+ *
+ * A warning is only true if SpecWitness could plausibly spend the credential.
+ * `claude` cannot bill an OpenAI account and `codex` cannot bill an Anthropic
+ * one, so a project configured with one of them must not be told the other's
+ * key is at risk. The `fake` adapter appears in neither list because it spawns
+ * nothing and holds no credentials.
+ *
+ * An adapter absent from this map is treated as CAPABLE of spending any key —
+ * see `spenders` below. Failing safe on billing costs a warning; failing open
+ * costs money.
+ */
+const SPENDABLE_BY: Readonly<Record<string, readonly string[]>> = {
+  'claude-code-cli': ['ANTHROPIC_API_KEY'],
+  'codex-cli': ['OPENAI_API_KEY'],
+  fake: [],
+};
+
+/** The variable names the configured adapters could plausibly spend. */
+function spendable(adapters: readonly string[]): Set<string> {
+  const names = new Set<string>();
+  for (const adapter of adapters) {
+    const known = SPENDABLE_BY[adapter];
+    if (known === undefined) {
+      // An adapter this build does not recognise — a newer config, or one this
+      // check has not been taught about. Assume it could spend anything rather
+      // than silently clearing a real risk.
+      return new Set(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+    }
+    for (const name of known) {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
 export const billingRiskEnvCheck: DoctorCheck = {
   id: 'billing-risk-env',
   required: false,
@@ -38,22 +75,44 @@ export const billingRiskEnvCheck: DoctorCheck = {
 
     // A config that failed to load is NOT treated as "no providers": staying
     // silent about an exported key on the strength of a file we could not read
-    // would be guessing in the direction of a surprise bill. Only a config that
-    // loaded AND declares nothing earns silence.
-    if (ctx.config.ok && Object.keys(ctx.config.value.ai.providers ?? {}).length === 0) {
+    // would be guessing in the direction of a surprise bill. `config-valid`
+    // already reports the load failure itself.
+    if (!ctx.config.ok) {
+      return { status: 'warn', detail: warnAbout(present) };
+    }
+
+    const providers = Object.values(ctx.config.value.ai.providers ?? {});
+    if (providers.length === 0) {
       return {
         status: 'pass',
         detail: `${present.join(', ')} set, but no AI providers are configured — SpecWitness will not call one`,
       };
     }
 
-    const named = present
-      .map(
-        (name) =>
-          `${name} present in environment — provider calls could bill your API account; see provider modes`,
-      )
-      .join('; ');
+    const reachable = spendable(providers.map((provider) => provider.adapter));
+    const atRisk = present.filter((name) => reachable.has(name));
 
-    return { status: 'warn', detail: named };
+    if (atRisk.length === 0) {
+      // The keys are there, but nothing configured could spend them. Saying so
+      // is more useful than silence: it tells an operator who expected a warning
+      // why there isn't one.
+      return {
+        status: 'pass',
+        detail: `${present.join(', ')} set, but no configured provider can spend ${
+          present.length === 1 ? 'it' : 'them'
+        }`,
+      };
+    }
+
+    return { status: 'warn', detail: warnAbout(atRisk) };
   },
 };
+
+function warnAbout(names: readonly string[]): string {
+  return names
+    .map(
+      (name) =>
+        `${name} present in environment — provider calls could bill your API account; see provider modes`,
+    )
+    .join('; ');
+}

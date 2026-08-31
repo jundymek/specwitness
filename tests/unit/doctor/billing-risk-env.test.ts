@@ -24,19 +24,23 @@ import { MINIMAL_CONFIG, testContext } from './helpers.js';
  * doing, and a test that did it would leak across files.
  */
 
-const CONFIG_WITH_PROVIDER = [
-  'version: 1',
-  'project:',
-  '  baseBranch: master',
-  'ai:',
-  '  providers:',
-  '    codex:',
-  '      adapter: codex-cli',
-  '      mode: chatgpt',
-  '  roles:',
-  '    contract-author: codex',
-  '',
-].join('\n');
+function configWith(adapter: string, name = 'p'): string {
+  return [
+    'version: 1',
+    'project:',
+    '  baseBranch: master',
+    'ai:',
+    '  providers:',
+    `    ${name}:`,
+    `      adapter: ${adapter}`,
+    '      mode: chatgpt',
+    '  roles:',
+    `    contract-author: ${name}`,
+    '',
+  ].join('\n');
+}
+
+const CONFIG_WITH_PROVIDER = configWith('codex-cli', 'codex');
 
 describe('billing-risk-env check', () => {
   it('is optional, so a set API key can never change the exit code', () => {
@@ -57,9 +61,26 @@ describe('billing-risk-env check', () => {
     expect(result.detail).toContain('provider modes');
   });
 
-  it('names every present variable, not just the first', async () => {
+  it('names every variable at risk, not just the first', async () => {
+    // Both adapters configured, so both keys are genuinely spendable.
     const { ctx } = await testContext({
-      config: CONFIG_WITH_PROVIDER,
+      config: [
+        'version: 1',
+        'project:',
+        '  baseBranch: master',
+        'ai:',
+        '  providers:',
+        '    claude:',
+        '      adapter: claude-code-cli',
+        '      mode: subscription',
+        '    codex:',
+        '      adapter: codex-cli',
+        '      mode: chatgpt',
+        '  roles:',
+        '    contract-author: codex',
+        '    plan-author: claude',
+        '',
+      ].join('\n'),
       billingRiskEnv: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'],
     });
 
@@ -112,6 +133,51 @@ describe('billing-risk-env check', () => {
 
     expect(result.status).toBe('pass');
     expect(result.detail).toContain('no AI providers are configured');
+  });
+
+  it('does not warn about a key no configured provider could ever spend', async () => {
+    // Only claude is configured, so `codex` is never invoked and nothing
+    // SpecWitness does can bill an OpenAI account. Warning anyway would be a
+    // false alarm about a real credential — the fastest way to teach an
+    // operator that this line is noise, on the one check where being ignored
+    // costs money.
+    const { ctx } = await testContext({
+      config: configWith('claude-code-cli', 'claude'),
+      billingRiskEnv: ['OPENAI_API_KEY'],
+    });
+
+    const result = await billingRiskEnvCheck.run(ctx);
+
+    expect(result.status).toBe('pass');
+    expect(result.detail).not.toContain('could bill');
+  });
+
+  it('warns about only the key the configured provider could spend', async () => {
+    const { ctx } = await testContext({
+      config: configWith('claude-code-cli', 'claude'),
+      billingRiskEnv: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'],
+    });
+
+    const result = await billingRiskEnvCheck.run(ctx);
+
+    expect(result.status).toBe('warn');
+    expect(result.detail).toContain('ANTHROPIC_API_KEY');
+    expect(result.detail).not.toContain('OPENAI_API_KEY');
+  });
+
+  it('does not warn when the only provider is hermetic', async () => {
+    // The `fake` adapter spawns nothing and holds no credentials, so no key is
+    // reachable through it. Reporting billing risk for a provider that cannot
+    // make a network call would be wrong about a deliberate configuration.
+    const { ctx } = await testContext({
+      config: configWith('fake'),
+      billingRiskEnv: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'],
+    });
+
+    const result = await billingRiskEnvCheck.run(ctx);
+
+    expect(result.status).toBe('pass');
+    expect(result.detail).not.toContain('could bill');
   });
 
   it('still warns when the config failed to load but a key is present', async () => {
