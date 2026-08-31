@@ -312,6 +312,54 @@ function readSchemaVersion(document: unknown): number | undefined {
 }
 
 /**
+ * `frozen`, `fingerprint` and `frozenAt` record ONE fact, so they must agree.
+ *
+ * A document where they were edited independently claims a state it cannot
+ * substantiate — a contract marked frozen with the fingerprint line deleted, or
+ * a draft still carrying the hash of the version it was cut from. Neither is a
+ * shape error, which is why this raises `IntegrityError` rather than
+ * `ConfigError`: the file is well-formed and dishonest, and silently reading it
+ * as an ordinary draft would launder a tamper into a legitimate-looking redraft.
+ *
+ * Shared by `parseContract` and `freeze` deliberately. `freeze` takes an
+ * in-memory `Contract` whose type still permits these combinations, and two
+ * functions in one module must not disagree about what a valid contract is: a
+ * primitive that can EMIT a document its sibling parser refuses is the same
+ * class of defect as a parser that accepts one. `tests/unit/contract/
+ * freeze.test.ts` asserts the two agree across every combination.
+ *
+ * `subject` names the thing being rejected — a path when the caller has one, the
+ * epic id when it does not — because a refusal that cannot say what it refused
+ * is not much of an audit trail.
+ */
+function assertLifecycleConsistent(meta: ContractMeta, subject: string): void {
+  if (meta.frozen && meta.fingerprint === null) {
+    throw new IntegrityError(
+      `${subject} is marked frozen but carries no fingerprint`,
+      'the fingerprint line appears to have been removed; restore it with `git checkout` or re-freeze from a known-good version, then re-run',
+    );
+  }
+  if (!meta.frozen && meta.fingerprint !== null) {
+    throw new IntegrityError(
+      `${subject} carries a fingerprint but is not marked frozen`,
+      'this is a half-edited frozen contract; restore it with `git checkout`, or clear `meta.fingerprint` and `meta.frozenAt` to make it an honest draft',
+    );
+  }
+  if (meta.frozen && meta.frozenAt === null) {
+    throw new IntegrityError(
+      `${subject} is marked frozen but records no frozenAt timestamp`,
+      'restore the file with `git checkout`, or re-freeze it so the frozen flag, fingerprint and timestamp agree',
+    );
+  }
+  if (!meta.frozen && meta.frozenAt !== null) {
+    throw new IntegrityError(
+      `${subject} records a frozenAt timestamp but is not marked frozen`,
+      'restore the file with `git checkout`, or clear `meta.frozenAt` to make it an honest draft',
+    );
+  }
+}
+
+/**
  * Parses contract YAML into the model. Structural validation only.
  *
  * Throws `ConfigError` (exit 3) for anything malformed, always naming `path`,
@@ -363,38 +411,7 @@ export function parseContract(text: string, path: string): Contract {
   }
 
   const contract = result.data;
-
-  // The frozen flag and the fingerprint must agree. A document claiming one
-  // without the other cannot substantiate the state it claims.
-  if (contract.meta.frozen && contract.meta.fingerprint === null) {
-    throw new IntegrityError(
-      `contract at ${path} is marked frozen but carries no fingerprint`,
-      'the fingerprint line appears to have been removed; restore it with `git checkout` or re-freeze from a known-good version, then re-run',
-    );
-  }
-  if (!contract.meta.frozen && contract.meta.fingerprint !== null) {
-    throw new IntegrityError(
-      `contract at ${path} carries a fingerprint but is not marked frozen`,
-      'this is a half-edited frozen contract; restore it with `git checkout`, or clear `meta.fingerprint` and `meta.frozenAt` to make it an honest draft',
-    );
-  }
-
-  // `frozenAt` is part of the same claim. `frozen` / `fingerprint` / `frozenAt`
-  // are three fields recording one fact, and a file where they were edited
-  // independently is contradictory in exactly the same way — reporting it as an
-  // ordinary frozen or draft state would let a partial hand-edit pass as normal.
-  if (contract.meta.frozen && contract.meta.frozenAt === null) {
-    throw new IntegrityError(
-      `contract at ${path} is marked frozen but records no frozenAt timestamp`,
-      'restore the file with `git checkout`, or re-freeze it so the frozen flag, fingerprint and timestamp agree',
-    );
-  }
-  if (!contract.meta.frozen && contract.meta.frozenAt !== null) {
-    throw new IntegrityError(
-      `contract at ${path} records a frozenAt timestamp but is not marked frozen`,
-      'restore the file with `git checkout`, or clear `meta.frozenAt` to make it an honest draft',
-    );
-  }
+  assertLifecycleConsistent(contract.meta, `contract at ${path}`);
 
   return contract;
 }
@@ -556,6 +573,14 @@ export function verifyIntegrity(contract: Contract): void {
  * flow end here.
  */
 export function freeze(contract: Contract, at: Date): Contract {
+  // Before anything else: refuse a contract whose lifecycle fields contradict
+  // each other. Without this, the idempotent return below would hand back a
+  // frozen contract with no `frozenAt` — a value that serializes into a file
+  // `parseContract` then rejects — and the freezing branch would silently
+  // overwrite a stale fingerprint on a draft, laundering a half-edited frozen
+  // contract into a clean freeze.
+  assertLifecycleConsistent(contract.meta, `contract for ${contract.spec.epic}`);
+
   const actual = fingerprint(contract.spec);
 
   if (contract.meta.frozen && contract.meta.fingerprint !== null) {

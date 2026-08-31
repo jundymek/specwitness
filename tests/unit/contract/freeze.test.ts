@@ -139,6 +139,109 @@ describe('freeze', () => {
   });
 });
 
+describe('freeze — contradictory lifecycle metadata is refused, never normalised', () => {
+  // `parseContract` rejects these three shapes, but `freeze` takes an in-memory
+  // `Contract` whose TYPE still permits them — 2.6 and 2.7 build contracts in
+  // memory. Two functions in one module must not disagree about what a valid
+  // contract is: a primitive that can EMIT a document its sibling parser
+  // refuses is the same class of bug as the parser accepting one.
+
+  it('refuses a frozen contract with a matching fingerprint but no frozenAt', () => {
+    // Previously returned unchanged by the idempotent path, which meant
+    // `serializeContract(freeze(c))` produced a file `parseContract` rejects.
+    const base = frozen();
+    const noTimestamp: Contract = { ...base, meta: { ...base.meta, frozenAt: null } };
+
+    expect(() => freeze(noTimestamp, LATER)).toThrow(IntegrityError);
+  });
+
+  it('refuses a frozen contract carrying no fingerprint at all', () => {
+    const base = frozen();
+    const noFingerprint: Contract = { ...base, meta: { ...base.meta, fingerprint: null } };
+
+    expect(() => freeze(noFingerprint, LATER)).toThrow(IntegrityError);
+  });
+
+  it('refuses a draft carrying a stale fingerprint rather than overwriting it', () => {
+    // Previously fell through to the freezing branch and silently overwrote the
+    // stale hash — laundering a half-edited frozen contract into a clean freeze,
+    // which is exactly the silent redefinition this module exists to prevent.
+    const base = draft();
+    const stale: Contract = {
+      ...base,
+      meta: { ...base.meta, fingerprint: FROZEN_FINGERPRINT },
+    };
+
+    expect(() => freeze(stale, AT)).toThrow(IntegrityError);
+  });
+
+  it('refuses a draft carrying a stale frozenAt', () => {
+    const base = draft();
+    const stale: Contract = {
+      ...base,
+      meta: { ...base.meta, frozenAt: '2026-08-31T09:05:00.000Z' },
+    };
+
+    expect(() => freeze(stale, AT)).toThrow(IntegrityError);
+  });
+
+  it('names the contract in the refusal so the caller can say which one', () => {
+    const base = frozen();
+    const noTimestamp: Contract = { ...base, meta: { ...base.meta, frozenAt: null } };
+
+    try {
+      freeze(noTimestamp, LATER);
+      expect.unreachable('expected an IntegrityError');
+    } catch (err) {
+      expect((err as Error).message).toContain('epic-7');
+      expect((err as IntegrityError).hint).toBeDefined();
+    }
+  });
+
+  it('agrees with parseContract on every lifecycle combination', () => {
+    // The property that matters: whatever the parser refuses, freeze refuses;
+    // whatever the parser accepts, freeze accepts. One definition of valid.
+    const base = frozen();
+    const combos: Array<[boolean, string | null, string | null]> = [
+      [true, FROZEN_FINGERPRINT, '2026-08-31T09:05:00.000Z'], // consistent frozen
+      [false, null, null], // consistent draft
+      [true, FROZEN_FINGERPRINT, null],
+      [true, null, '2026-08-31T09:05:00.000Z'],
+      [true, null, null],
+      [false, FROZEN_FINGERPRINT, null],
+      [false, null, '2026-08-31T09:05:00.000Z'],
+      [false, FROZEN_FINGERPRINT, '2026-08-31T09:05:00.000Z'],
+    ];
+
+    for (const [isFrozenFlag, fp, at] of combos) {
+      const contract: Contract = {
+        ...base,
+        meta: { ...base.meta, frozen: isFrozenFlag, fingerprint: fp, frozenAt: at },
+      };
+
+      const parserAccepts = (() => {
+        try {
+          parseContract(serializeContract(contract), 'p');
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+
+      const freezeAccepts = (() => {
+        try {
+          freeze(contract, LATER);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+
+      expect(freezeAccepts, `freeze and parseContract disagree on [${String(isFrozenFlag)}, ${String(fp)}, ${String(at)}]`).toBe(parserAccepts);
+    }
+  });
+});
+
 describe('isFrozen — the cheap read that never throws', () => {
   it.each([
     ['a draft', draft, false],
