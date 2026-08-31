@@ -172,8 +172,13 @@ export function normalizeReason(raw: string): string {
 export function amend(input: AmendInput): Contract {
   const { contract, at } = input;
 
-  const reason = normalizeReason(input.reason);
+  // INTEGRITY FIRST, ALWAYS — including when a second thing is also wrong.
+  // Validating the reason first would tell an operator holding a tampered
+  // contract to write a better rationale; they would go and write one, for an
+  // amendment that can never legitimately happen. The wrong error does not
+  // merely misinform here, it sends someone off to do work that cannot land.
   const supersededFingerprint = assertAmendable(contract);
+  const reason = normalizeReason(input.reason);
 
   const supersededEntry = {
     version: contract.spec.version,

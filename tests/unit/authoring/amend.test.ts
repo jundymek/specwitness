@@ -274,6 +274,39 @@ describe('amend', () => {
       ).toThrow(IntegrityError);
     });
 
+    it('reports tampering even when the reason is ALSO invalid', () => {
+      // Integrity first, always — including when a second thing is wrong. If the
+      // reason were validated first, an operator handed a tampered contract
+      // would be told to write a better rationale, and would go and write one,
+      // for an amendment that can never legitimately happen. The wrong error
+      // here does not just misinform, it sends someone off to do work that
+      // cannot land.
+      let thrown: unknown;
+      try {
+        amend({ contract: tamperedContract(), reason: '   ', at: AT });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(IntegrityError);
+      expect(thrown).not.toBeInstanceOf(UsageError);
+    });
+
+    it('reports tampering even when the reason is too long', () => {
+      let thrown: unknown;
+      try {
+        amend({
+          contract: tamperedContract(),
+          reason: 'x'.repeat(MAX_REASON_LENGTH + 1),
+          at: AT,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(IntegrityError);
+    });
+
     it('refuses a blank reason — the reason IS the audit trail', () => {
       expect(() => amend({ contract: frozenContract(), reason: '   ', at: AT })).toThrow(
         UsageError,
