@@ -449,6 +449,47 @@ describe('P2 (round 5) — an H1 claiming to be a story with no parseable id', (
   });
 });
 
+describe('P1 (round 6) — ambiguity at the epic level refuses too', () => {
+  function ingestFrom(project: string) {
+    return () =>
+      ingestEpic({
+        projectRoot: join(FIXTURES, project),
+        epicId: '7',
+        planningArtifacts: 'docs/planning-artifacts',
+        implementationArtifacts: 'docs/implementation-artifacts',
+      });
+  }
+
+  it('refuses when the epics file declares the same epic twice', () => {
+    // The first heading won and `sectionEnd` stopped at the second, so every
+    // story in the later declaration was dropped while ingestion succeeded.
+    expect(ingestFrom('dup-epic')).toThrow(/is declared 2 times/);
+  });
+
+  it('refuses when two directories match the same epic', () => {
+    // epic-7-old and epic-7-new have disjoint stories and no precedence rule
+    // between them; merging fabricates an epic that exists in neither.
+    expect(ingestFrom('dup-dirs')).toThrow(/2 directories for epic 7/);
+  });
+
+  it('refuses a story file with two Acceptance Criteria sections', () => {
+    expect(ingestFrom('dup-sections')).toThrow(/2 '## Acceptance Criteria' sections/);
+  });
+
+  it("leaves this repository's own well-formed artifacts unaffected", () => {
+    // Four new refusals landed in one pass; the guard against over-refusing is
+    // that the real specimens still ingest.
+    expect(() =>
+      ingestEpic({
+        projectRoot: fileURLToPath(new URL('../../../', import.meta.url)),
+        epicId: '1',
+        planningArtifacts: 'docs/planning-artifacts',
+        implementationArtifacts: 'docs/implementation-artifacts',
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe('P2 — containment holds through a symlink inside the root', () => {
   it('refuses a symlinked epics file pointing outside the project', () => {
     // The root-level realpath check passes here: the root itself is fine, and

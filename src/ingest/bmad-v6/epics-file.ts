@@ -86,7 +86,8 @@ export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
 
   const doc = readMarkdown(absolutePath, relativePath, realPathOrUndefined(rootPath));
   const { lines } = doc;
-  const epicIndex = findEpicHeading(doc, request.epicNumber);
+  const epicHeadings = findEpicHeadings(doc, request.epicNumber);
+  const epicIndex = epicHeadings[0];
 
   if (epicIndex === undefined) {
     return {
@@ -99,11 +100,22 @@ export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
     };
   }
 
+  const problems: string[] = [];
   const epicEnd = sectionEnd(doc, epicIndex + 1, 2);
   const title = headingText(lines[epicIndex] as string, 2) ?? '';
   const epicTitle = EPIC_HEADING.exec(title)?.[2]?.trim() ?? '';
 
-  const problems: string[] = [];
+  // Two `## Epic 7` headings: the first wins and `sectionEnd` stops at the
+  // second, so every story in the later declaration is dropped and ingestion
+  // still succeeds. There is no rule saying which declaration is the real one,
+  // so there must not be a silent one.
+  if (epicHeadings.length > 1) {
+    problems.push(
+      `${relativePath}: '## Epic ${request.epicNumber}' is declared ${epicHeadings.length} times ` +
+        `(lines ${epicHeadings.map((index) => index + 1).join(', ')})`,
+    );
+  }
+
   const storyStarts = findStoryHeadings(
     doc,
     epicIndex + 1,
@@ -120,6 +132,7 @@ export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
       start,
       storyStarts[position + 1]?.index ?? epicEnd,
       relativePath,
+      problems,
     ),
   );
 
@@ -147,16 +160,17 @@ export const epicsFileSource: EpicSource = {
   read: readEpicsFile,
 };
 
-/** Index of the `## Epic <n>` heading for exactly `epicNumber`. */
-function findEpicHeading(doc: MarkdownDoc, epicNumber: number): number | undefined {
+/** Every `## Epic <n>` heading for exactly `epicNumber`, in document order. */
+function findEpicHeadings(doc: MarkdownDoc, epicNumber: number): number[] {
+  const found: number[] = [];
   for (let index = 0; index < doc.lines.length; index += 1) {
     if (doc.fenced[index] === true) continue;
     const text = headingText(doc.lines[index] as string, 2);
     if (text === undefined) continue;
     const match = EPIC_HEADING.exec(text);
-    if (match !== null && Number(match[1]) === epicNumber) return index;
+    if (match !== null && Number(match[1]) === epicNumber) found.push(index);
   }
-  return undefined;
+  return found;
 }
 
 interface StoryStart {
@@ -223,9 +237,20 @@ function readStory(
   start: StoryStart,
   end: number,
   relativePath: string,
+  problems: string[],
 ): ReadStory {
   const { lines } = doc;
-  const criteriaMarker = findCriteriaMarker(doc, start.index + 1, end);
+  const criteriaMarkers = findCriteriaMarkers(doc, start.index + 1, end);
+  const criteriaMarker = criteriaMarkers[0];
+
+  // A second criteria block in one story is silently ignored otherwise, which
+  // drops real criteria from the contract without a word.
+  if (criteriaMarkers.length > 1) {
+    problems.push(
+      `${relativePath}: story ${start.id} has ${criteriaMarkers.length} acceptance-criteria ` +
+        `blocks (lines ${criteriaMarkers.map((index) => index + 1).join(', ')})`,
+    );
+  }
   const narrativeEnd = criteriaMarker ?? end;
 
   const criteria: AcceptanceCriterion[] =
@@ -270,12 +295,13 @@ function reportDuplicateIds(
   }
 }
 
-function findCriteriaMarker(doc: MarkdownDoc, start: number, end: number): number | undefined {
+function findCriteriaMarkers(doc: MarkdownDoc, start: number, end: number): number[] {
+  const found: number[] = [];
   for (let index = start; index < end; index += 1) {
     if (doc.fenced[index] === true) continue;
-    if (CRITERIA_MARKER.test((doc.lines[index] as string).trim())) return index;
+    if (CRITERIA_MARKER.test((doc.lines[index] as string).trim())) found.push(index);
   }
-  return undefined;
+  return found;
 }
 
 function sourceRef(path: string, index: number): SourceRef {

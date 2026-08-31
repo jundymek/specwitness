@@ -87,6 +87,18 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
     return { stories: [], searched, notes, problems };
   }
 
+  // The layout defines ONE directory per epic. Two matches — `epic-7-old` and
+  // `epic-7-new`, say — have no precedence rule between them, so merging their
+  // story sets fabricates an epic that exists in neither. Refuse instead.
+  if (directories.length > 1) {
+    for (const directory of directories) searched.push(repoPath(rootLabel, directory));
+    problems.push(
+      `${rootLabel} contains ${directories.length} directories for epic ` +
+        `${request.epicNumber}: ${directories.join(', ')}`,
+    );
+    return { stories: [], searched, notes, problems };
+  }
+
   const stories: ReadStory[] = [];
   let epicSource: SourceRef | undefined;
 
@@ -239,6 +251,15 @@ function readStoryFile(
   const narrative = readSection(doc, STORY_SECTION);
   const criteriaSection = findSection(doc, CRITERIA_SECTION);
 
+  // A second section of either kind is silently ignored otherwise, dropping
+  // real criteria (or a real narrative) from the contract without a word.
+  for (const name of [STORY_SECTION, CRITERIA_SECTION]) {
+    const count = countSections(doc, name);
+    if (count > 1) {
+      problems.push(`${relativePath} has ${count} '## ${name}' sections`);
+    }
+  }
+
   if (criteriaSection === undefined) {
     notes.push(`${relativePath} has no '## ${CRITERIA_SECTION}' heading`);
   }
@@ -345,6 +366,18 @@ function findSection(doc: MarkdownDoc, name: string): Section | undefined {
     return { start: index + 1, end: sectionEnd(doc, index + 1, 2) };
   }
   return undefined;
+}
+
+/** How many `## <name>` sections the document declares. */
+function countSections(doc: MarkdownDoc, name: string): number {
+  let count = 0;
+  for (let index = 0; index < doc.lines.length; index += 1) {
+    if (doc.fenced[index] === true) continue;
+    if (headingText(doc.lines[index] as string, 2)?.toLowerCase() === name.toLowerCase()) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function readSection(doc: MarkdownDoc, name: string): string {

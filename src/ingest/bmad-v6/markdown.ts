@@ -319,13 +319,27 @@ function extractListBlock(doc: MarkdownDoc, start: number, end: number): Scanned
     if (!fenced && line.trim() === '') {
       const next = nextNonBlank(doc, index + 1, end);
       if (next === undefined) break;
-      // A fenced example after a blank line belongs to the item above it.
-      if (doc.fenced[next] === true && buffer.length > 0) {
-        buffer.push('');
-        continue;
-      }
-      if (!resumesList(lines[next] as string, baseIndent, ordered)) break;
-      // A loose list: keep the blank inside the current item and continue.
+
+      const following = lines[next] as string;
+      const followingIndent = following.length - following.trimStart().length;
+
+      // The item continues across the blank when what follows still belongs to
+      // it: a fenced example, or any line indented past the marker (a nested
+      // paragraph, a YAML sample, a sub-list). It also continues when the next
+      // item of the same list starts — a loose list. Anything else ends it.
+      //
+      // Without the indent case, a criterion written as
+      //     1. **Then** the nested paragraph keeps its indentation:
+      //
+      //            a nested paragraph
+      // loses the nested paragraph AND everything after it, silently — a
+      // criterion that reads as complete while saying less than the artifact.
+      const continues =
+        doc.fenced[next] === true ||
+        followingIndent > baseIndent ||
+        resumesList(following, baseIndent, ordered);
+
+      if (!continues) break;
       buffer.push('');
       continue;
     }
