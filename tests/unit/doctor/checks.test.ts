@@ -462,6 +462,7 @@ describe('BUILTIN_CHECKS', () => {
       'ports-free',
       // ── appended by story 2.7; the seven above are unchanged and unmoved ──
       'billing-risk-env',
+      'ai-providers',
     ]);
   });
 

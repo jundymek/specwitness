@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createDoctorContext, type DoctorContext } from '../../../src/cli/doctor/context.js';
-import type { DoctorEffects, PortProbe, RunOutcome } from '../../../src/cli/doctor/effects.js';
+import type {
+  DoctorEffects,
+  PortProbe,
+  ProviderProbe,
+  RunOutcome,
+} from '../../../src/cli/doctor/effects.js';
 
 /**
  * Test doubles for doctor's unit tests.
@@ -54,7 +59,26 @@ export interface FakeEffectOptions {
   readonly existingPaths?: readonly string[];
   readonly resolvableModules?: readonly string[];
   readonly occupiedPorts?: Readonly<Record<number, string>>;
+  /**
+   * Provider probe results keyed by the config's provider name (story 2.7).
+   *
+   * Injected rather than spawned: doctor's unit tests start no `claude` and no
+   * `codex`, and a check that needed a real binary to be testable would only be
+   * exercised on machines that happen to have one.
+   */
+  readonly providerProbes?: Readonly<Record<string, ProviderProbe>>;
 }
+
+/** A provider that is simply not installed — the UJ-4 edge case. */
+export const PROVIDER_ABSENT: ProviderProbe = {
+  hermetic: false,
+  binary: 'codex',
+  found: false,
+  capable: false,
+  capabilityDetail: '',
+  reason: 'codex not found on PATH — contract generation unavailable; existing plans still run',
+  auth: null,
+};
 
 export function fakeEffects(options: FakeEffectOptions = {}): DoctorEffects {
   return {
@@ -76,6 +100,15 @@ export function fakeEffects(options: FakeEffectOptions = {}): DoctorEffects {
     async probePort(port): Promise<PortProbe> {
       const reason = options.occupiedPorts?.[port];
       return reason === undefined ? { free: true } : { free: false, reason };
+    },
+    async probeProvider(descriptor) {
+      const probe = options.providerProbes?.[descriptor.name];
+      if (probe === undefined) {
+        throw new Error(
+          `test fixture has no provider probe for "${descriptor.name}" — add one to providerProbes`,
+        );
+      }
+      return probe;
     },
   };
 }

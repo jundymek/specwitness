@@ -18,6 +18,12 @@ import { pathToFileURL } from 'node:url';
 
 import { execa } from 'execa';
 
+import type { Clock } from '../../domain/ports.js';
+import { SystemClock } from '../../infra/clock.js';
+import { createProcessRunner } from '../../infra/process-runner.js';
+
+import { createProviderProbe, type ProbeProvider } from './provider-probe.js';
+
 /** Outcome of a trusted-tooling subprocess (git only). */
 export interface RunOutcome {
   /** `null` when the process was killed (e.g. a timeout) or never started. */
@@ -51,6 +57,17 @@ export interface DoctorEffects {
   resolvesFrom(specifier: string, fromDir: string): boolean;
   /** Binds and immediately releases a localhost port to see whether it is free. */
   probePort(port: number, host: string): Promise<PortProbe>;
+  /**
+   * Readiness of one configured AI provider (story 2.7).
+   *
+   * Calls the ADAPTERS' own capability and auth probes — the same ones a real
+   * invocation runs — and returns them in one normalised shape. Doctor writes
+   * no probe of its own: a second one would drift from what an invocation
+   * actually does, which is the exact failure a diagnostic must not have.
+   * Spawning goes through story 2.3's `ProcessRunner`, never `execa` here, so
+   * probe and invocation cannot classify a missing binary differently.
+   */
+  probeProvider: ProbeProvider;
 }
 
 interface SpawnFailure extends Error {
@@ -236,6 +253,15 @@ async function probePort(port: number, host: string): Promise<PortProbe> {
   });
 }
 
-export function createDoctorEffects(): DoctorEffects {
-  return { runGit, isExecutableFile, pathExists, resolvesFrom, probePort };
+export function createDoctorEffects(clock: Clock = new SystemClock()): DoctorEffects {
+  return {
+    runGit,
+    isExecutableFile,
+    pathExists,
+    resolvesFrom,
+    probePort,
+    probeProvider: createProviderProbe(createProcessRunner(clock)),
+  };
 }
+
+export type { ProviderAuth, ProviderProbe } from './provider-probe.js';

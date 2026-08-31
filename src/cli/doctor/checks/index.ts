@@ -31,6 +31,7 @@ import { configValidCheck } from './config-valid.js';
 import { gitPresentCheck } from './git-present.js';
 import { nodeVersionCheck } from './node-version.js';
 import { playwrightCapabilityCheck } from './playwright-capability.js';
+import { providersCheck } from './providers.js';
 import { portsFreeCheck } from './ports-free.js';
 
 export const BUILTIN_CHECKS: readonly DoctorCheck[] = Object.freeze([
@@ -46,4 +47,8 @@ export const BUILTIN_CHECKS: readonly DoctorCheck[] = Object.freeze([
   // an operator scanning top to bottom should learn that a key is exported
   // before reading which CLI is about to be invoked.
   billingRiskEnvCheck,
+  // Provider readiness LAST: it is the only check that spawns a subprocess it
+  // does not control the speed of, and a reader scanning top to bottom should
+  // meet the cheap, local facts before waiting on two probes.
+  providersCheck,
 ]);

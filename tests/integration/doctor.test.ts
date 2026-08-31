@@ -1,5 +1,5 @@
 import { createServer } from 'node:net';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -99,6 +99,23 @@ async function tryListen(): Promise<HeldPort | undefined> {
  * different machines and the failure would look like a flake rather than an
  * inherited environment.
  */
+/**
+ * A PATH containing git and nothing else.
+ *
+ * Emptying PATH outright would also hide `git`, which is a REQUIRED check — the
+ * run would exit 3 for a reason that has nothing to do with providers. Linking
+ * the real git into an otherwise-empty directory makes "codex is absent" true
+ * regardless of what the developer running this has installed, without breaking
+ * everything else doctor needs.
+ */
+async function gitOnlyPath(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'specwitness-git-only-'));
+  created.push(dir);
+  const { stdout } = await execa('sh', ['-c', 'command -v git']);
+  await symlink(stdout.trim(), join(dir, 'git'));
+  return dir;
+}
+
 async function doctor(
   cwd: string,
   args: string[] = [],
@@ -293,6 +310,7 @@ describe('doctor --json', () => {
       // loosening this to `toContain` would delete the only guarantee that the
       // `--json` check order is stable for the consumers that parse it.
       'billing-risk-env',
+      'ai-providers',
     ]);
     // The human rendering is still available, on the other stream.
     expect(stderr).toContain('node-version');
@@ -375,6 +393,22 @@ describe('doctor and billing-risk environment variables', () => {
     expect(billing?.status).toBe('warn');
     expect(billing?.required).toBe(false);
     expect(billing?.detail).toContain('OPENAI_API_KEY');
+  });
+
+  it('reports a configured provider whose binary is absent, and still exits 0', async () => {
+    // UJ-4's edge case, end to end: with no agent CLI installed, contract
+    // GENERATION is unavailable but execution of existing plans still works.
+    // PATH is emptied for the CHILD only, so the result does not depend on
+    // whether the developer running this happens to have codex installed.
+    const root = await project(WITH_PROVIDER);
+    const binDir = await gitOnlyPath();
+
+    const { exitCode, stdout } = await doctor(root, [], { PATH: binDir });
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('ai-providers');
+    expect(stdout).toMatch(/⚠ ai-providers/);
+    expect(stdout).toContain('codex');
   });
 
   it('says nothing when no provider is configured, even with a key exported', async () => {
