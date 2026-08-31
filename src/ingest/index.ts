@@ -21,7 +21,6 @@
  * empty contract silently passes every future verification run.
  */
 
-import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { AcceptanceCriterion, EpicSpec, EpicStory, SourceRef } from '../domain/epic-spec.js';
@@ -32,6 +31,7 @@ import { schemaVersionFor } from '../schemas/versions.js';
 import { readEpicsFile } from './bmad-v6/epics-file.js';
 import { epicDirectoryPattern, readStoryFiles } from './bmad-v6/story-files.js';
 import type { EpicSourceReading, ReadStory } from './epic-source.js';
+import { isInside, realPathOrUndefined, repoPath } from './repo-path.js';
 
 export type {
   EpicSource,
@@ -107,8 +107,15 @@ export function ingestEpic(input: IngestInput): EpicSpec {
     epicNumber,
     title: fromEpicsFile.title ?? '',
     goal: fromEpicsFile.goal ?? '',
-    stories: stories as readonly EpicStory[],
-    source: fromEpicsFile.epicSource ?? (fromStoryFiles.epicSource as SourceRef),
+    stories,
+    // The epics file declares the epic when it has one; otherwise the per-story
+    // directory does. The final fallback cannot be reached with a non-empty
+    // story list, but pointing at the first story is a truthful answer rather
+    // than a cast that would let `undefined` through if that ever changed.
+    source:
+      fromEpicsFile.epicSource ??
+      fromStoryFiles.epicSource ??
+      (stories[0] as EpicStory).source,
   };
 }
 
@@ -139,26 +146,15 @@ function containedRoot(projectRoot: string, configured: string, key: string): st
     assertInside(realPathOrUndefined(projectRoot) ?? projectRoot, realRoot, configured, key);
   }
 
-  return relative(projectRoot, resolved).split(sep).join('/');
-}
-
-/**
- * The real path of `candidate`, or undefined when it does not exist.
- *
- * A root that is not there yet is a finding for the readers to report ("this
- * directory does not exist"), not a config fault — so its absence must not
- * become a `ConfigError` here.
- */
-function realPathOrUndefined(candidate: string): string | undefined {
-  try {
-    return realpathSync(candidate);
-  } catch {
-    return undefined;
-  }
+  // `repoPath` rather than raw interpolation: a root of `.` makes `relative`
+  // return the empty string, and `${''}/epics.md` is `/epics.md` — a path that
+  // reads correctly but looks absolute, so it is neither portable nor accepted
+  // by `sourceRefSchema`.
+  return repoPath(relative(projectRoot, resolved).split(sep).join('/'));
 }
 
 function assertInside(root: string, candidate: string, configured: string, key: string): void {
-  if (candidate === root || candidate.startsWith(root + sep)) return;
+  if (isInside(root, candidate)) return;
 
   throw new ConfigError(
     `${key}: '${configured}' resolves to ${candidate}, which is outside the project root ${root}`,
@@ -210,7 +206,7 @@ function notFound(
   const searched = [
     ...fromEpicsFile.searched,
     ...fromStoryFiles.searched,
-    `${implementationRoot}/${epicDirectoryPattern(epicNumber)}`,
+    repoPath(implementationRoot, epicDirectoryPattern(epicNumber)),
   ];
   const notes = [...fromEpicsFile.notes, ...fromStoryFiles.notes];
 

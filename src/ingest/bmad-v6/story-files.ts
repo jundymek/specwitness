@@ -29,6 +29,8 @@ import type {
   ReadStory,
 } from '../epic-source.js';
 
+import { assertInsideRoot, realPathOrUndefined, repoPath } from '../repo-path.js';
+
 import {
   extractCriteria,
   headingText,
@@ -61,7 +63,8 @@ const CRITERIA_SECTION = 'Acceptance Criteria';
  * throws.
  */
 export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
-  const searched: string[] = [request.rootLabel];
+  const rootLabel = repoPath(request.rootLabel);
+  const searched: string[] = [rootLabel];
   const notes: string[] = [];
   const rootPath = join(request.projectRoot, request.rootLabel);
 
@@ -69,10 +72,14 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
     return {
       stories: [],
       searched,
-      notes: [`${request.rootLabel} does not exist`],
+      notes: [`${rootLabel} does not exist`],
     };
   }
 
+  // Resolved once: every artifact entry below is checked against it, because a
+  // symlinked story directory or epics file inside a legitimate root still
+  // reads outside the repository.
+  const realRoot = realPathOrUndefined(rootPath);
   const directories = findEpicDirectories(rootPath, request, notes);
   if (directories.length === 0) {
     return { stories: [], searched, notes };
@@ -82,11 +89,13 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
   let epicSource: SourceRef | undefined;
 
   for (const directory of directories) {
-    const relativeDirectory = `${request.rootLabel}/${directory}`;
+    const relativeDirectory = repoPath(rootLabel, directory);
     searched.push(relativeDirectory);
     epicSource ??= { path: relativeDirectory, line: 1, layout: 'story-file' };
 
-    const entries = listEntries(join(rootPath, directory), relativeDirectory);
+    const directoryPath = join(rootPath, directory);
+    assertInsideRoot(realRoot, directoryPath, relativeDirectory);
+    const entries = listEntries(directoryPath, relativeDirectory);
     let found = 0;
 
     for (const entry of entries) {
@@ -102,10 +111,16 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
       }
 
       found += 1;
-      const relativeFile = `${relativeDirectory}/${entry}`;
+      const relativeFile = repoPath(relativeDirectory, entry);
       searched.push(relativeFile);
       stories.push(
-        readStoryFile(join(rootPath, directory, entry), relativeFile, `${match[1]}.${match[2]}`, notes),
+        readStoryFile(
+          join(directoryPath, entry),
+          relativeFile,
+          `${match[1]}.${match[2]}`,
+          notes,
+          realRoot,
+        ),
       );
     }
 
@@ -145,7 +160,7 @@ function findEpicDirectories(
   notes: string[],
 ): string[] {
   const pattern = new RegExp(`^epic-0*${request.epicNumber}(?:-.*)?$`, 'i');
-  const entries = listEntries(rootPath, request.rootLabel);
+  const entries = listEntries(rootPath, repoPath(request.rootLabel));
 
   const matched: string[] = [];
   const epicDirectories: string[] = [];
@@ -158,7 +173,7 @@ function findEpicDirectories(
 
   if (matched.length === 0) {
     notes.push(
-      `${request.rootLabel} contains no ${epicDirectoryPattern(request.epicNumber)} directory` +
+      `${repoPath(request.rootLabel)} contains no ${epicDirectoryPattern(request.epicNumber)} directory` +
         (epicDirectories.length === 0
           ? ' (it contains no epic directories at all)'
           : ` (it contains: ${epicDirectories.sort().join(', ')})`),
@@ -189,8 +204,9 @@ function readStoryFile(
   relativePath: string,
   id: string,
   notes: string[],
+  realRoot: string | undefined,
 ): ReadStory {
-  const lines = readMarkdownLines(absolutePath, relativePath);
+  const lines = readMarkdownLines(absolutePath, relativePath, realRoot);
 
   const narrative = readSection(lines, STORY_SECTION);
   const criteriaSection = findSection(lines, CRITERIA_SECTION);

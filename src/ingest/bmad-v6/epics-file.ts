@@ -30,6 +30,8 @@ import type {
   ReadStory,
 } from '../epic-source.js';
 
+import { realPathOrUndefined, repoPath } from '../repo-path.js';
+
 import {
   extractCriteria,
   headingText,
@@ -69,15 +71,16 @@ const CRITERIA_MARKER = /^\*\*Acceptance Criteria:?\*\*:?\s*$/i;
  * answer.
  */
 export function readEpicsFile(request: EpicSourceRequest): EpicSourceReading {
-  const relativePath = `${request.rootLabel}/${EPICS_FILE_NAME}`;
-  const absolutePath = join(request.projectRoot, request.rootLabel, EPICS_FILE_NAME);
+  const relativePath = repoPath(request.rootLabel, EPICS_FILE_NAME);
+  const rootPath = join(request.projectRoot, request.rootLabel);
+  const absolutePath = join(rootPath, EPICS_FILE_NAME);
   const searched = [relativePath];
 
   if (!existsSync(absolutePath)) {
     return { stories: [], searched, notes: [`${relativePath} does not exist`] };
   }
 
-  const lines = readMarkdownLines(absolutePath, relativePath);
+  const lines = readMarkdownLines(absolutePath, relativePath, realPathOrUndefined(rootPath));
   const epicIndex = findEpicHeading(lines, request.epicNumber);
 
   if (epicIndex === undefined) {

@@ -14,6 +14,7 @@
 import { readFileSync } from 'node:fs';
 
 import { IngestError } from '../../domain/errors.js';
+import { assertInsideRoot } from '../repo-path.js';
 
 /** `1. `, `1) `, `- `, `* `, `+ ` — with the indent that precedes it. */
 const LIST_ITEM = /^(\s*)((?:\d+[.)])|[-*+])(\s+)(.*)$/;
@@ -36,7 +37,15 @@ const ATX_HEADING = /^(#{1,6})\s+(.*)$/;
  * unclassified crash, which would still exit 3 but with "this is a SpecWitness
  * bug" text that sends the user to the wrong place entirely.
  */
-export function readMarkdownLines(absolutePath: string, relativePath: string): string[] {
+export function readMarkdownLines(
+  absolutePath: string,
+  relativePath: string,
+  realRoot?: string,
+): string[] {
+  // Containment is per-file, not just per-root: a symlinked `epics.md` inside a
+  // legitimate root still reads outside the repository.
+  assertInsideRoot(realRoot, absolutePath, relativePath);
+
   let raw: string;
   try {
     raw = readFileSync(absolutePath, 'utf8');
@@ -118,24 +127,89 @@ export interface ScannedCriterion {
  *    `Then` lines with no markers at all, one blank-line-separated block per
  *    criterion.
  *
- * The strategy is chosen by whether the section contains ANY list item, not by
- * what its first line looks like. That distinction is load-bearing: a real
- * per-story file opens its criteria section with a prose line
- * (``From `docs/planning-artifacts/epics.md` (authoritative …):``), so "first
- * line decides" would take the paragraph path and ingest that preamble as
- * criterion 1.
+ * The strategy is chosen by WHERE the first list appears among the section's
+ * blank-line-separated blocks, and both ends of that decision are load-bearing:
+ *
+ *  - A real per-story file opens its criteria section with a prose lead-in
+ *    (``From `docs/planning-artifacts/epics.md` (authoritative …):``), so
+ *    "first line decides" would take the paragraph path and ingest that lead-in
+ *    as criterion 1.
+ *  - But "any list item anywhere decides" is just as wrong in the other
+ *    direction: a paragraph-style section that happens to be followed by a
+ *    trailing `Clarifications` list would have its real Given/When/Then
+ *    criteria silently DISCARDED and replaced by those bullets. Same corruption,
+ *    opposite cause.
+ *
+ * So: a list at block 0 is the criteria; a list at block 1 is the criteria when
+ * block 0 is a lead-in (a paragraph ending in `:`); a list any later is trailing
+ * matter, and the paragraphs before it are the criteria.
  */
 export function extractCriteria(
   lines: readonly string[],
   start: number,
   end: number,
 ): ScannedCriterion[] {
+  const blocks = findBlocks(lines, start, end);
+  const firstList = blocks.findIndex((block) => LIST_ITEM.test(lines[block.start] as string));
+
+  if (firstList === 0) {
+    return extractListBlock(lines, (blocks[0] as Block).start, end);
+  }
+
+  if (firstList === 1 && isLeadIn(lines, blocks[0] as Block)) {
+    return extractListBlock(lines, (blocks[1] as Block).start, end);
+  }
+
+  // No list, or a list far enough down to be trailing matter: the paragraphs
+  // are the criteria, and they stop where that trailing matter begins — which
+  // is at the list, or at the lead-in paragraph that introduces it
+  // (`Clarifications (detail only, no weakening):` and friends), since that
+  // lead-in belongs to the list rather than to the criteria.
+  if (firstList === -1) return extractParagraphBlocks(lines, start, end);
+
+  const preceding = blocks[firstList - 1];
+  const boundary =
+    preceding !== undefined && isLeadIn(lines, preceding)
+      ? preceding.start
+      : (blocks[firstList] as Block).start;
+
+  return extractParagraphBlocks(lines, start, boundary);
+}
+
+/** A blank-line-separated run of non-blank lines. */
+interface Block {
+  readonly start: number;
+  readonly end: number;
+}
+
+function findBlocks(lines: readonly string[], start: number, end: number): Block[] {
+  const blocks: Block[] = [];
+  let blockStart: number | undefined;
+
   for (let index = start; index < end; index += 1) {
-    if (LIST_ITEM.test(lines[index] as string)) {
-      return extractListBlock(lines, index, end);
+    const blank = (lines[index] as string).trim() === '';
+    if (blank) {
+      if (blockStart !== undefined) blocks.push({ start: blockStart, end: index });
+      blockStart = undefined;
+    } else {
+      blockStart ??= index;
     }
   }
-  return extractParagraphBlocks(lines, start, end);
+  if (blockStart !== undefined) blocks.push({ start: blockStart, end });
+
+  return blocks;
+}
+
+/**
+ * True when a paragraph introduces the list that follows it rather than being a
+ * criterion in its own right.
+ *
+ * A lead-in ends in a colon — that is what "here comes the list" looks like in
+ * every real specimen, and what distinguishes it from a Given/When/Then
+ * criterion, which ends in a full stop.
+ */
+function isLeadIn(lines: readonly string[], block: Block): boolean {
+  return (lines[block.end - 1] as string).trimEnd().endsWith(':');
 }
 
 /**
