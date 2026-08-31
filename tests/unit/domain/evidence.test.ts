@@ -399,3 +399,98 @@ describe('the redacting constructors — FR-28 with a seeded secret', () => {
     expect(evidence.explanation).not.toContain(SEEDED_SECRET);
   });
 });
+
+describe('redaction of header lines that carry a log prefix (Codex review, P1)', () => {
+  it('redacts curl-style wire logs, which is what captured gate output actually contains', () => {
+    // The original pattern anchored the header name to the start of the line, so every
+    // one of these leaked. `curl -v` is not an exotic case — it is the single most common
+    // way an HTTP call shows up in a gate's output.
+    const raw = [
+      `> Authorization: Bearer ${ANTHROPIC_SHAPED}-curlleak`,
+      '< Set-Cookie: session=curlcookie; HttpOnly',
+      '* Cookie: session=starcookie',
+      `2026-08-31T20:00:00Z Authorization: Bearer ${ANTHROPIC_SHAPED}-logleak`,
+      '  |  X-Api-Key: pipeleak',
+    ].join('\n');
+
+    const redacted = redactText(raw);
+
+    expect(redacted).not.toContain('curlleak');
+    expect(redacted).not.toContain('curlcookie');
+    expect(redacted).not.toContain('starcookie');
+    expect(redacted).not.toContain('logleak');
+    expect(redacted).not.toContain('pipeleak');
+    // The prefix survives, so the log still reads as a log.
+    expect(redacted).toContain('> Authorization: [REDACTED]');
+    expect(redacted).toContain('< Set-Cookie: [REDACTED]');
+  });
+
+  it('does not treat a longer header name as one of the sensitive ones', () => {
+    // The lookbehind's job. Over-redacting produces evidence nobody can read, and people
+    // respond to unreadable evidence by opening the unredacted file.
+    const redacted = redactText('X-Custom-Authorization-Policy: allow-all');
+
+    expect(redacted).toContain('allow-all');
+  });
+});
+
+describe('two-stream evidence needs two full paths (Codex review, P2)', () => {
+  it('points each truncated stream at its OWN file', () => {
+    const evidence = gateEvidence(
+      {
+        capturedAt: AT,
+        gateId: 'test',
+        status: 'fail',
+        exitCode: 1,
+        stdout: 'o'.repeat(50),
+        stderr: 'e'.repeat(50),
+        stdoutFullPath: 'evidence/gate-test.stdout.txt',
+        stderrFullPath: 'evidence/gate-test.stderr.txt',
+        durationMs: 10,
+      },
+      { capBytes: 8 },
+    );
+
+    // Sharing one pointer would make each marker claim its own distinct content lives in
+    // the other stream's file — and someone would open it and read stderr as stdout.
+    expect(truncationMarker(evidence.stdout)).toContain('evidence/gate-test.stdout.txt');
+    expect(truncationMarker(evidence.stderr)).toContain('evidence/gate-test.stderr.txt');
+  });
+
+  it('refuses a single ambiguous fullPath rather than silently ignoring it', () => {
+    // A caller who passes one holds a specific, wrong belief about where their output
+    // went. Failing closed tells them immediately.
+    expect(() =>
+      gateEvidence(
+        {
+          capturedAt: AT,
+          gateId: 'test',
+          status: 'pass',
+          exitCode: 0,
+          stdout: 'o'.repeat(50),
+          stderr: '',
+          durationMs: 1,
+        },
+        { capBytes: 8, fullPath: 'evidence/gate-test.txt' },
+      ),
+    ).toThrow(InfraError);
+  });
+
+  it('still applies the shared cap and extra patterns to both streams', () => {
+    const evidence = gateEvidence(
+      {
+        capturedAt: AT,
+        gateId: 'test',
+        status: 'fail',
+        exitCode: 1,
+        stdout: 'internal-id=ACME-1234',
+        stderr: 'internal-id=ACME-9999',
+        durationMs: 1,
+      },
+      { extraPatterns: [/ACME-\d+/] },
+    );
+
+    expect(evidence.stdout.text).not.toContain('ACME-1234');
+    expect(evidence.stderr.text).not.toContain('ACME-9999');
+  });
+});

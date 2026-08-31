@@ -143,12 +143,25 @@ const SENSITIVE_HEADERS = new Set([
 /**
  * Header lines in free text: `Authorization: Bearer …`, `Set-Cookie: …`.
  *
- * Handled separately from assignments below because a header value legitimately contains
- * spaces (`Bearer abc`), while an env-style value does not — one regex covering both
- * would either stop at the first space and leak the rest, or swallow the whole line.
+ * Handled separately from the assignment rule below because a header value legitimately
+ * contains spaces (`Bearer abc`), while an env-style value does not — one regex covering
+ * both would either stop at the first space and leak the rest, or swallow the whole line.
+ *
+ * DELIBERATELY NOT ANCHORED TO THE START OF A LINE. Captured gate and probe output is
+ * full of wire logs whose header lines carry a prefix: curl's verbose mode writes
+ * `> Authorization: Bearer …` and `< Set-Cookie: …`, and loggers prepend timestamps. An
+ * anchored pattern misses every one of those, and the assignment rule below does not
+ * catch them either (a header value has spaces in it), so the credential would reach
+ * persisted evidence. Found by review, not by a test — which is why the test beside it
+ * now covers the prefixed forms.
+ *
+ * The lookbehind is what keeps it from over-matching: the header name must not be
+ * preceded by another name character, so `X-Custom-Authorization-Policy` is not treated
+ * as an `authorization` header by accident. Redaction runs to end of line, because that
+ * is exactly the extent of a header value.
  */
 const SENSITIVE_HEADER_LINE =
-  /^([^\S\r\n]*)(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^\r\n]*/gim;
+  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^\r\n]*/gi;
 
 /**
  * `NAME=value`, `NAME: value`, `"name": "value"`, `name='value'`.
@@ -182,6 +195,9 @@ const SENSITIVE_SEGMENTS = new Set([
   'tokens',
   'secret',
   'secrets',
+  'cookie',
+  'cookies',
+  'authorization',
   'password',
   'passwords',
   'passwd',
@@ -215,11 +231,11 @@ function isSensitiveName(name: string): boolean {
  * same as redacting once — which matters because evidence gets copied between fields.
  */
 export function redactText(raw: string, options?: RedactionOptions): string {
-  let text = raw.replace(SENSITIVE_HEADER_LINE, (_match, indent: string, name: string, colon: string) => {
+  let text = raw.replace(SENSITIVE_HEADER_LINE, (_match, name: string) => {
     // The header name is kept: "an Authorization header was present" is diagnostic, and
-    // dropping it would cost information without buying any safety.
-    const separator = colon.trimEnd();
-    return `${indent}${name}${separator} ${REDACTED}`;
+    // dropping it would cost information without buying any safety. Whatever prefix the
+    // line carried is outside the match and survives untouched.
+    return `${name}: ${REDACTED}`;
   });
 
   text = text.replace(
@@ -479,6 +495,41 @@ export type Evidence =
 // The redacting constructors
 // ---------------------------------------------------------------------------
 
+/**
+ * Builds the options for ONE bounded stream of a two-stream member.
+ *
+ * `options.fullPath` is deliberately not inherited: gate and command evidence carry two
+ * independent streams, and handing both the same pointer makes each truncation marker
+ * claim that its own distinct content lives in the other one's file. Callers name the
+ * streams separately on the INPUT (`stdoutFullPath` / `stderrFullPath`), where they
+ * already know which gate the file belongs to.
+ */
+function streamOptions(
+  options: BoundedTextOptions | undefined,
+  fullPath: string | undefined,
+): BoundedTextOptions {
+  return {
+    ...(options?.capBytes === undefined ? {} : { capBytes: options.capBytes }),
+    ...(options?.extraPatterns === undefined ? {} : { extraPatterns: options.extraPatterns }),
+    ...(fullPath === undefined ? {} : { fullPath }),
+  };
+}
+
+/**
+ * Refuses a single `fullPath` on a two-stream constructor rather than silently ignoring
+ * it. A caller who passes one has a specific, wrong belief about where their output was
+ * written, and a truncation marker that points at the wrong file is worse than one that
+ * points nowhere: someone opens it and reads another stream's content as this one's.
+ */
+function rejectAmbiguousFullPath(options: BoundedTextOptions | undefined, member: string): void {
+  if (options?.fullPath !== undefined) {
+    throw new InfraError(
+      `${member} carries two streams, so a single fullPath ('${options.fullPath}') is ambiguous`,
+      'name the streams separately with stdoutFullPath and stderrFullPath on the input',
+    );
+  }
+}
+
 /** Redacts an optional explanation, preserving "absent" rather than turning it into ''. */
 function redactedExplanation(
   explanation: string | undefined,
@@ -496,19 +547,24 @@ export interface GateEvidenceInput {
   readonly stdout: string;
   /** RAW output. It is redacted and bounded here. */
   readonly stderr: string;
+  /** Run-relative path of the FULL redacted stdout, when one was written. */
+  readonly stdoutFullPath?: string;
+  /** Run-relative path of the FULL redacted stderr — a different file from stdout's. */
+  readonly stderrFullPath?: string;
   readonly durationMs: number;
   readonly explanation?: string;
 }
 
 export function gateEvidence(input: GateEvidenceInput, options?: BoundedTextOptions): GateEvidence {
+  rejectAmbiguousFullPath(options, 'gate evidence');
   return {
     kind: 'gate',
     capturedAt: input.capturedAt,
     gateId: input.gateId,
     status: input.status,
     exitCode: input.exitCode,
-    stdout: boundedText(input.stdout, options),
-    stderr: boundedText(input.stderr, options),
+    stdout: boundedText(input.stdout, streamOptions(options, input.stdoutFullPath)),
+    stderr: boundedText(input.stderr, streamOptions(options, input.stderrFullPath)),
     durationMs: input.durationMs,
     ...redactedExplanation(input.explanation, options),
   };
@@ -521,6 +577,10 @@ export interface CommandEvidenceInput {
   readonly exitCode: number | null;
   readonly stdout: string;
   readonly stderr: string;
+  /** Run-relative path of the FULL redacted stdout, when one was written. */
+  readonly stdoutFullPath?: string;
+  /** Run-relative path of the FULL redacted stderr — a different file from stdout's. */
+  readonly stderrFullPath?: string;
   readonly durationMs: number;
   readonly explanation?: string;
 }
@@ -529,14 +589,15 @@ export function commandEvidence(
   input: CommandEvidenceInput,
   options?: BoundedTextOptions,
 ): CommandEvidence {
+  rejectAmbiguousFullPath(options, 'command evidence');
   return {
     kind: 'command',
     capturedAt: input.capturedAt,
     commandId: input.commandId,
     displayCommand: redactText(input.displayCommand, options),
     exitCode: input.exitCode,
-    stdout: boundedText(input.stdout, options),
-    stderr: boundedText(input.stderr, options),
+    stdout: boundedText(input.stdout, streamOptions(options, input.stdoutFullPath)),
+    stderr: boundedText(input.stderr, streamOptions(options, input.stderrFullPath)),
     durationMs: input.durationMs,
     ...redactedExplanation(input.explanation, options),
   };
