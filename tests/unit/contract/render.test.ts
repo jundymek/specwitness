@@ -4,6 +4,7 @@ import {
   CONTRACT_STATUS_SCHEMA_VERSION,
   integrityFor,
   renderStatusHuman,
+  renderCouplingWarnings,
   renderStatusJson,
   type ContractStatus,
 } from '../../../src/cli/contract/render.js';
@@ -179,5 +180,42 @@ describe('renderStatusHuman', () => {
 
   it('ends with a newline', () => {
     expect(renderStatusHuman(FROZEN).endsWith('\n')).toBe(true);
+  });
+});
+
+describe('renderCouplingWarnings', () => {
+  it('returns nothing when no criterion is flagged', () => {
+    expect(renderCouplingWarnings([])).toBe('');
+  });
+
+  it('names each flagged criterion and what matched', () => {
+    const text = renderCouplingWarnings([
+      { id: 'E7-02', hints: [{ kind: 'function-call', match: 'freeze()' }] },
+      { id: 'E7-03', hints: [{ kind: 'file-path', match: 'src/domain/ids.ts' }] },
+    ]);
+
+    expect(text).toContain('E7-02');
+    expect(text).toContain('freeze()');
+    expect(text).toContain('E7-03');
+    expect(text).toContain('src/domain/ids.ts');
+  });
+
+  it('frames the output as review advice, never as a failure', () => {
+    const text = renderCouplingWarnings([
+      { id: 'E7-02', hints: [{ kind: 'function-call', match: 'freeze()' }] },
+    ]).toLowerCase();
+
+    // FR-7 takes the flag branch: this must not read as a rejection, because a
+    // structural criterion may legitimately name a module.
+    expect(text).toContain('review');
+    expect(text).not.toContain('error');
+    expect(text).not.toContain('rejected');
+    expect(text).not.toContain('invalid');
+  });
+
+  it('ends with a newline when it says anything at all', () => {
+    expect(
+      renderCouplingWarnings([{ id: 'E7-02', hints: [{ kind: 'function-call', match: 'f()' }] }]),
+    ).toMatch(/\n$/);
   });
 });

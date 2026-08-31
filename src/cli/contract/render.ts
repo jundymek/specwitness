@@ -27,6 +27,8 @@
  * already carries the only instant that means anything here.
  */
 
+import type { FlaggedCriterion } from '../../authoring/coupling.js';
+
 /**
  * Pinned at 1. See the header: additive evolution only.
  */
@@ -117,6 +119,42 @@ export function renderStatusJson(status: ContractStatus): string {
   };
 
   return `${JSON.stringify(payload, null, 2)}\n`;
+}
+
+/**
+ * The review advice for criteria whose statements reference implementation
+ * (AC1: "flagged in command output for review").
+ *
+ * Returns `''` when nothing is flagged, so the command can print it
+ * unconditionally without emitting a stray blank line.
+ *
+ * DELIBERATELY NOT ERROR-SHAPED. No `ERROR:`, no `WARNING:`, no "rejected",
+ * no "invalid" — because none of those is true. FR-7 allows rejecting coupled
+ * statements OR flagging them, and this product flags: a `structural`
+ * criterion may legitimately name a module, and only the human can tell that
+ * apart from a leaked implementation detail. Wording this as a failure would
+ * train operators to "fix" correct contracts, which is worse than the coupling
+ * it warns about. The command's exit code is unaffected.
+ */
+export function renderCouplingWarnings(flagged: readonly FlaggedCriterion[]): string {
+  if (flagged.length === 0) {
+    return '';
+  }
+
+  const noun = flagged.length === 1 ? 'criterion' : 'criteria';
+  const lines = [
+    `${flagged.length} ${noun} to review: the statements below name implementation`,
+    'details. That is legitimate for a structural criterion and a smell for a',
+    'behavioral one, so it is your call. Your contract was left exactly as the',
+    'provider drafted it.',
+    '',
+  ];
+
+  for (const criterion of flagged) {
+    lines.push(`  ${criterion.id}  ${criterion.hints.map((hint) => hint.match).join(', ')}`);
+  }
+
+  return `${lines.join('\n')}\n`;
 }
 
 /** The human rendering. */
