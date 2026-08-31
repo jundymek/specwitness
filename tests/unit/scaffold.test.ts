@@ -1,4 +1,14 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -133,14 +143,31 @@ describe('readBaseBranch — the DEFAULT branch, not the checked-out one', () =>
     await expect(readBaseBranch(root)).resolves.toBe('develop');
   });
 
-  it('reads origin/HEAD out of packed-refs when there is no loose file', async () => {
+  it('does NOT infer the default from packed remote-tracking branches', async () => {
+    // git leaves symbolic refs loose and never packs them, so packed-refs holds
+    // ordinary branches. Scanning it would pick whichever origin/* came first —
+    // here `develop`, alphabetically before `main` — and silently make it the
+    // branch every epic is verified against.
     await makeGitDir('ref: refs/heads/story/my-feature\n');
+    await makeBranch('story/my-feature');
+    await makeBranch('main');
     await writeFile(
       join(root, '.git', 'packed-refs'),
       '# pack-refs with: peeled fully-peeled sorted \n' +
-        `${'a'.repeat(40)} refs/remotes/origin/trunk\n`,
+        `${'a'.repeat(40)} refs/remotes/origin/develop\n` +
+        `${'b'.repeat(40)} refs/remotes/origin/main\n`,
       'utf8',
     );
+
+    await expect(readBaseBranch(root)).resolves.toBe('main');
+  });
+
+  it('reads the loose symbolic origin/HEAD, which is where git keeps it', async () => {
+    await makeGitDir('ref: refs/heads/story/my-feature\n');
+    await makeBranch('story/my-feature');
+    const originHead = join(root, '.git', 'refs', 'remotes', 'origin', 'HEAD');
+    await mkdir(dirname(originHead), { recursive: true });
+    await writeFile(originHead, 'ref: refs/remotes/origin/trunk\n', 'utf8');
 
     await expect(readBaseBranch(root)).resolves.toBe('trunk');
   });
@@ -583,6 +610,25 @@ describe('nothing is written until the whole layout is known to be valid', () =>
       // Restore write permission so afterEach can clean up.
       await chmod(join(root, '.specwitness'), 0o700);
     }
+  });
+
+  it('leaves no temporary file behind after a successful --force', async () => {
+    // The replace is a write-sibling-then-rename, because opening with `w`
+    // truncates first: a disk-full or a kill between truncate and write would
+    // leave the user's config EMPTY, losing exactly the data the write ordering
+    // exists to protect. Rename within a directory is atomic, so the file is
+    // either wholly the old one or wholly the new one.
+    await makeGitDir();
+    await scaffold(root);
+    await writeFile(configPath(), 'version: 1\n# stale\n', 'utf8');
+
+    await scaffold(root, { force: true });
+
+    const leftovers = (await readdir(join(root, '.specwitness'))).filter((name) =>
+      name.includes('.tmp-'),
+    );
+    expect(leftovers).toEqual([]);
+    expect(await readFile(configPath(), 'utf8')).toContain('baseBranch:');
   });
 
   it('does not create directories when the config entry is invalid', async () => {

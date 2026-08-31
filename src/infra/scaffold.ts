@@ -17,7 +17,7 @@
  * boundary (confirmed with the owner of story 1.6).
  */
 
-import { lstat, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -200,23 +200,25 @@ async function readHeadBranch(gitDir: string): Promise<string | undefined> {
   return match?.[1]?.trim() || undefined;
 }
 
-/** What `origin` calls its default branch, from the symbolic ref git writes on clone. */
+/**
+ * What `origin` calls its default branch, from the symbolic ref git writes on
+ * clone.
+ *
+ * ONLY the loose file. `packed-refs` holds ordinary remote-tracking branches —
+ * git leaves symbolic refs loose and never packs them — so scanning it would
+ * pick whichever `origin/*` happened to come first, and a repository with
+ * packed `origin/develop` and `origin/main` would get `develop` as its base
+ * branch. Absent the symbolic ref, the local `main`/`master` check is the
+ * honest next signal.
+ */
 async function readRemoteDefaultBranch(gitDir: string): Promise<string | undefined> {
   const loose = await readFile(join(gitDir, 'refs', 'remotes', 'origin', 'HEAD'), 'utf8').catch(
     () => undefined,
   );
-  const fromLoose = loose === undefined ? undefined : matchOriginRef(loose);
-  if (fromLoose !== undefined) {
-    return fromLoose;
+  if (loose === undefined) {
+    return undefined;
   }
-
-  // Older clones keep it in packed-refs instead of a loose file.
-  const packed = await readFile(join(gitDir, 'packed-refs'), 'utf8').catch(() => undefined);
-  return packed === undefined ? undefined : matchOriginRef(packed);
-}
-
-function matchOriginRef(contents: string): string | undefined {
-  const match = /refs\/remotes\/origin\/(?!HEAD\b)(\S+)/.exec(contents);
+  const match = /^ref:\s*refs\/remotes\/origin\/(.+)$/m.exec(loose.trim());
   return match?.[1]?.trim() || undefined;
 }
 
@@ -549,9 +551,29 @@ async function ensureFile(
  * tree, at which point they can corrupt the config directly without a race.
  */
 async function write(absolute: string, contents: string, exclusive = false): Promise<void> {
+  if (exclusive) {
+    try {
+      await writeFile(absolute, contents, { encoding: 'utf8', flag: 'wx' });
+    } catch (err) {
+      throw new InfraError(
+        `cannot write ${absolute}: ${describe(err)}`,
+        'check the directory permissions and that the filesystem is not read-only',
+      );
+    }
+    return;
+  }
+
+  // Replacing an existing file: write a sibling and rename over it. Opening
+  // with `w` truncates FIRST, so a disk-full, an I/O error or a kill between
+  // truncate and write would leave the user's config empty — losing exactly the
+  // data the surrounding write ordering exists to protect. `rename` within a
+  // directory is atomic, so the file is either the old one or the new one.
+  const temporary = `${absolute}.tmp-${process.pid}`;
   try {
-    await writeFile(absolute, contents, { encoding: 'utf8', flag: exclusive ? 'wx' : 'w' });
+    await writeFile(temporary, contents, { encoding: 'utf8', flag: 'wx' });
+    await rename(temporary, absolute);
   } catch (err) {
+    await unlink(temporary).catch(() => undefined);
     throw new InfraError(
       `cannot write ${absolute}: ${describe(err)}`,
       'check the directory permissions and that the filesystem is not read-only',
