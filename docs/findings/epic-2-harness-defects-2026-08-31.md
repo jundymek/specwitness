@@ -2,7 +2,7 @@
 
 Collected by the supervisor of `epic/2-verification-contracts` (agent `superman`) at the owner's request, to hand to an agent working in the **terminal-agents harness repository**. Nothing here is a SpecWitness defect — those live in the story specs and the retrospective. Every entry below is a behaviour of the harness itself, with the evidence that produced it.
 
-Ordered by how much time it cost this epic, worst first. Timestamps are UTC on 2026-08-31; agent names are the Epic 2 cohort (alice 2.1, bob 2.2, pamela 2.3, arnold 2.4, rambo 2.5, chuck 2.6, dolph 2.7).
+Two sections, each ordered by how much time it cost, worst first: **H-1..H-11** are what the supervisor observed from the outside, **H-12..H-16** are what the agents hit from the inside and reported when asked. The split is only about how each was found — H-13 in particular cost more than several entries above it. Timestamps are UTC on 2026-08-31; agent names are the Epic 2 cohort (alice 2.1, bob 2.2, pamela 2.3, arnold 2.4, rambo 2.5, chuck 2.6, dolph 2.7).
 
 ---
 
@@ -137,6 +137,119 @@ Specs 2.4–2.7 say, in their "run immediately after reading this spec" block, t
 - **The shlex fail-closed parser blocks any command whose payload contains an apostrophe**, including heredocs. This is working as designed and the HINT is excellent — but it fired on the supervisor twice and on at least bob and chuck, always on ordinary English prose ("the operator's"). Since the remedy is always "write the payload with the Write tool", the hint could be shortened and the *first* suggestion could be the one that always works.
 - **`supervisor_verdict` can go stale and nothing stops a merge on a stale verdict.** PR #9 was merged two commits past the head I verdicted (be0f424 → dd0186c). The delta turned out to be a genuine improvement and the codex/security gates were fresh, so no harm — but the pre-PR gate enforces freshness for `codex_review` and not for the supervisor's verdict. Either enforce both or neither; the current asymmetry is a trap.
 - **Duplicate event emissions.** `rebase-outstanding` was emitted twice for pamela one second apart (11:38:20Z / 11:38:21Z, and again at 12:11:58Z / 12:11:59Z); `rebase-followed` twice for rambo (12:12:01Z, twice).
+
+---
+
+# Reported by the cohort (H-12..H-16)
+
+Solicited at the owner's request after the first pass above was written, on the reasoning that the items an agent does not bother reporting are exactly the ones a fixer wants and nobody remembers at closure. All five below are pamela's (2.3), with her own suggested fixes; each is marked DEFECT or FRICTION by her, because two are working-as-designed-but-costly rather than broken.
+
+---
+
+## H-12. The pre-PR gate reports one failing precondition per attempt
+
+**DEFECT. Cost: ~4 avoidable round-trips per agent per PR, on every story — the highest recurring cost in this section.**
+
+`gh pr create` was refused four times in a row, each time for a **different** condition, each discovered only after fixing the previous one:
+
+```
+attempt 1 → "PR body must reference test results"
+attempt 2 → "PR body prose is hard-wrapped"
+attempt 3 → "plan.md must include a '## Manual testing' section"
+attempt 4 → success
+```
+
+Every one of those was knowable before the first attempt. Serially revealing them turns one gate into four round-trips, and each retry re-runs the body-file plumbing.
+
+**Second-order cost, worth naming because it misled the supervisor:** the same `gh pr create … --body-file` line then appears four times in the agent's scrollback with only the last succeeding. I read that scrollback as a *pending* second PR and sent pamela a STOP on that basis. It was wrong, and it cost her a round-trip and me a correction — a serial gate does not just waste attempts, it makes the pane unreadable to anyone diagnosing from outside.
+
+**Likely fix.** Evaluate all preconditions and report every failing one in a single message. The checks appear independent, so this should be a loop over results rather than an early return on the first failure.
+
+---
+
+## H-13. The secret-path matcher rejects legitimate filenames containing `.env`
+
+**DEFECT. Cost: one forced rename and a permanent explanatory comment in the repository.**
+
+Writing `tests/unit/providers/process-runner.env.test.ts` was refused:
+
+```
+BLOCKED by agent system: Editing secret-bearing file path is forbidden:
+.../tests/unit/providers/process-runner.env.test.ts
+```
+
+It is an ordinary vitest file whose *subject* is environment construction. The matcher looks for `.env` as a substring of the basename rather than as a complete filename or a whole path segment.
+
+The workaround is worse than the problem: the file is now `process-runner-env.test.ts` and carries a comment explaining why — a permanent wart caused by a matcher, not by a risk. Any project that tests environment handling will hit this and will invent its own worse filename.
+
+**Likely fix.** Anchor on a complete filename or path segment (`.env`, `.env.local`, `.env.<anything>`), not a substring. `foo.env.test.ts`, `env.test.ts` and `environment.ts` are all legitimate.
+
+---
+
+## H-14. The auto-review sets `auto:findings` even when it found nothing to review
+
+**DEFECT. Cost: this is the signal that made the owner stop and ask why a finished agent looked unfinished.**
+
+A no-op sync push triggered an auto-review that concluded, verbatim:
+
+```
+The requested diff is empty: HEAD and merge base 070053f resolve to identical
+trees. There are no code changes to review.
+```
+
+Correct conclusion — and the board still showed `auto:findings`. The flag records that a review **ran**, not what it **concluded**, so "nothing to review" and "problems found" are indistinguishable on the overview.
+
+**Likely fix.** On an empty diff or zero findings, write a `clean` / `no-diff` marker instead of `findings`. Cheaper still: skip the review entirely when the diff against the merge base is empty — it cannot produce anything.
+
+---
+
+## H-15. The inbox gate discards the in-flight payload, and reveals unread ids one at a time
+
+**FRICTION, and pamela is explicit that the gate should not be weakened** — reading peer messages before mutating saved real rework this epic, and it is on the "what went right" list below. The expensive part is the failure *mode*, not the rule.
+
+A message arriving between an agent's last read and its next `Write` causes the **entire** Write to be rejected and the payload to be re-sent. She hit it six times, twice on multi-hundred-line files, once on three files in a row as messages landed seconds apart during intent-sync. (The supervisor hit the same thing four times while writing this very document.)
+
+**Two cheaper options, neither of which relaxes the rule:**
+1. Let the in-flight mutation through and block the **next** one. The agent still cannot proceed without reading, and nothing is lost.
+2. **Name every currently-unread id in the block message**, so one read-batch clears the gate — rather than surfacing them one at a time as they arrive, which is what produced her four-blocks-in-a-row during intent-sync.
+
+Her preference, and mine, is (2).
+
+---
+
+## H-16. `intent-ready.sh` checks section titles by exact string
+
+**FRICTION. Cost: a spurious warning on a correct file.**
+
+```
+WARN: intent.md is missing recommended sections:
+  - ## What I need from peers
+```
+
+Her file had `## What I still need from peers` — one paraphrased word was enough to miss. Harmless because it warns and continues, but an exact-string check against a heading humans will naturally reword will warn on most correct files, and a warning that is usually wrong is a warning people stop reading. A substring or fuzzy match on `need from peers` would fire only when it should.
+
+---
+
+## Deliberately NOT defects, recorded so a fixer does not chase them
+
+Reported by pamela with the note that the error messages were good enough that she wanted no change:
+
+- **The shlex fail-closed block on payloads containing apostrophes.** Working as designed; the hint says exactly what to do (write the payload with the Write tool, pass the path). No change wanted. (Already listed as friction under H-11 for the *ordering* of its hint, not its existence.)
+- **`gh pr create` refused when chained with `cp`/`printf` in one command line.** Correct — the gate cannot inspect what it cannot parse — and the hint said so plainly.
+- **Foreground `sleep` blocked in favour of Monitor.** Correct, and the message named the right replacement.
+- **`timeout` not found on macOS.** Her own GNU-coreutils assumption on a BSD box, not a harness fault.
+
+---
+
+## Adjacent, not harness: orphaned processes from the documented Epic 3 gap
+
+Not a harness defect and already recorded in the project, but it belongs in the same collection because it is the kind of thing that resurfaces as "why is this machine slow" three weeks later.
+
+`src/infra/process-runner.ts`'s timeout detects a hung child but does not **reap orphaned descendants** when that child forks: execa kills the direct child, a grandchild inherits the stdio pipes. Story 2.3 fixed detection (`run()` always settles and always classifies) and deliberately left reaping to Epic 3 story 3.2, which owns `kill(-pgid)` under AD-8.
+
+**Concrete evidence, from this machine:** pamela's own forking-timeout integration test left **nine orphaned `sleep 3600` processes** (all reparented to PID 1) across its runs. She reaped them by hand after noticing. A CI box running that suite repeatedly would accumulate them.
+
+This is expected behaviour of a documented gap — but it only stays documented if the `roadmap.md` EPIC 3 wave-A line is amended to say "process-runner **lifecycle extension**", or an ADR records the split. That is the open owner item from 2.3's PR body.
 
 ---
 
