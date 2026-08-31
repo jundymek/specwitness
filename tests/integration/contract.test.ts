@@ -379,6 +379,40 @@ describe('contract <epic> — a tampered contract', () => {
     expect(payload.integrity).toBe('mismatch');
   });
 
+  it('is reported by the HUMAN rendering too, not only in --json (2.7)', async () => {
+    // Story 2.7's Task 3 asks for both renderings. An operator reading the
+    // default output must learn the contract is tampered without having to
+    // remember that --json says more than the text does.
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+    await tamper(root);
+
+    const result = await run(root, 'contract', '7', '--status');
+
+    expect(result.exitCode).toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/tampered|mismatch/i);
+  });
+
+  it('is refused by --amend, which cannot launder it into the audit trail (2.7)', async () => {
+    // UJ-5's core: the only legitimate way forward from a tampered contract is
+    // to restore it, never to amend it. Amending would write a history entry
+    // over content that never passed an integrity check, giving the tampering a
+    // clean chain of custody. Runs with `input: ''`, so the TTY refusal fires
+    // first — which is itself the point: an agent gets no further either way.
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+    await tamper(root);
+    const before = await contractText(root);
+
+    const result = await run(root, 'contract', '7', '--amend', '--reason', 'making it pass');
+
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('ERROR:');
+    expect(await contractText(root)).toBe(before);
+  });
+
   it('refuses a re-freeze with exit 3 and an ERROR/HINT pair', async () => {
     const root = await project();
     await run(root, 'contract', '7');
