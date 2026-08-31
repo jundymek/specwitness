@@ -534,3 +534,101 @@ describe('the pipeline-layer rule (story 3.3)', () => {
     expect(exitCode).toBe(0);
   });
 });
+
+
+/**
+ * Story 3.6 — the `report-layer` rule.
+ *
+ * APPENDED, deliberately. Story 3.3 appended `pipeline-layer` cases to this
+ * same file in wave A and this describe shares **zero `expect()`** with them:
+ * two stories in one file that assert on each other's cases is how a rebase
+ * turns into a merge negotiation (Epic 2's pattern).
+ *
+ * What the rule is for. `src/report/**` renders a `RunResult` and computes
+ * nothing (AD-11). That promise is enforced structurally rather than by
+ * review: a renderer that cannot import `src/infra/`, `src/config/` or
+ * `node:fs` cannot look up a fact the model does not already carry, and cannot
+ * read a secret off disk to print it either. The spine's layer graph shows
+ * `REP -> DOM` and nothing else, which makes this the strictest of the
+ * application layers — stricter than `ingest-core-only`, which permits Node
+ * built-ins because reading planning artifacts off disk is what ingestion is.
+ */
+describe('the report layer may reach the core and nothing else', () => {
+  it('blocks src/report from importing node:fs', async () => {
+    // The AC3 property in its most direct form: a renderer that can open a
+    // file can compute a fact the RunResult does not contain, and the terminal
+    // and JSON views have drifted before anyone notices.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'report/__probe-reads-disk.ts',
+      "import { readFileSync } from 'node:fs';\n" +
+        'export const contractStatus = (p: string) => readFileSync(p, "utf8");\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('report-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks src/report from importing an adapter', async () => {
+    // The specific import this rule was negotiated over: story 3.5's
+    // serializer had to live in `src/schemas/result.ts` rather than in
+    // `src/infra/run-store.ts`, because a serializer inside infra is one the
+    // JSON renderer cannot legally call — and the byte-equality property would
+    // then need a second serializer, which is what guarantees drift.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'report/__probe-imports-infra.ts',
+      "import { SystemClock } from '../infra/clock.js';\nexport const c = SystemClock;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('report-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks src/report from importing another application layer', async () => {
+    // Application layers do not import each other. `report` reading `ingest`
+    // (or `authoring`, or `pipeline`) would let a renderer re-derive a fact
+    // from the planning artifacts instead of rendering the model it was given.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'report/__probe-imports-ingest.ts',
+      "import { normalizeRepoPath } from '../ingest/repo-path.js';\n" +
+        'export const n = normalizeRepoPath;\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('report-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('lets src/report import the core, its own siblings and npm', async () => {
+    // The permit half. A rule that forbids everything is not a guard, it is a
+    // wall: this is the exact shape the two renderers ship as — the domain
+    // model in, the schemas serializer for the persisted bytes, and one
+    // sibling module for the shared vocabulary.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'report/__probe-glyphs.ts', "export const PASS = '\\u2713 pass';\n");
+    await writeModule(
+      tree,
+      'report/__probe-render.ts',
+      "import type { CriterionResult } from '../domain/result.js';\n" +
+        "import { SCHEMA_VERSIONS } from '../schemas/versions.js';\n" +
+        "import { PASS } from './__probe-glyphs.js';\n" +
+        'export const render = (c: CriterionResult): string =>\n' +
+        '  `${c.criterionId} ${PASS} ${SCHEMA_VERSIONS.resultTaxonomy}`;\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('report-layer');
+    expect(exitCode).toBe(0);
+  });
+});
