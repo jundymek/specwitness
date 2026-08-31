@@ -65,7 +65,14 @@ const CRITERIA_SECTION = 'Acceptance Criteria';
  */
 export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
   const rootLabel = repoPath(request.rootLabel);
-  const searched: string[] = [rootLabel];
+  // The directory pattern is named as searched even when nothing matched: AC3
+  // asks the error to say WHERE it looked, and "the epic-7 directory" is the
+  // thing a reader will go and check. Recording it here rather than in
+  // `ingestEpic` is what keeps the orchestrator free of BMAD knowledge.
+  const searched: string[] = [
+    rootLabel,
+    repoPath(rootLabel, epicDirectoryPattern(request.epicNumber)),
+  ];
   const notes: string[] = [];
   const problems: string[] = [];
   const rootPath = join(request.projectRoot, request.rootLabel);

@@ -86,3 +86,16 @@ export interface EpicSource {
   readonly id: string;
   read(request: EpicSourceRequest): EpicSourceReading;
 }
+
+/**
+ * A source bound to the configured root it reads.
+ *
+ * `ingestEpic` receives an ordered list of these and folds it, so which root a
+ * given reader looks in — and which reader supersedes which — is knowledge that
+ * belongs to the format package, not to the orchestrator.
+ */
+export interface ResolvedSource {
+  readonly source: EpicSource;
+  /** Repo-relative, forward-slashed root this source reads. */
+  readonly rootLabel: string;
+}

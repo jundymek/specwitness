@@ -28,9 +28,8 @@ import { ConfigError, IngestError } from '../domain/errors.js';
 import { normalizeEpicId } from '../domain/ids.js';
 import { schemaVersionFor } from '../schemas/versions.js';
 
-import { readEpicsFile } from './bmad-v6/epics-file.js';
-import { epicDirectoryPattern, readStoryFiles } from './bmad-v6/story-files.js';
-import type { EpicSourceReading, ReadStory } from './epic-source.js';
+import { bmadV6Sources } from './bmad-v6/index.js';
+import type { EpicSourceReading, ReadStory, ResolvedSource } from './epic-source.js';
 import { isInside, realPathOrUndefined, repoPath } from './repo-path.js';
 
 export type {
@@ -38,6 +37,7 @@ export type {
   EpicSourceReading,
   EpicSourceRequest,
   ReadStory,
+  ResolvedSource,
 } from './epic-source.js';
 
 /** Everything ingestion needs. Roots are repo-relative and come from config. */
@@ -80,45 +80,57 @@ export function ingestEpic(input: IngestInput): EpicSpec {
     'planning.implementationArtifacts',
   );
 
-  const fromEpicsFile = readEpicsFile({
+  // The orchestrator knows nothing about BMAD: it folds whatever ordered source
+  // list it is given. Swapping in a second format is a new directory beside
+  // `bmad-v6/` and a different list here — never an edit to the merge, and
+  // never anything downstream (FR-6, question Q4).
+  const readings = readAll(bmadV6Sources(planningRoot, implementationRoot), {
     projectRoot,
     epicNumber,
     epicId: canonicalId,
-    rootLabel: planningRoot,
-  });
-  const fromStoryFiles = readStoryFiles({
-    projectRoot,
-    epicNumber,
-    epicId: canonicalId,
-    rootLabel: implementationRoot,
   });
 
-  assertNoUnparseableArtifacts(canonicalId, fromEpicsFile, fromStoryFiles);
+  assertNoUnparseableArtifacts(canonicalId, readings);
 
-  const stories = merge(fromEpicsFile, fromStoryFiles);
+  const stories = merge(readings);
 
   if (stories.length === 0) {
-    throw notFound(canonicalId, epicNumber, implementationRoot, fromEpicsFile, fromStoryFiles);
+    throw notFound(canonicalId, readings);
   }
 
   assertEveryStoryHasCriteria(canonicalId, stories);
+
+  // One rule for all three identity fields: the epic's title, goal and point of
+  // declaration come from the FIRST source in the list that provides them.
+  // Precedence order runs from the broadest artifact (which declares the epic)
+  // to the most detailed (which elaborates individual stories), so the earliest
+  // reading is the one that actually says what this epic IS. Story CONTENT goes
+  // the other way — later sources supersede — which is why the two are separate
+  // rules rather than one.
+  const describing = readings;
 
   return {
     schemaVersion: schemaVersionFor('epicSpec'),
     id: canonicalId,
     epicNumber,
-    title: fromEpicsFile.title ?? '',
-    goal: fromEpicsFile.goal ?? '',
+    title: describing.find((reading) => reading.title !== undefined)?.title ?? '',
+    goal: describing.find((reading) => reading.goal !== undefined)?.goal ?? '',
     stories,
-    // The epics file declares the epic when it has one; otherwise the per-story
-    // directory does. The final fallback cannot be reached with a non-empty
-    // story list, but pointing at the first story is a truthful answer rather
-    // than a cast that would let `undefined` through if that ever changed.
+    // The final fallback cannot be reached with a non-empty story list, but
+    // pointing at the first story is a truthful answer rather than a cast that
+    // would let `undefined` through if that ever changed.
     source:
-      fromEpicsFile.epicSource ??
-      fromStoryFiles.epicSource ??
+      describing.find((reading) => reading.epicSource !== undefined)?.epicSource ??
       (stories[0] as EpicStory).source,
   };
+}
+
+/** Runs every source in order, keeping their readings in the same order. */
+function readAll(
+  sources: readonly ResolvedSource[],
+  request: { projectRoot: string; epicNumber: number; epicId: string },
+): readonly EpicSourceReading[] {
+  return sources.map(({ source, rootLabel }) => source.read({ ...request, rootLabel }));
 }
 
 /**
@@ -174,11 +186,15 @@ function assertInside(root: string, candidate: string, configured: string, key: 
  *
  * Ordering is numeric by task id throughout, so `7.10` follows `7.9`.
  */
-function merge(fromEpicsFile: EpicSourceReading, fromStoryFiles: EpicSourceReading): ReadStory[] {
+function merge(readings: readonly EpicSourceReading[]): ReadStory[] {
   const byId = new Map<string, ReadStory>();
 
-  for (const story of fromEpicsFile.stories) byId.set(story.id, story);
-  for (const story of fromStoryFiles.stories) byId.set(story.id, story);
+  // Readings arrive lowest-precedence first, so a later source simply
+  // overwrites the story ids it covers. Ambiguity WITHIN one source is refused
+  // before this point, so every overwrite here is a deliberate supersede.
+  for (const reading of readings) {
+    for (const story of reading.stories) byId.set(story.id, story);
+  }
 
   return [...byId.values()].sort(compareStoryIds);
 }
@@ -198,19 +214,9 @@ function compareStoryIds(left: ReadStory, right: ReadStory): number {
  * tell "wrong epic number" from "wrong root" from "artifact not written yet"
  * without opening a single file.
  */
-function notFound(
-  canonicalId: string,
-  epicNumber: number,
-  implementationRoot: string,
-  fromEpicsFile: EpicSourceReading,
-  fromStoryFiles: EpicSourceReading,
-): IngestError {
-  const searched = [
-    ...fromEpicsFile.searched,
-    ...fromStoryFiles.searched,
-    repoPath(implementationRoot, epicDirectoryPattern(epicNumber)),
-  ];
-  const notes = [...fromEpicsFile.notes, ...fromStoryFiles.notes];
+function notFound(canonicalId: string, readings: readonly EpicSourceReading[]): IngestError {
+  const searched = readings.flatMap((reading) => reading.searched);
+  const notes = readings.flatMap((reading) => reading.notes);
 
   const lines = [
     `${canonicalId}: no stories found in the configured planning artifacts.`,
@@ -237,7 +243,7 @@ function notFound(
  */
 function assertNoUnparseableArtifacts(
   canonicalId: string,
-  ...readings: readonly EpicSourceReading[]
+  readings: readonly EpicSourceReading[],
 ): void {
   const problems = readings.flatMap((reading) => reading.problems ?? []);
   if (problems.length === 0) return;
