@@ -132,7 +132,7 @@ describe('billing-risk-env check', () => {
     const result = await billingRiskEnvCheck.run(ctx);
 
     expect(result.status).toBe('pass');
-    expect(result.detail).toContain('no AI provider is assigned to a role');
+    expect(result.detail).toContain('no AI provider is configured');
   });
 
   it('does not warn about a key no configured provider could ever spend', async () => {
@@ -206,6 +206,11 @@ describe('billing-risk-env check', () => {
 
     expect(result.status).toBe('pass');
     expect(result.detail).not.toContain('could bill');
+    // AC3 still requires the variable to be NAMED, and the detail says what
+    // would turn this into a warning — the operator is told the fact and the
+    // reason it is not yet a risk, rather than nothing.
+    expect(result.detail).toContain('OPENAI_API_KEY');
+    expect(result.detail).toContain('ai.roles');
   });
 
   it('still warns when the config failed to load but a key is present', async () => {

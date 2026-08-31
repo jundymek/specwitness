@@ -99,9 +99,16 @@ export const billingRiskEnvCheck: DoctorCheck = {
     }
 
     if (adapters.length === 0) {
+      // The variable is still NAMED (AC3), and the reason it is not a warning is
+      // spelled out — including what would turn it into one. An operator who
+      // expected a warning learns why there is none; one who later assigns a
+      // role knows what changes.
+      const declared = Object.keys(config.ai.providers ?? {}).length > 0;
       return {
         status: 'pass',
-        detail: `${present.join(', ')} set, but no AI provider is assigned to a role — SpecWitness will not call one`,
+        detail: declared
+          ? `${present.join(', ')} set; providers are declared but no role is assigned to one, so SpecWitness will not call a provider — assigning a role under 'ai.roles' would make this billable`
+          : `${present.join(', ')} set, but no AI provider is configured — SpecWitness will not call one`,
       };
     }
 
