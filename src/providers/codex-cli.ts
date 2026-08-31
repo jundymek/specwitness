@@ -48,7 +48,7 @@ import type { AgentPrompt, AgentProvider, WarnSink } from '../domain/agent-provi
 import { ProviderError } from '../domain/errors.js';
 import type { ChildEnvironment, ProcessRunner } from '../domain/process-runner.js';
 
-import { stripCodeFence } from './text.js';
+import { stripCodeFence, withContextFiles } from './text.js';
 
 /**
  * The binary name, fixed. Never built from config and never interpolated — that
@@ -499,34 +499,6 @@ async function isInsideGitRepo(dir: string): Promise<boolean> {
   }
 }
 
-/**
- * Compose the text the model sees, folding in the envelope's `contextFiles`.
- *
- * Appended as a delimited path list rather than passed through a flag: codex has
- * no probed flag for attaching text files (`-i/--image` is for images), and AD-4
- * forbids reaching for one that has not been tested.
- *
- * The format is BYTE-IDENTICAL to story 2.4's `composePrompt`, deliberately.
- * Both adapters answer the same envelope for the same roles, so a contract's
- * quality must not depend on which provider happened to run — and story 2.6
- * cannot compensate for a difference it cannot see. Dropping `contextFiles`
- * entirely, which is what this file did before, meant the codex path silently
- * lost context the caller had asked for.
- *
- * NOTE — known duplication, raised rather than hidden: this is the same five
- * lines in both adapters. `src/providers/text.ts` (story 2.4's shared helper) is
- * the natural home, but it is already merged and it is not this story's file to
- * edit. Flagged to story 2.4 and the supervisor for consolidation; pinned by a
- * test here in the meantime so the two cannot drift silently.
- */
-function composePrompt(prompt: AgentPrompt): string {
-  if (prompt.contextFiles === undefined || prompt.contextFiles.length === 0) {
-    return prompt.prompt;
-  }
-  const list = prompt.contextFiles.map((file) => `- ${file}`).join('\n');
-  return `${prompt.prompt}\n\nContext files:\n${list}`;
-}
-
 function firstMeaningfulLine(text: string): string | undefined {
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
@@ -730,7 +702,7 @@ async function generate(
     // travels on stdin via codex's own `-` sentinel. The two paths are mutually
     // exclusive: codex APPENDS a piped stdin as a `<stdin>` block when a prompt
     // argument is also present, so sending both would silently duplicate it.
-    const composed = composePrompt(prompt);
+    const composed = withContextFiles(prompt.prompt, prompt.contextFiles);
     const oversized = Buffer.byteLength(composed, 'utf8') > ARGV_PROMPT_LIMIT_BYTES;
     args.push(oversized ? STDIN_PROMPT : composed);
 

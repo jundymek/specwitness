@@ -352,6 +352,14 @@ describe('createClaudeCodeCliProvider — the invocation', () => {
     expect(promptArg).toContain('draft it');
     expect(promptArg).toContain('docs/a.md');
     expect(promptArg).toContain('docs/b.md');
+
+    // LITERAL, not just `toContain` — added by story 2.5 when the formatting
+    // moved into the shared `withContextFiles`. Both adapters answer the same
+    // envelope for the same roles, so the format must be identical on both
+    // sides; a loose assertion would let one drift without the other noticing.
+    // The mirror of this line lives in the codex adapter's suite, so a change to
+    // either wording goes red in both.
+    expect(promptArg).toBe('draft it\n\nContext files:\n- docs/a.md\n- docs/b.md');
   });
 
   it('sends an oversized prompt on stdin, with NO prompt in argv', async () => {
