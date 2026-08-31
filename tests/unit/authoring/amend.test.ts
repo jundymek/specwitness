@@ -7,7 +7,7 @@ import { amend, MAX_REASON_LENGTH } from '../../../src/authoring/amend.js';
 import type { Contract } from '../../../src/domain/contract.js';
 import { IntegrityError, UsageError } from '../../../src/domain/errors.js';
 import { fingerprint } from '../../../src/schemas/canonical.js';
-import { freeze } from '../../../src/schemas/contract.js';
+import { freeze, parseContract, serializeContract } from '../../../src/schemas/contract.js';
 
 /**
  * FR-10 / UJ-5 / ADR-005 — the amendment service.
@@ -176,6 +176,25 @@ describe('amend', () => {
       });
 
       expect(result.meta.history[0]?.reason).toBe('criterion E7-01 was unverifiable as written');
+    });
+
+    it('produces a document the schema accepts, including its history-coherence rule', () => {
+      // 2.2's `ContractSchema` refines the whole document: every history entry's
+      // version must be BELOW `spec.version`, and the entries must ascend. That
+      // rule exists because "an incoherent trail is worse than an absent one,
+      // precisely because it looks like evidence" — and this flow is the only
+      // thing in the product that writes the trail. Asserting the round trip
+      // means the two halves are pinned together rather than merely believed to
+      // agree; if either side drifts, this fails on the writer's side, which is
+      // where the fix belongs.
+      const once = amend({ contract: frozenContract(), reason: 'first change', at: AT });
+      const twice = amend({ contract: freeze(once, LATER), reason: 'second change', at: LATER });
+
+      const reparsed = parseContract(serializeContract(twice), 'epic-7.yaml');
+
+      expect(reparsed.spec.version).toBe(3);
+      expect(reparsed.meta.history.map((entry) => entry.version)).toEqual([1, 2]);
+      expect(reparsed.meta.frozen).toBe(false);
     });
 
     it('produces a draft that freezes to a fingerprint over the AMENDED spec', () => {
