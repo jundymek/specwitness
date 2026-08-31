@@ -407,13 +407,46 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     return await capabilityCheck;
   };
 
-  /** A read-only git query that must succeed; returns trimmed stdout or null. */
-  const query = async (cwd: string, args: readonly string[]): Promise<string | null> => {
+  /**
+   * The outcome of a read-only git query, with the THREE cases kept apart.
+   *
+   * This type exists because collapsing them produced four separate defects in
+   * this story, each found by review and each the same mistake: an earlier
+   * `query()` returned `string | null`, and every caller had to read `null` as
+   * "git said no" — so a hung or unspawnable git became "this is not a
+   * repository", "nothing is registered", or "no candidates, therefore
+   * unambiguous". Every one of those is an infrastructure failure wearing a
+   * product answer's clothes, which is the failure this codebase treats as
+   * first-order.
+   *
+   * Keeping `said-no` and `unavailable` distinct makes that mistake
+   * unspellable rather than merely discouraged: a caller has to name the case
+   * it is handling.
+   */
+  type QueryOutcome =
+    /** git ran and answered. */
+    | { readonly kind: 'ok'; readonly stdout: string }
+    /** git ran and answered NO (non-zero exit) — a fact about the repository. */
+    | { readonly kind: 'said-no'; readonly stderr: string }
+    /** git could not run at all — a fact about the environment. */
+    | { readonly kind: 'unavailable'; readonly detail: string };
+
+  const query = async (cwd: string, args: readonly string[]): Promise<QueryOutcome> => {
     const call = await runGit(cwd, args, queryTimeoutMs);
-    if (call.result.outcome !== 'completed' || call.result.exitCode !== 0) {
-      return null;
+    const unavailable = describeUnavailable(call);
+    if (unavailable !== null) {
+      return { kind: 'unavailable', detail: unavailable };
     }
-    return call.result.stdout.trim();
+    if (call.result.exitCode !== 0) {
+      return { kind: 'said-no', stderr: call.result.stderr.trim() };
+    }
+    return { kind: 'ok', stdout: call.result.stdout.trim() };
+  };
+
+  /** Trimmed stdout, or `null` for BOTH failure kinds — for callers that cannot act on the difference. */
+  const queryText = async (cwd: string, args: readonly string[]): Promise<string | null> => {
+    const outcome = await query(cwd, args);
+    return outcome.kind === 'ok' ? outcome.stdout : null;
   };
 
   /**
@@ -432,7 +465,7 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
    * leaking silently — a reaper that cannot see must say so.
    */
   const listWorktreesIn = async (cwd: string): Promise<WorktreeEntry[] | null> => {
-    const stdout = await query(cwd, worktreeListArgs());
+    const stdout = await queryText(cwd, worktreeListArgs());
     return stdout === null ? null : parseWorktreeList(stdout);
   };
 
@@ -482,8 +515,16 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // Asked FIRST, because a bare repository has no working tree and
     // `--show-toplevel` fails there for a reason that is not "no repository".
     // Distinguishing the two is what lets the refusal say which it was.
+    //
+    // And note which failure kind means what: only git ANSWERING no means
+    // "there is no repository here". A git that could not run at all says
+    // nothing about the directory, and reporting `not-a-repo` for a hung git
+    // would tell an operator their perfectly good repository is not one.
     const bare = await query(cwd, ['rev-parse', '--is-bare-repository']);
-    if (bare === null) {
+    if (bare.kind === 'unavailable') {
+      return { outcome: 'git-unavailable', path: cwd, detail: bare.detail };
+    }
+    if (bare.kind === 'said-no') {
       return {
         outcome: 'not-a-repo',
         path: cwd,
@@ -493,7 +534,7 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
             : 'not a git repository',
       };
     }
-    if (bare === 'true') {
+    if (bare.stdout === 'true') {
       return {
         outcome: 'not-a-repo',
         path: cwd,
@@ -502,15 +543,22 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     }
 
     const toplevel = await query(cwd, ['rev-parse', '--show-toplevel']);
-    if (toplevel === null || toplevel === '') {
+    if (toplevel.kind === 'unavailable') {
+      return { outcome: 'git-unavailable', path: cwd, detail: toplevel.detail };
+    }
+    if (toplevel.kind === 'said-no' || toplevel.stdout === '') {
       return { outcome: 'not-a-repo', path: cwd, detail: 'no working tree' };
     }
-    const worktreeRoot = await resolveReal(toplevel);
+    const worktreeRoot = await resolveReal(toplevel.stdout);
 
-    const commonDirRaw = await query(cwd, ['rev-parse', '--git-common-dir']);
-    if (commonDirRaw === null || commonDirRaw === '') {
+    const commonDir = await query(cwd, ['rev-parse', '--git-common-dir']);
+    if (commonDir.kind === 'unavailable') {
+      return { outcome: 'git-unavailable', path: cwd, detail: commonDir.detail };
+    }
+    if (commonDir.kind === 'said-no' || commonDir.stdout === '') {
       return { outcome: 'not-a-repo', path: cwd, detail: 'no git directory' };
     }
+    const commonDirRaw = commonDir.stdout;
     // `--git-common-dir` answers RELATIVELY from a main worktree (literally
     // `.git`) and absolutely from a linked one. `--path-format=absolute` would
     // settle it but is git 2.31+, above this module's floor, so it is resolved
@@ -672,7 +720,7 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // code path can produce is a sign the classification is wrong, not that
     // the arm is spare.
     const stillARepository = await query(root.worktreeRoot, ['rev-parse', '--is-inside-work-tree']);
-    if (stillARepository === null) {
+    if (stillARepository.kind !== 'ok') {
       return {
         outcome: 'not-a-repo',
         role,
@@ -721,7 +769,7 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     root: RepoRoot,
     ref: string,
   ): Promise<{ refname: string; commit: string }[] | null> => {
-    const stdout = await query(root.worktreeRoot, [
+    const stdout = await queryText(root.worktreeRoot, [
       'for-each-ref',
       '--format=%(refname) %(objectname) %(*objectname)',
       '--',

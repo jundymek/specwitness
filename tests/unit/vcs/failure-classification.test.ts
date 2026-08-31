@@ -27,7 +27,7 @@ import type { RepoRoot } from '../../../src/domain/vcs.js';
 import { SystemClock } from '../../../src/infra/clock.js';
 import { createProcessRunner } from '../../../src/infra/process-runner.js';
 import { createGitVcs } from '../../../src/infra/vcs.js';
-import { git, makeRepo, type FixtureRepo } from './fixture-repo.js';
+import { git, makeRepo, scratchDir, type FixtureRepo } from './fixture-repo.js';
 
 const scratches: string[] = [];
 const containers: string[] = [];
@@ -163,6 +163,40 @@ describe('a repository that breaks after root resolution is not a missing ref', 
     const result = await createGitVcs({ runner: real }).resolveRef(root, 'head', 'no-such-ref');
 
     expect(result.outcome).toBe('not-found');
+  });
+});
+
+describe('an operational git failure is not "this is not a repository"', () => {
+  it('reports git-unavailable when rev-parse times out during root resolution', async () => {
+    const repo = await makeRepo('fail-root-timeout');
+    scratches.push(repo.scratch);
+
+    // `git --version` succeeds, so git is installed; the probe that inspects the
+    // repository then hangs. Reporting `not-a-repo` here would tell an operator
+    // that their perfectly good repository is not one — a false, actionable
+    // diagnosis, and the fourth instance in this story of one helper
+    // collapsing "git could not run" into "git said no".
+    const hanging = createGitVcs({
+      runner: runnerFailing((o) => isSubcommand(o, 'rev-parse'), 'timed-out'),
+    });
+
+    const result = await hanging.resolveRoot({ explicitRoot: repo.path, cwd: repo.path });
+
+    expect(result.outcome).toBe('git-unavailable');
+  });
+
+  it('still reports a genuine non-repository as not-a-repo', async () => {
+    const scratch = await scratchDir('fail-root-genuine');
+    scratches.push(scratch);
+
+    // The other half: only a COMPLETED non-zero git response means "no
+    // repository here". Without this the fix above would swallow the real case.
+    const result = await createGitVcs({ runner: real }).resolveRoot({
+      explicitRoot: scratch,
+      cwd: scratch,
+    });
+
+    expect(result.outcome).toBe('not-a-repo');
   });
 });
 
