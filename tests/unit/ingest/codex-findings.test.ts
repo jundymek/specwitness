@@ -229,6 +229,66 @@ describe('P2 (round 2) — unreadable directory metadata is a named IngestError'
   });
 });
 
+describe('P2 (round 3) — a story file whose heading contradicts its filename', () => {
+  it('refuses rather than attributing another story\'s criteria to this one', () => {
+    // A copied-and-renamed artifact: named 7.1-copied.md, heading says 8.1.
+    // Trusting the filename would put story 8.1's acceptance criteria into the
+    // contract under 7.1, silently, with a source reference that looks right.
+    expect(() =>
+      ingestEpic({
+        projectRoot: join(FIXTURES, 'heading-mismatch'),
+        epicId: '7',
+        planningArtifacts: 'docs/planning-artifacts',
+        implementationArtifacts: 'docs/implementation-artifacts',
+      }),
+    ).toThrow(IngestError);
+  });
+
+  it('names both the filename story and the heading story', () => {
+    try {
+      ingestEpic({
+        projectRoot: join(FIXTURES, 'heading-mismatch'),
+        epicId: '7',
+        planningArtifacts: 'docs/planning-artifacts',
+        implementationArtifacts: 'docs/implementation-artifacts',
+      });
+      throw new Error('expected ingestEpic to throw');
+    } catch (error) {
+      expect((error as IngestError).message).toContain('named for story 7.1');
+      expect((error as IngestError).message).toContain('heading says story 8.1');
+    }
+  });
+});
+
+describe('P2 (round 3) — the story source line is the heading, not line 1', () => {
+  it('points at the H1 even when front matter precedes it', () => {
+    // The H1 sits on line 6 of the fixture. Reporting line 1 would send a
+    // reader to the front matter instead of to the story.
+    const spec = ingestEpic({
+      projectRoot: join(FIXTURES, 'frontmatter'),
+      epicId: '7',
+      planningArtifacts: 'docs/planning-artifacts',
+      implementationArtifacts: 'docs/implementation-artifacts',
+    });
+
+    const story = spec.stories[0];
+    expect(story?.id).toBe('7.1');
+    expect(story?.title).toBe('Heading below front matter');
+    expect(story?.source.line).toBe(6);
+  });
+
+  it('still reports line 1 when the heading really is the first line', () => {
+    const spec = ingestEpic({
+      projectRoot: join(FIXTURES, 'stories-only'),
+      epicId: '7',
+      planningArtifacts: 'docs/planning-artifacts',
+      implementationArtifacts: 'docs/implementation-artifacts',
+    });
+
+    expect(spec.stories.find((story) => story.id === '7.1')?.source.line).toBe(1);
+  });
+});
+
 describe('P2 — containment holds through a symlink inside the root', () => {
   it('refuses a symlinked epics file pointing outside the project', () => {
     // The root-level realpath check passes here: the root itself is fine, and

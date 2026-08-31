@@ -66,6 +66,7 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
   const rootLabel = repoPath(request.rootLabel);
   const searched: string[] = [rootLabel];
   const notes: string[] = [];
+  const problems: string[] = [];
   const rootPath = join(request.projectRoot, request.rootLabel);
 
   if (!existsSync(rootPath)) {
@@ -82,7 +83,7 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
   const realRoot = realPathOrUndefined(rootPath);
   const directories = findEpicDirectories(rootPath, request, notes);
   if (directories.length === 0) {
-    return { stories: [], searched, notes };
+    return { stories: [], searched, notes, problems };
   }
 
   const stories: ReadStory[] = [];
@@ -119,6 +120,7 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
           relativeFile,
           `${match[1]}.${match[2]}`,
           notes,
+          problems,
           realRoot,
         ),
       );
@@ -132,7 +134,7 @@ export function readStoryFiles(request: EpicSourceRequest): EpicSourceReading {
   // Numeric ordering, not lexicographic: '7.10' sorts before '7.2' as a string.
   const ordered = [...stories].sort(compareStoryIds);
 
-  return { epicSource, stories: ordered, searched, notes };
+  return { epicSource, stories: ordered, searched, notes, problems };
 }
 
 /** The per-story layout as an `EpicSource` (question Q4's seam). */
@@ -226,6 +228,7 @@ function readStoryFile(
   relativePath: string,
   id: string,
   notes: string[],
+  problems: string[],
   realRoot: string | undefined,
 ): ReadStory {
   const lines = readMarkdownLines(absolutePath, relativePath, realRoot);
@@ -252,23 +255,56 @@ function readStoryFile(
     notes.push(`${relativePath} has an empty '## ${CRITERIA_SECTION}' section`);
   }
 
+  const heading = findStoryHeading(lines);
+
+  // A file named 7.1-*.md whose H1 says `# Story 8.1` is a copied-and-renamed
+  // artifact. Trusting the filename would attribute another story's acceptance
+  // criteria to 7.1 in the contract — silently, and with a source reference
+  // that looks right. Same fail-closed rule as a mismatched heading in the
+  // epics file: SpecWitness either honours the claim or refuses.
+  if (heading?.id !== undefined && heading.id !== id) {
+    problems.push(
+      `${relativePath}:${heading.line}: file is named for story ${id} but its heading says ` +
+        `story ${heading.id}`,
+    );
+  }
+
   return {
     id,
-    title: readTitle(lines),
+    title: heading?.title ?? '',
     narrative,
     acceptanceCriteria: criteria,
-    source: { path: relativePath, line: 1, layout: 'story-file' },
+    // The H1's real line, not 1: a file with front matter or `Status:` metadata
+    // ahead of its heading would otherwise send the reader to the wrong place.
+    source: { path: relativePath, line: heading?.line ?? 1, layout: 'story-file' },
   };
 }
 
-/** The H1 title, with the `Story <n>.<m>:` prefix removed when present. */
-function readTitle(lines: readonly string[]): string {
-  for (const line of lines) {
-    const text = headingText(line, 1);
+interface StoryHeading {
+  /** Title with the `Story <n>.<m>:` prefix removed when there was one. */
+  readonly title: string;
+  /** 1-based line of the H1. */
+  readonly line: number;
+  /** The story id the heading claims, when it spells one out. */
+  readonly id?: string;
+}
+
+/** The file's H1, with whatever it claims about which story it is. */
+function findStoryHeading(lines: readonly string[]): StoryHeading | undefined {
+  for (let index = 0; index < lines.length; index += 1) {
+    const text = headingText(lines[index] as string, 1);
     if (text === undefined) continue;
-    return STORY_TITLE.exec(text)?.[3]?.trim() ?? text;
+
+    const match = STORY_TITLE.exec(text);
+    if (match === null) return { title: text, line: index + 1 };
+
+    return {
+      title: (match[3] ?? '').trim(),
+      line: index + 1,
+      id: `${match[1]}.${match[2]}`,
+    };
   }
-  return '';
+  return undefined;
 }
 
 interface Section {
