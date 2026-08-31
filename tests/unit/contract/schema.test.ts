@@ -206,6 +206,130 @@ describe('parseContract — accepts what it must not reject', () => {
   });
 });
 
+describe('parseContract — criterion ids are identities, so they must be unique', () => {
+  it('rejects two criteria sharing an id, naming the id and the position', () => {
+    // AD-5: plans reference criteria BY ID ONLY and never embed statements. Two
+    // criteria answering to `E7-01` make a plan reference ambiguous — a probe
+    // could be compiled against one expectation and its result reported against
+    // the other — and the ambiguity would be frozen and fingerprinted, i.e.
+    // authoritative. The PRD Glossary calls an id "stable", which is only
+    // meaningful if it identifies exactly one criterion.
+    const text = fixture('epic-7-frozen.yaml').replace('id: E7-03', 'id: E7-01');
+
+    try {
+      parseContract(text, 'contracts/epic-7.yaml');
+      expect.unreachable('expected a ConfigError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as Error).message).toContain('E7-01');
+      // The path points at the DUPLICATE, not at the first occurrence: the
+      // second one is the line the operator has to change.
+      expect((err as Error).message).toMatch(/spec\.criteria\.2/);
+      expect((err as ConfigError).hint).toBeDefined();
+    }
+  });
+
+  it('reports every duplicate, not just the first', () => {
+    const text = fixture('epic-7-frozen.yaml')
+      .replace('id: E7-02', 'id: E7-01')
+      .replace('id: E7-03', 'id: E7-01');
+
+    try {
+      parseContract(text, 'p');
+      expect.unreachable('expected a ConfigError');
+    } catch (err) {
+      expect((err as Error).message).toMatch(/spec\.criteria\.1/);
+      expect((err as Error).message).toMatch(/spec\.criteria\.2/);
+    }
+  });
+
+  it('still accepts distinct ids that merely look similar', () => {
+    const text = fixture('epic-7-frozen.yaml').replace('id: E7-03', 'id: E7-030');
+
+    expect(parseContract(text, 'p').spec.criteria).toHaveLength(3);
+  });
+});
+
+describe('parseContract — spec.epic must be the canonical epic id', () => {
+  it.each([
+    ['a padded id', 'epic-07'],
+    ['a bare number', '7'],
+    ['an uppercase prefix', 'EPIC-7'],
+    ['something else entirely', 'onboarding'],
+  ])('rejects %s', (_name, epic) => {
+    // `domain/ids.ts` is the only normalizer and `epic-7` is its canonical
+    // output (spine Identifiers row). A contract persisted with `epic-07` would
+    // disagree with the CLI's normalized id and with its own file path — and,
+    // being inside `spec`, the discrepancy would be frozen and fingerprinted.
+    const text = fixture('epic-7-draft.yaml').replace('epic: epic-7', `epic: "${epic}"`);
+
+    expect(() => parseContract(text, 'p')).toThrow(ConfigError);
+  });
+
+  it('accepts the canonical form', () => {
+    expect(parseContract(fixture('epic-7-draft.yaml'), 'p').spec.epic).toBe('epic-7');
+  });
+});
+
+describe('parseContract — criterion ids must belong to this contract epic', () => {
+  it("rejects a criterion whose id names another epic", () => {
+    // The epic number is embedded in the stable identifier that plans and
+    // reports key on, so `E8-01` inside an epic-7 contract is a criterion
+    // belonging to a different contract — a copy-paste between two epics,
+    // frozen and made authoritative.
+    const text = fixture('epic-7-frozen.yaml').replace('id: E7-02', 'id: E8-02');
+
+    try {
+      parseContract(text, 'contracts/epic-7.yaml');
+      expect.unreachable('expected a ConfigError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as Error).message).toContain('E8-02');
+      expect((err as Error).message).toMatch(/epic-7/);
+      expect((err as Error).message).toMatch(/spec\.criteria\.1/);
+    }
+  });
+
+  it('accepts every criterion whose epic component matches', () => {
+    expect(parseContract(fixture('epic-7-frozen.yaml'), 'p').spec.criteria).toHaveLength(3);
+  });
+
+  it('is not fooled by a padded epic component', () => {
+    // `E07-01` is already rejected by the id format itself; this pins that the
+    // epic-match refinement does not accidentally accept it by normalising.
+    const text = fixture('epic-7-frozen.yaml').replace('id: E7-01', 'id: E07-01');
+
+    expect(() => parseContract(text, 'p')).toThrow(ConfigError);
+  });
+});
+
+describe('parseContract — frozenAt must agree with the frozen state', () => {
+  it('rejects a frozen contract with no frozenAt', () => {
+    const text = fixture('epic-7-frozen.yaml').replace(
+      'frozenAt: 2026-08-31T09:05:00.000Z',
+      'frozenAt: null',
+    );
+
+    expect(() => parseContract(text, 'p')).toThrow(IntegrityError);
+  });
+
+  it('rejects a draft carrying a freeze timestamp', () => {
+    const text = fixture('epic-7-draft.yaml').replace(
+      'frozenAt: null',
+      'frozenAt: 2026-08-31T09:05:00.000Z',
+    );
+
+    expect(() => parseContract(text, 'p')).toThrow(IntegrityError);
+  });
+
+  it('accepts the two consistent combinations', () => {
+    expect(parseContract(fixture('epic-7-frozen.yaml'), 'p').meta.frozenAt).toBe(
+      '2026-08-31T09:05:00.000Z',
+    );
+    expect(parseContract(fixture('epic-7-draft.yaml'), 'p').meta.frozenAt).toBeNull();
+  });
+});
+
 describe('serializeContract — human-readable and lossless', () => {
   it('round-trips a parsed contract back to identical bytes', () => {
     const text = fixture('epic-7-frozen.yaml');

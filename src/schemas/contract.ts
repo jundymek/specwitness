@@ -52,7 +52,7 @@ import type {
   Criterion,
 } from '../domain/contract.js';
 import { ConfigError, IntegrityError } from '../domain/errors.js';
-import { isCriterionId } from '../domain/ids.js';
+import { isCriterionId, normalizeEpicId, parseCriterionId } from '../domain/ids.js';
 import { canonicalize, fingerprint } from './canonical.js';
 import { KindSchema, SeveritySchema, VerifiabilitySchema } from './enums.js';
 import { schemaVersionFor } from './versions.js';
@@ -140,10 +140,32 @@ export const CriterionSchema = z
   })
   .strict();
 
+/**
+ * True when `value` is ALREADY the canonical epic id, e.g. `epic-7`.
+ *
+ * `normalizeEpicId` is the only normalizer (spine Identifiers row), so
+ * canonicality is defined as "normalizing it changes nothing" rather than by a
+ * second pattern here. It throws `UsageError` on input it cannot read at all,
+ * which for a persisted file is simply "not canonical".
+ */
+function isCanonicalEpicId(value: string): boolean {
+  try {
+    return normalizeEpicId(value) === value;
+  } catch {
+    return false;
+  }
+}
+
 /** The fingerprinted half. */
 export const ContractSpecSchema = z
   .object({
-    epic: z.string().min(1),
+    // Canonical form only. `epic-07`, `7` and `EPIC-7` all *mean* epic-7, but a
+    // contract persisting one of those would disagree with the CLI's normalized
+    // id and with its own file path — and, living in `spec`, the discrepancy
+    // would be frozen and fingerprinted.
+    epic: z.string().refine(isCanonicalEpicId, {
+      message: "must be a canonical epic id, e.g. 'epic-7' (not 'epic-07' or '7')",
+    }),
     // Integer, so `1` vs `1.0` vs `1e0` can never become a canonicalization
     // question: they all parse to the same JS number and only integers are
     // accepted, so the canonical JSON of a version is unambiguous.
@@ -154,7 +176,51 @@ export const ContractSpecSchema = z
     // a contract mid-edit, and a shape error is the wrong way to say that.
     criteria: z.array(CriterionSchema),
   })
-  .strict();
+  .strict()
+  .superRefine((spec, ctx) => {
+    // Two cross-field rules that no per-criterion schema can express, and that
+    // both matter because a criterion id is an IDENTITY: plans reference
+    // criteria by id only and never embed statements (AD-5), and reports key
+    // results on the same id.
+    const seen = new Map<string, number>();
+
+    spec.criteria.forEach((criterion, index) => {
+      // 1. Uniqueness. Two criteria answering to `E7-01` make a plan reference
+      //    ambiguous — a probe could be compiled against one expectation and
+      //    its result reported against the other, leaving the second
+      //    expectation silently unverified. Frozen, that ambiguity becomes
+      //    authoritative.
+      const first = seen.get(criterion.id);
+      if (first !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['criteria', index, 'id'],
+          message: `duplicate criterion id '${criterion.id}' (already used at criteria[${first}]); ids identify a criterion and must be unique within a contract`,
+        });
+      } else {
+        seen.set(criterion.id, index);
+      }
+
+      // 2. The id's epic component must be THIS contract's epic. `E8-01` inside
+      //    an epic-7 contract is a criterion copy-pasted from another contract;
+      //    since the epic number is embedded in the identifier that plans and
+      //    reports key on, freezing it would make the wrong epic's expectation
+      //    authoritative here.
+      try {
+        const { epicNumber } = parseCriterionId(criterion.id);
+        if (normalizeEpicId(String(epicNumber)) !== spec.epic) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['criteria', index, 'id'],
+            message: `criterion id '${criterion.id}' belongs to a different epic than '${spec.epic}'`,
+          });
+        }
+      } catch {
+        // Malformed ids are already reported by `CriterionSchema`'s refinement;
+        // reporting them twice would only make the message harder to read.
+      }
+    });
+  });
 
 /** Generation provenance. Absence is an explicit `null`, never a missing key. */
 export const ContractProvenanceSchema = z
@@ -310,6 +376,23 @@ export function parseContract(text: string, path: string): Contract {
     throw new IntegrityError(
       `contract at ${path} carries a fingerprint but is not marked frozen`,
       'this is a half-edited frozen contract; restore it with `git checkout`, or clear `meta.fingerprint` and `meta.frozenAt` to make it an honest draft',
+    );
+  }
+
+  // `frozenAt` is part of the same claim. `frozen` / `fingerprint` / `frozenAt`
+  // are three fields recording one fact, and a file where they were edited
+  // independently is contradictory in exactly the same way — reporting it as an
+  // ordinary frozen or draft state would let a partial hand-edit pass as normal.
+  if (contract.meta.frozen && contract.meta.frozenAt === null) {
+    throw new IntegrityError(
+      `contract at ${path} is marked frozen but records no frozenAt timestamp`,
+      'restore the file with `git checkout`, or re-freeze it so the frozen flag, fingerprint and timestamp agree',
+    );
+  }
+  if (!contract.meta.frozen && contract.meta.frozenAt !== null) {
+    throw new IntegrityError(
+      `contract at ${path} records a frozenAt timestamp but is not marked frozen`,
+      'restore the file with `git checkout`, or clear `meta.frozenAt` to make it an honest draft',
     );
   }
 
