@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ProviderDescriptor } from '../../../src/domain/agent-provider.js';
 import type { ProcessResult, ProcessRunOptions } from '../../../src/domain/process-runner.js';
@@ -234,5 +234,111 @@ describe('readProviderProvenance — it costs no extra subprocess', () => {
     await readProviderProvenance(descriptor('codex-cli'), runner);
 
     expect(calls.filter((call) => call.args.includes('--version'))).toHaveLength(1);
+  });
+});
+
+/**
+ * The FR-15 billing warning, across the ordering change this story introduces.
+ *
+ * `generateDraft` takes provenance as VALUES, and story 3.8 requires the edge to
+ * pass them down into it — so the edge must read the version before that call.
+ * The consequence is real and worth pinning rather than asserting in prose: at
+ * the command level, the (cached) `--version` probe now runs a few milliseconds
+ * BEFORE the adapter emits its billing warning, where previously the warning came
+ * first. `DECISIONS.md` D6 records the trade-off and the alternative rejected.
+ *
+ * What must NOT change is the guarantee the adapters' own ordering test exists to
+ * protect, stated in its comment: *"a probe that failed would throw with no
+ * warning at all, so an operator whose key is set would never learn it."* That
+ * outcome is the one that actually costs somebody something, and it is what these
+ * two tests hold. The adapter warns and THEN consults the cache, so a cache the
+ * edge already populated — including with a failure — cannot swallow the warning.
+ *
+ * The safety property is untouched and is not what these tests are about:
+ * withholding is unconditional on every spawn, probes included, so no billing
+ * variable reaches any child either way. The warning is informational; the
+ * withholding is the control.
+ */
+describe('reading provenance first never suppresses the FR-15 billing warning', () => {
+  const originalKey = process.env.ANTHROPIC_API_KEY;
+
+  function withKey<T>(value: string, body: () => Promise<T>): Promise<T> {
+    process.env.ANTHROPIC_API_KEY = value;
+    return body().finally(() => {
+      if (originalKey === undefined) {
+        delete process.env.ANTHROPIC_API_KEY;
+      } else {
+        process.env.ANTHROPIC_API_KEY = originalKey;
+      }
+    });
+  }
+
+  it('still warns when the edge probed first and the probe FAILED', async () => {
+    // The exact scenario the adapter's ordering test guards, replayed through
+    // this story's call sequence: the edge reads provenance (populating the
+    // cache with a failure), and only then does the provider run. The operator
+    // must still be told their key was withheld.
+    await withKey('not-a-real-key-unit-fixture', async () => {
+      const warn = vi.fn();
+      const { runner } = runnerReturning(nonCompletion('not-found'));
+      const deps = {
+        processRunner: runner,
+        clock: { now: () => new Date('2026-08-31T00:00:00.000Z') },
+        warn,
+      };
+      const provider = createClaudeCodeCliProvider(descriptor('claude-code-cli', 'claude'), deps);
+
+      const provenance = await readProviderProvenance(
+        descriptor('claude-code-cli', 'claude'),
+        runner,
+      );
+      expect(provenance).toEqual({ model: null, providerCliVersion: null });
+
+      // The provider still refuses, loudly, exactly as before this story.
+      await expect(provider.generate({ role: 'contract-author', prompt: 'x' })).rejects.toThrow();
+
+      // And the operator was told. This is the outcome that matters.
+      expect(warn.mock.calls.flat().join('\n')).toContain('ANTHROPIC_API_KEY');
+    });
+  });
+
+  it('still warns on the happy path, where the edge probe succeeded', async () => {
+    await withKey('not-a-real-key-unit-fixture', async () => {
+      const warn = vi.fn();
+      const { runner } = runnerReturning(
+        CLAUDE_VERSION,
+        CLAUDE_CAPABLE,
+        ok(claudeEnvelope('{"criteria":[]}')),
+      );
+      const deps = {
+        processRunner: runner,
+        clock: { now: () => new Date('2026-08-31T00:00:00.000Z') },
+        warn,
+      };
+      const provider = createClaudeCodeCliProvider(descriptor('claude-code-cli', 'claude'), deps);
+
+      await readProviderProvenance(descriptor('claude-code-cli', 'claude'), runner);
+      await provider.generate({ role: 'contract-author', prompt: 'x' });
+
+      expect(warn.mock.calls.flat().join('\n')).toContain('ANTHROPIC_API_KEY');
+    });
+  });
+
+  it('withholds the billing variable from the probe the EDGE triggers, too', async () => {
+    // The safety property, stated where the ordering change happens. The edge
+    // passes no `billingEnvVars`, and it must not need to: the adapter's probe
+    // resolves the defaults internally and they can never be dropped. If this
+    // ever regressed, the ordering question would stop being cosmetic.
+    await withKey('not-a-real-key-unit-fixture', async () => {
+      const { runner, calls } = runnerReturning(CLAUDE_VERSION, CLAUDE_CAPABLE);
+
+      await readProviderProvenance(descriptor('claude-code-cli', 'claude'), runner);
+
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.env).toMatchObject({ inherit: true });
+        expect(call.env.withhold).toContain('ANTHROPIC_API_KEY');
+      }
+    });
   });
 });
