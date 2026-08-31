@@ -54,6 +54,7 @@ import {
   writeContractFileAtomically,
 } from '../../authoring/contract-file.js';
 import { generateDraft } from '../../authoring/contract.js';
+import { processAmendIo, runAmend } from './contract-amend.js';
 import { contractStatusState, type LoadedContract } from '../../authoring/verifiable.js';
 import { loadConfig, resolveRoleProvider } from '../../config/index.js';
 import type { Contract } from '../../domain/contract.js';
@@ -78,6 +79,8 @@ interface ContractOptions {
   readonly status?: boolean;
   readonly json?: boolean;
   readonly force?: boolean;
+  readonly amend?: boolean;
+  readonly reason?: string;
 }
 
 export function register(program: Command): void {
@@ -89,6 +92,11 @@ export function register(program: Command): void {
     .option('--status', 'report the contract state without prompting')
     .option('--json', 'with --status, emit a machine-readable report on stdout')
     .option('--force', 'regenerate over an existing DRAFT (never a frozen contract)')
+    .option('--amend', 'supersede a frozen contract with a new version (operator only, requires a terminal)')
+    .option(
+      '--reason <text>',
+      'with --amend, the audit-trail reason; prompted for when omitted. NOT a confirmation bypass',
+    )
     .addHelpText(
       'after',
       '\nRun this at the project root — the directory holding .specwitness/.\n\n' +
@@ -126,6 +134,17 @@ export async function runContract(
     return;
   }
 
+  if (options.amend === true) {
+    await runAmend({
+      projectRoot,
+      epicId: epic,
+      ...(options.reason === undefined ? {} : { reason: options.reason }),
+      now: clock.now(),
+      io: processAmendIo(),
+    });
+    return;
+  }
+
   if (options.freeze === true) {
     await freezeContract(projectRoot, epic, clock);
     return;
@@ -157,6 +176,7 @@ function assertCoherentOptions(options: ContractOptions): void {
   const MODES: readonly (readonly [string, boolean])[] = [
     ['--status', options.status === true],
     ['--freeze', options.freeze === true],
+    ['--amend', options.amend === true],
   ];
 
   const requested = MODES.filter(([, on]) => on).map(([name]) => name);

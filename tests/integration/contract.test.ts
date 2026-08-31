@@ -439,3 +439,70 @@ describe('contract <epic> — incoherent option combinations are refused', () =>
     expect(result.exitCode).toBe(64);
   });
 });
+
+/**
+ * ADR-005 through the built binary (story 2.7).
+ *
+ * `input: ''` gives the child no TTY, which is exactly how the harness and any
+ * coding agent invoke it. These assertions are the security control, observed
+ * from outside the process: no injected predicate, no test seam, just the CLI
+ * an agent would actually run.
+ */
+describe('contract <epic> --amend — AC2, the no-TTY refusal', () => {
+  it('refuses with exit 3 and the ADR-005 wording', async () => {
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+    const before = await contractText(root);
+
+    const result = await run(root, 'contract', '7', '--amend', '--reason', 'scope reduced');
+
+    // 3, not 64: the invocation is well-formed and the context is wrong.
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('ERROR:');
+    expect(result.stderr).toContain('HINT:');
+    expect(result.stderr).toContain('interactive terminal');
+    expect(result.stderr).toContain('operator action');
+    // Nothing was written.
+    expect(await contractText(root)).toBe(before);
+  });
+
+  it('is not bypassed by --force, which is refused as incoherent', async () => {
+    // The flag an agent blocked by the refusal would reach for next: it is the
+    // only override in the command. Refused, not silently ignored — someone
+    // whose --force was dropped would believe they had forced something.
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+    const before = await contractText(root);
+
+    const result = await run(root, 'contract', '7', '--amend', '--force');
+
+    expect(result.exitCode).toBe(64);
+    expect(await contractText(root)).toBe(before);
+  });
+
+  it('offers no --yes, --confirm or --non-interactive in its help', async () => {
+    // ADR-005: "amendments cannot be scripted, by anyone." An agent reads
+    // --help looking for the escape hatch; there must not be one to find.
+    const root = await project();
+
+    const result = await run(root, 'contract', '--help');
+
+    expect(result.stdout).toContain('--amend');
+    expect(result.stdout).not.toMatch(/--yes|--confirm|--non-interactive/);
+  });
+
+  it('refuses a frozen contract regeneration by pointing at --amend', async () => {
+    // The other half of the loop: the hint an operator actually meets first.
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+
+    const result = await run(root, 'contract', '7');
+
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('--amend');
+    expect(result.stderr).toContain('interactive terminal');
+  });
+});
