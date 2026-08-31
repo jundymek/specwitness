@@ -40,9 +40,9 @@
  *   OMISSION, via `ChildEnvironment`.
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import type { AgentPrompt, AgentProvider, WarnSink } from '../domain/agent-provider.js';
 import { ProviderError } from '../domain/errors.js';
@@ -125,6 +125,27 @@ const DEFAULT_BILLING_ENV_VARS: readonly string[] = ['OPENAI_API_KEY'];
  */
 const ARGV_PROMPT_LIMIT_BYTES = 64 * 1024;
 
+/**
+ * Every `codex exec` flag this adapter actually puts on a command line.
+ *
+ * AD-4 permits hardcoding a *tested minimum* — `exec --output-schema`, two
+ * things. That is what we may ASSUME. It is not a licence to use other flags
+ * unprobed: `--output-last-message` is how the answer is captured
+ * deterministically and `--cd` is how the target directory is set explicitly, so
+ * a codex lacking either cannot do this job at all. Probing only the minimum and
+ * then invoking the rest hopefully is precisely the failure AD-4 exists to
+ * prevent — it would report a fully capable CLI and fail at the point of use.
+ *
+ * `--skip-git-repo-check` is deliberately NOT here: it is conditional (needed
+ * only for a non-git target), so its absence is handled at invocation time
+ * rather than disqualifying an otherwise usable CLI.
+ */
+const REQUIRED_EXEC_FLAGS: readonly string[] = [
+  '--output-schema',
+  '--output-last-message',
+  '--cd',
+];
+
 /** `codex exec`'s documented "read the prompt from stdin" sentinel. */
 const STDIN_PROMPT = '-';
 
@@ -176,6 +197,14 @@ export interface CodexCapability {
   readonly outputSchemaSupported: boolean;
   /** `exec` accepts `--skip-git-repo-check`, needed for a non-git `-C` target. */
   readonly skipGitRepoCheckSupported: boolean;
+  /**
+   * Required `exec` flags this codex did NOT advertise, if any.
+   *
+   * Additive field: story 2.7 pinned the fields above and none of them changed,
+   * so its call sites and rendering keep working untouched — `reason` already
+   * carries the human-readable version of this.
+   */
+  readonly missingFlags?: readonly string[];
   /** Operator-facing, present only when something above is false. */
   readonly reason?: string;
 }
@@ -246,6 +275,7 @@ function notFound(reason: string): CodexCapability {
     execAvailable: false,
     outputSchemaSupported: false,
     skipGitRepoCheckSupported: false,
+    missingFlags: REQUIRED_EXEC_FLAGS,
     reason,
   };
 }
@@ -335,6 +365,7 @@ async function probeUncached(
       execAvailable: false,
       outputSchemaSupported: false,
       skipGitRepoCheckSupported: false,
+      missingFlags: REQUIRED_EXEC_FLAGS,
       reason: `${BINARY} has no usable "exec" subcommand — contract generation unavailable`,
     };
   }
@@ -345,14 +376,27 @@ async function probeUncached(
   const outputSchemaSupported = helpText.includes('--output-schema');
   const skipGitRepoCheckSupported = helpText.includes('--skip-git-repo-check');
 
+  // EVERY flag the invocation actually uses is probed, not just AD-4's
+  // hardcodable minimum. `--output-schema` is the minimum we are allowed to
+  // assume; `--output-last-message` and `--cd` are ones we USE, and a capability
+  // we need but cannot confirm must produce a capability error rather than a
+  // hopeful invocation. A codex new enough for `--output-schema` but missing
+  // either of these would otherwise be reported as fully capable and then fail
+  // at the point of use, which is the failure AD-4 exists to prevent.
+  const missingFlags = REQUIRED_EXEC_FLAGS.filter((flag) => !helpText.includes(flag));
+
+  const versionSuffix = reported === undefined ? '' : ` (v${reported})`;
+
   return {
     ...base,
     execAvailable: true,
     outputSchemaSupported,
     skipGitRepoCheckSupported,
-    reason: outputSchemaSupported
-      ? undefined
-      : `${BINARY}${reported === undefined ? '' : ` (v${reported})`} does not accept --output-schema — contract generation unavailable`,
+    missingFlags,
+    reason:
+      missingFlags.length === 0
+        ? undefined
+        : `${BINARY}${versionSuffix} does not accept ${missingFlags.join(' or ')} — contract generation unavailable`,
   };
 }
 
@@ -425,6 +469,34 @@ export async function probeCodexAuth(
       : firstMeaningfulLine(combined) ??
         `${BINARY} doctor exited ${String(result.exitCode)} — auth does not appear usable`,
   };
+}
+
+/**
+ * Whether `dir` is inside a git working tree, by walking up for `.git`.
+ *
+ * Deliberately NOT `git rev-parse`: this adapter's AD-3 contract is that the
+ * only binary it ever spawns is `codex`, and spawning `git` here to answer a
+ * capability question would widen that for no benefit. `.git` is a file as well
+ * as a directory in worktrees and submodules, so existence is the right test
+ * rather than "is a directory".
+ *
+ * Called only when `--skip-git-repo-check` is unavailable, so the common path
+ * touches the filesystem not at all.
+ */
+async function isInsideGitRepo(dir: string): Promise<boolean> {
+  let current = resolve(dir);
+  for (;;) {
+    try {
+      await access(join(current, '.git'));
+      return true;
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) {
+        return false;
+      }
+      current = parent;
+    }
+  }
 }
 
 function firstMeaningfulLine(text: string): string | undefined {
@@ -527,7 +599,12 @@ async function generate(
 
   // A capability we need but could not confirm produces a capability ERROR, not
   // a hopeful invocation (AD-4). Exit 3 — infra, never a product FAIL.
-  if (!capability.found || !capability.execAvailable || !capability.outputSchemaSupported) {
+  if (
+    !capability.found ||
+    !capability.execAvailable ||
+    !capability.outputSchemaSupported ||
+    (capability.missingFlags?.length ?? 0) > 0
+  ) {
     throw new ProviderError(
       capability.reason ?? `${BINARY} cannot author verification artifacts`,
       `install or update the Codex CLI, then re-run 'specwitness doctor'`,
@@ -589,6 +666,17 @@ async function generate(
     if (capability.skipGitRepoCheckSupported) {
       // `-C` at a non-git directory fails without this. Probed, not assumed.
       args.push('--skip-git-repo-check');
+    } else if (!(await isInsideGitRepo(cwd))) {
+      // The flag is unavailable AND the target is not a git repository, so
+      // `codex exec` is certain to refuse. Failing here, naming both facts, is
+      // the capability error AD-4 requires — launching a command already known
+      // to fail would surface as an opaque codex error the operator cannot act
+      // on. Checked only on this branch: for a git target, or a codex that has
+      // the flag, no filesystem work happens at all.
+      throw new ProviderError(
+        `${cwd} is not a git repository and this ${BINARY} does not accept --skip-git-repo-check`,
+        `update the Codex CLI, or run against a directory inside a git repository`,
+      );
     }
     // The prompt is the final positional argument — one element of an argv array
     // handed to execve, never through a shell, so metacharacters in it are inert

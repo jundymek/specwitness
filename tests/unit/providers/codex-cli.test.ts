@@ -94,6 +94,9 @@ describe('probeCodexCapability', () => {
 
     const capability = await probeCodexCapability(runner);
 
+    // Whole-object assertion on purpose: story 2.7 renders these fields, so a
+    // silently added or renamed one should fail here rather than surface as a
+    // blank line in someone's doctor output.
     expect(capability).toEqual({
       binary: 'codex',
       found: true,
@@ -101,6 +104,7 @@ describe('probeCodexCapability', () => {
       execAvailable: true,
       outputSchemaSupported: true,
       skipGitRepoCheckSupported: true,
+      missingFlags: [],
       reason: undefined,
     });
   });
@@ -146,6 +150,39 @@ describe('probeCodexCapability', () => {
     expect(capability.outputSchemaSupported).toBe(false);
     expect(capability.skipGitRepoCheckSupported).toBe(false);
     expect(capability.reason).toContain('--output-schema');
+  });
+
+  it('refuses a codex that advertises --output-schema but not the flags we USE', async () => {
+    // AD-4 lets us hardcode a tested MINIMUM (`exec --output-schema`). That is
+    // what we may assume — not a licence to use other flags unprobed. A codex
+    // new enough for --output-schema but missing --output-last-message would
+    // otherwise be reported fully capable and fail at the point of use, which is
+    // the hopeful invocation AD-4 exists to prevent.
+    const partialHelp = result({
+      stdout: 'Usage: codex exec\n      --output-schema <FILE>\n  -C, --cd <DIR>',
+    });
+    const runner = recordingRunner([VERSION_OK, partialHelp]);
+
+    const capability = await probeCodexCapability(runner);
+
+    expect(capability.outputSchemaSupported).toBe(true);
+    expect(capability.missingFlags).toEqual(['--output-last-message']);
+    expect(capability.reason).toContain('--output-last-message');
+  });
+
+  it('never invokes a codex missing a required flag', async () => {
+    const partialHelp = result({
+      stdout: 'Usage: codex exec\n      --output-schema <FILE>\n  -o, --output-last-message <FILE>',
+    });
+    const runner = recordingRunner([VERSION_OK, partialHelp]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() });
+
+    await expect(
+      provider.generate({ role: 'contract-author', prompt: 'p', jsonSchema: {} }),
+    ).rejects.toThrow(/--cd/);
+
+    // Two probe calls and NO exec: the refusal happens before any invocation.
+    expect(runner.calls).toHaveLength(2);
   });
 
   it('reports a codex with no exec subcommand at all', async () => {
@@ -333,8 +370,12 @@ describe('generate — argv translation (AC1)', () => {
   });
 
   it('omits --skip-git-repo-check when the CLI did not advertise it', async () => {
+    // Complete EXCEPT for --skip-git-repo-check: the conditional flag is the
+    // only variable under test, so every required flag must be present or the
+    // capability gate would refuse before we got here.
     const helpWithoutSkip = result({
-      stdout: 'Usage: codex exec\n      --output-schema <FILE>\n  -o, --output-last-message <FILE>',
+      stdout:
+        'Usage: codex exec\n      --output-schema <FILE>\n  -o, --output-last-message <FILE>\n  -C, --cd <DIR>',
     });
     const runner = recordingRunner([VERSION_OK, helpWithoutSkip, writesAnswer('{}')]);
     const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() });
@@ -451,6 +492,56 @@ describe('generate — failure classification', () => {
     // A hopeful invocation is exactly what AD-4 forbids: only two calls happen
     // (the probe), never an exec.
     expect(runner.calls).toHaveLength(1);
+  });
+
+  it('refuses a non-git target when --skip-git-repo-check is unavailable', async () => {
+    // The flag is missing AND the directory is not a git repository, so
+    // `codex exec` is certain to refuse. Launching it anyway would surface as an
+    // opaque codex error; the capability error names both facts instead.
+    const { mkdtemp } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    // Under the OS temp dir, so no ancestor `.git` can make this a git target.
+    const nonGit = await mkdtemp(join(tmpdir(), 'specwitness-nongit-'));
+
+    const oldHelp = result({
+      stdout:
+        'Usage: codex exec\n      --output-schema <FILE>\n  -o, --output-last-message <FILE>\n  -C, --cd <DIR>',
+    });
+    const runner = recordingRunner([VERSION_OK, oldHelp]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() }, { cwd: nonGit });
+
+    const error = await provider
+      .generate({ role: 'contract-author', prompt: 'p', jsonSchema: {} })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).message).toContain('not a git repository');
+    expect((error as ProviderError).message).toContain('--skip-git-repo-check');
+    // Refused BEFORE invoking: probe calls only.
+    expect(runner.calls).toHaveLength(2);
+
+    const { rm } = await import('node:fs/promises');
+    await rm(nonGit, { recursive: true, force: true });
+  });
+
+  it('still runs on a GIT target when --skip-git-repo-check is unavailable', async () => {
+    // The flag's absence only matters for a non-git target. An older codex must
+    // keep working against an ordinary repository — refusing there would be a
+    // regression dressed up as safety. `process.cwd()` is this repo.
+    const oldHelp = result({
+      stdout:
+        'Usage: codex exec\n      --output-schema <FILE>\n  -o, --output-last-message <FILE>\n  -C, --cd <DIR>',
+    });
+    const runner = recordingRunner([VERSION_OK, oldHelp, writesAnswer('{}')]);
+    const provider = createCodexCliProvider(DESCRIPTOR, { runner, warn: vi.fn() }, {
+      cwd: process.cwd(),
+    });
+
+    await expect(
+      provider.generate({ role: 'contract-author', prompt: 'p', jsonSchema: {} }),
+    ).resolves.toBe('{}');
+    expect(runner.calls[2]?.args).not.toContain('--skip-git-repo-check');
   });
 
   it('classifies a timeout as a provider error naming the bound', async () => {
