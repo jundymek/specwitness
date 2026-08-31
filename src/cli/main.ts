@@ -1,6 +1,7 @@
 import { Command, CommanderError } from 'commander';
 
 import { UsageError, isSpecWitnessError } from '../domain/errors.js';
+import { register as registerContract } from './commands/contract.js';
 import { register as registerDoctor } from './commands/doctor.js';
 import { register as registerInit } from './commands/init.js';
 import { register as registerReport } from './commands/report.js';
@@ -50,6 +51,7 @@ export function buildProgram(): Command {
 
   registerInit(program);
   registerDoctor(program);
+  registerContract(program);
   registerReport(program);
 
   return program;
