@@ -133,7 +133,19 @@ export const CriterionSchema = z
     // lint OR flagged for review" and epics.md story 2.6 AC1 chooses flagging:
     // a `structural` criterion may legitimately name a module, and a schema
     // that rejected it would make that criterion unwritable.
-    statement: z.string().min(1, { message: 'must not be empty' }),
+    //
+    // Emptiness is checked on the TRIMMED length while the value is stored
+    // untrimmed. `min(1)` alone accepts "   ", which `canonicalize` then trims
+    // to "" — so the criterion is FINGERPRINTED as `"statement":""`,
+    // byte-identical to the empty statement rejected on this same line, and
+    // frozen as authoritative. A criterion that asserts nothing can never fail:
+    // a green result that means nothing, which is the outcome this product
+    // exists to make impossible. Trimming itself stays a canonicalization
+    // concern, so the model keeps the original text and serialization stays
+    // lossless.
+    statement: z.string().refine((value) => value.trim().length > 0, {
+      message: 'must not be empty or only whitespace',
+    }),
     kind: KindSchema,
     severity: SeveritySchema,
     verifiability: VerifiabilitySchema,
