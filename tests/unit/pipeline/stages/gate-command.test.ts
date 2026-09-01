@@ -280,6 +280,19 @@ describe('usesUnsupportedEscaping: the ambiguity is detected, not guessed at', (
     expect(usesUnsupportedEscaping("sh -c 'it\\'s'")).toBe(true);
   });
 
+  it('does NOT flag a path separator sitting before a CLOSING quote', () => {
+    // `tool "C:\\work\\"` is an ordinary Windows directory argument. It
+    // tokenizes correctly as `C:\\work\\`, so refusing it would reject a valid
+    // command as an infrastructure failure — the same class of wrong answer
+    // this stage exists to avoid, arriving from the guard rather than the gate.
+    const windows = 'tool "C:\\work\\"';
+    expect(usesUnsupportedEscaping(windows)).toBe(false);
+    expect(splitCommandLine(windows)).toEqual({
+      binary: 'tool',
+      args: ['C:\\work\\'],
+    });
+  });
+
   it('does NOT flag a backslash that is not before a quote', () => {
     // A Windows path or a regex is an ordinary argument and must stay one.
     expect(usesUnsupportedEscaping('tool --path C:\\Users\\dev')).toBe(false);

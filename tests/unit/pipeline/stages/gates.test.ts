@@ -454,6 +454,24 @@ describe('gates stage: AC3 — a gate that could NOT START is infrastructure', (
     expect(runner.calls).toEqual([]);
   });
 
+  it('redacts a credential in the declared command before it reaches an error', async () => {
+    // A declared command can legitimately carry a token — a curl smoke gate is
+    // the obvious case — and a refusal message reaches `printError`, which
+    // writes to stderr verbatim. Without this, refusing a malformed command
+    // would print the credential it contained.
+    const runner = recordingRunner();
+    const gates = declaredGates([
+      { id: 'smoke', run: `curl -H "Authorization: Bearer ${SEEDED_API_KEY}" -e "a\\"b"` },
+    ]);
+
+    const error = await infraErrorFrom(
+      createGatesStage({ gates, runner, writeEvidence: recordingWriter() }).run(stageContext()),
+    );
+
+    expect(error.message).not.toContain(SEEDED_API_KEY);
+    expect(runner.calls).toEqual([]);
+  });
+
   it('refuses a backslash-escaped quote rather than corrupting the argument', async () => {
     // Left alone this mis-groups, the child receives a corrupted argument, it
     // exits non-zero, and the run reports a PRODUCT FAIL — a configuration

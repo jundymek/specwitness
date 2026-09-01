@@ -462,7 +462,12 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
         // the actual cause is the honest answer, and the fix is one character.
         if (usesUnsupportedEscaping(declared)) {
           throw new InfraError(
-            `gate '${gate.id}' uses backslash-escaped quotes, which are not supported: '${declared}'`,
+            // REDACTED: a declared command can legitimately carry a credential
+            // (`curl -H "Authorization: Bearer ..."` is a plausible smoke gate),
+            // and this message reaches `printError`, which writes it to stderr
+            // verbatim. Same leak the spawn-failed diagnosis already closes.
+            `gate '${gate.id}' uses backslash-escaped quotes, which are not supported: ` +
+              `'${redactText(declared)}'`,
             'declared commands are executed without a shell, so a backslash is not an escape — ' +
               'use the other quote style instead, as in: -e \'console.log("ok")\'',
           );
@@ -471,7 +476,7 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
         const { binary, args } = splitCommandLine(declared);
         if (binary === '') {
           throw new InfraError(
-            `gate '${gate.id}' declares a command with no executable: '${declared}'`,
+            `gate '${gate.id}' declares a command with no executable: '${redactText(declared)}'`,
             `set gates[${gate.id}].run in .specwitness/config.yaml to a command starting with a binary`,
           );
         }

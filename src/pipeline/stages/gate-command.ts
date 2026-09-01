@@ -242,11 +242,19 @@ function tokenize(line: string): string[] {
  *     escaping, expansion and operators are not, and the boundary is easier to
  *     hold at a stated limit than at a gradient.
  *
- * Only a backslash immediately before a quote counts. A backslash anywhere else
- * — a Windows path, a regex — is an ordinary character and stays one.
+ * NARROWED so it does not fire on a path separator. A Windows directory
+ * argument whose backslash merely sits before the CLOSING quote tokenizes
+ * correctly and must not be refused — rejecting a valid command as an
+ * infrastructure failure is the same class of wrong answer this stage exists
+ * to avoid. So the detector fires only when the quote is followed by more
+ * content in the argument, which is the shape that actually mis-groups, as
+ * opposed to the shape that merely ends a token.
+ *
+ * A backslash anywhere else — a regex, a path mid-argument — is an ordinary
+ * character and stays one.
  */
 export function usesUnsupportedEscaping(commandLine: string): boolean {
-  return /\\["\']/.test(commandLine);
+  return /\\[\"'](?!\s|$)/.test(commandLine);
 }
 
 /**
