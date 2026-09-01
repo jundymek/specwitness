@@ -178,6 +178,68 @@ describe('the target is never observable half-written (AC1)', () => {
     expect(existsSync(join(run.dir, STAGING))).toBe(false);
   });
 
+  it('reports a post-rename barrier failure as PUBLISHED, not as a failed write', async () => {
+    // Epic 2 retro §5a defect (ii), and the reason `writeResult` returns a report rather
+    // than `void`. Once the rename has run, the document IS on disk; saying the write
+    // failed would make an operator believe nothing changed while the previous result is
+    // gone, and might make a caller retry a write that already committed.
+    const store0 = storeAt();
+    const run = await store0.createRun({ epic: 'epic-7' });
+    const previous = resultFor(run.runId);
+    await store0.writeResult(run.runId, previous);
+
+    // Fails ONLY the directory fsync, which `#writeDurably` performs after the rename.
+    const barrierFails = storeAt({
+      onFsync: (target) => {
+        if (target === 'directory') {
+          throw new Error('EIO: simulated barrier failure after the rename');
+        }
+      },
+    });
+
+    const next: RunResult = { ...previous, epic: 'epic-9' };
+    const report = await barrierFails.writeResult(run.runId, next);
+
+    // Resolved, not thrown — and honest about which half failed.
+    expect(report.durable).toBe(false);
+    expect(report.barrier).toContain('EIO');
+    // And the document really is published, which is what makes the report true.
+    expect(await readFile(join(run.dir, 'result.json'), 'utf8')).toBe(serializeRunResult(next));
+    expect(await barrierFails.hasResult(run.runId)).toBe(true);
+  });
+
+  it('still THROWS when the rename never happened', async () => {
+    // The distinction has to cut both ways, or "non-fatal" would swallow real failures.
+    const store0 = storeAt();
+    const run = await store0.createRun({ epic: 'epic-7' });
+    const previous = resultFor(run.runId);
+    await store0.writeResult(run.runId, previous);
+
+    const failsBeforeRename = storeAt({
+      onFsync: (target) => {
+        if (target === 'file') {
+          throw new Error('simulated failure before the rename');
+        }
+      },
+    });
+
+    await expect(
+      failsBeforeRename.writeResult(run.runId, { ...previous, epic: 'epic-9' }),
+    ).rejects.toBeInstanceOf(InfraError);
+    expect(await readFile(join(run.dir, 'result.json'), 'utf8')).toBe(
+      serializeRunResult(previous),
+    );
+  });
+
+  it('reports durable on the ordinary path', async () => {
+    const store = storeAt();
+    const run = await store.createRun({ epic: 'epic-7' });
+
+    const report = await store.writeResult(run.runId, resultFor(run.runId));
+
+    expect(report).toEqual({ durable: true });
+  });
+
   it('overwrites atomically on a second finalize', async () => {
     // Write 1 is the persist stage's crash-durable snapshot; write 2 carries teardown's
     // entry and the real finishedAt. Both go through this method.

@@ -45,7 +45,21 @@ import { stageOk } from '../stage.js';
  * because this stage needs exactly one capability and handing it the whole store would let
  * a later edit reach the manifest, the evidence files, or another run's directory.
  */
-export type RunResultWriter = (runId: string, result: RunResult) => Promise<void>;
+export type RunResultWriter = (runId: string, result: RunResult) => Promise<FinalizeWrite>;
+
+/**
+ * What the writer reports back.
+ *
+ * `durable: false` means the document WAS published and only the durability barrier after
+ * the rename did not complete. That is a distinct, non-fatal condition: the stage stays
+ * `ok` and records the barrier in its detail, because reporting a committed write as a
+ * failure would tell an operator nothing changed when the file has in fact been replaced.
+ * A write that genuinely did not happen throws instead, and never reaches here.
+ */
+export interface FinalizeWrite {
+  readonly durable: boolean;
+  readonly barrier?: string;
+}
 
 export interface PersistDeps {
   readonly writeResult?: RunResultWriter;
@@ -71,7 +85,17 @@ export function createPersistStage(deps: PersistDeps = {}): Stage {
       // cannot happen, and letting it throw rather than defending against it is the point:
       // a "result" carrying neither a verdict nor an infra error is not a result, and
       // fabricating one would put an outcome nobody decided into a run directory.
-      await writeResult(context.runId, context.snapshot());
+      const written = await writeResult(context.runId, context.snapshot());
+
+      if (!written.durable) {
+        // Published, but the durability barrier did not complete. `ok`, not `error`: the
+        // document is on disk and readable, and calling this a failure is precisely the
+        // lie the Epic 2 retrospective recorded. The detail is persisted and rendered, so
+        // the operator learns the barrier failed without the run's conclusion changing.
+        return stageOk(
+          `result.json written, but not confirmed durable: ${written.barrier ?? 'unknown'}`,
+        );
+      }
 
       return stageOk('result.json written');
     },

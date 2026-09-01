@@ -126,6 +126,27 @@ const RESERVED_FILENAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * What the atomic finalize did.
+ *
+ * Returning this rather than `void` is what makes the story's "post-rename failure is a
+ * DISTINCT, NON-FATAL condition" real instead of a comment. `writeResult` resolves only
+ * when the document has been PUBLISHED — the rename happened and a reader now sees the
+ * new file. If the durability barrier after that rename did not complete, the finalize is
+ * still a success and says so here, with the barrier's own message; it does not raise,
+ * because raising would tell a caller the write did not happen when it did, and a caller
+ * told that may retry or abandon a run whose result is already on disk. That is Epic 2
+ * retro §5a defect (ii), and the whole point of this shape is not to repeat it.
+ *
+ * A genuine failure — one where the rename never happened — still throws.
+ */
+export interface FinalizeReport {
+  /** False when the post-rename directory fsync did not complete. */
+  readonly durable: boolean;
+  /** What the barrier reported. Present only when `durable` is false. */
+  readonly barrier?: string;
+}
+
+/**
  * A stored `result.json`, as both the validated document and the file's own bytes.
  *
  * `report --json` writes `text` verbatim; a renderer consumes `document`. Keeping the raw
@@ -374,25 +395,59 @@ export class RunStore {
    * `finishedAt`. One writer, one serializer, two moments — and the second overwrite is
    * atomic for the same reason the first is.
    *
-   * ON A POST-RENAME FAILURE. `#writeDurably` publishes the file, then fsyncs the
-   * directory OUTSIDE its catch, so a barrier failure raises `#syncDirectory`'s own
-   * accurate message rather than claiming the write did not happen. That distinction is
-   * Epic 2 retro §5a defect (ii) — the shape this story was told not to repeat — and it
-   * is settled the same way in all three of this epic's stage-and-rename sites. The
-   * failure stays an ERROR here rather than a warning, because the entire point of
-   * persisting is that the run survives the crash it was written for; it is recorded on
-   * the `persist` timeline entry and NEVER rewrites the verdict.
+   * ON A POST-RENAME FAILURE — the shape this story was told not to repeat (Epic 2 retro
+   * §5a defect (ii)). Once the rename has published the document, a failed durability
+   * barrier is NOT a failed write, and this method does not report it as one: it resolves
+   * with `{durable: false}` and the barrier's message. Whether the rename happened is
+   * settled by READING THE TARGET BACK, not by inferring it from an error class that
+   * covers both cases.
+   *
+   * Story 3.2 makes the same failure fatal for `manifest.json`, deliberately and
+   * correctly: that record is a PRECONDITION — a worktree is about to be created on the
+   * strength of it. A run result is a published CONCLUSION with nothing downstream acting
+   * on its fsync, so it sits with `src/authoring/contract-file.ts` instead. Three sites,
+   * one rule — never describe a committed write as a failed one — and two different
+   * fatality choices, each made knowingly.
    *
    * The bytes come from `serializeRunResult`, the one `RunResult` → bytes function in the
    * repository (`src/schemas/result.ts`). `--json` renders through that same function, so
    * stdout and this file are byte-identical by construction (Q53) rather than by two code
    * paths agreeing.
    */
-  async writeResult(runId: string, result: RunResult): Promise<void> {
+  async writeResult(runId: string, result: RunResult): Promise<FinalizeReport> {
     // `runDir` validates the id before joining, so a traversal cannot reach the
     // filesystem through this method any more than through the others.
     const dir = this.runDir(runId);
-    await this.#writeDurably(dir, RESULT_FILENAME, serializeRunResult(result));
+    const contents = serializeRunResult(result);
+
+    try {
+      await this.#writeDurably(dir, RESULT_FILENAME, contents);
+      return { durable: true };
+    } catch (cause) {
+      // DID THE RENAME ALREADY HAPPEN? That is the whole question, and it is answered by
+      // LOOKING rather than by inferring from the error. `#writeDurably` raises the same
+      // class for a staging failure and for a post-rename barrier failure, and sniffing
+      // its message would couple this method to another story's wording.
+      //
+      // Reading the target back is exact: if it now holds the bytes we meant to publish,
+      // the rename committed and only the barrier did not. (If the previous document
+      // happened to be byte-identical, this reports committed — which is true in the only
+      // sense that matters, since the file on disk is already what we wanted it to be.)
+      if (!(await this.#holdsExactly(join(dir, RESULT_FILENAME), contents))) {
+        throw cause;
+      }
+
+      return { durable: false, barrier: describe(cause) };
+    }
+  }
+
+  /** True when `path` currently holds exactly `contents`. Any read failure means "no". */
+  async #holdsExactly(path: string, contents: string): Promise<boolean> {
+    try {
+      return (await readFile(path, 'utf8')) === contents;
+    } catch {
+      return false;
+    }
   }
 
   /**

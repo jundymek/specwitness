@@ -72,6 +72,8 @@ function frozenContract(): Contract {
 interface RunOptions {
   /** Replaces the writer, so a durability failure can be simulated. */
   readonly writeResult?: (runId: string, result: RunResult) => Promise<void>;
+  /** Simulates a published-but-unbarriered finalize. */
+  readonly nonDurable?: boolean;
   readonly onComplete?: (result: RunResult) => Promise<void>;
   readonly guard?: () => Contract;
 }
@@ -103,6 +105,7 @@ async function verifyWith(
         writeResult: async (runId, snapshot) => {
           recorder.calls.push({ runId, result: snapshot });
           await write(runId, snapshot);
+          return { durable: true };
         },
       },
     }),
@@ -164,6 +167,60 @@ describe('the persist stage writes the run so far (AC1)', () => {
 
     const persist = result.stages.find((s) => s.stage === 'persist');
     expect(persist?.detail).toMatch(/not.*persist|no.*writer/i);
+  });
+});
+
+describe('a published-but-unbarriered write is NOT a failure (AC1)', () => {
+  /**
+   * The Epic 2 retro §5a defect (ii) shape, on the consumer side.
+   *
+   * `writeResult` resolves `{durable: false}` when the rename published the document and
+   * only the directory fsync afterwards did not complete. Reporting that as a failed
+   * persist would tell an operator nothing changed while `result.json` has in fact been
+   * replaced — a lie about state in the machinery whose entire purpose is that state is
+   * never ambiguous.
+   */
+  async function runWithBarrierFailure(): Promise<RunResult> {
+    return runPipeline({
+      runId: 'run-20260831T200000Z-a3f9',
+      epic: 'epic-3',
+      baseSha: 'b'.repeat(40),
+      headSha: 'c'.repeat(40),
+      environment: ENVIRONMENT,
+      clock: new FixedClock('2026-08-31T20:00:00.000Z'),
+      stages: createStages({
+        assertVerifiableContract: frozenContract,
+        persist: {
+          writeResult: async () => ({
+            durable: false,
+            barrier: 'could not make /runs/run-x durable: EIO',
+          }),
+        },
+      }),
+    });
+  }
+
+  it('records the stage as ok, not error', async () => {
+    const result = await runWithBarrierFailure();
+
+    expect(result.stages.find((s) => s.stage === 'persist')?.status).toBe('ok');
+  });
+
+  it('still says the barrier failed, where a reader will see it', async () => {
+    // Non-fatal must not mean invisible. The detail is persisted and rendered.
+    const result = await runWithBarrierFailure();
+
+    const detail = result.stages.find((s) => s.stage === 'persist')?.detail ?? '';
+    expect(detail).toMatch(/written/i);
+    expect(detail).toMatch(/durable/i);
+    expect(detail).toContain('EIO');
+  });
+
+  it('leaves the verdict and the exit code untouched', async () => {
+    const result = await runWithBarrierFailure();
+
+    expect(result.outcome).toEqual({ verdict: 'PASS' });
+    expect(exitCodeForOutcome(result.outcome)).toBe(0);
   });
 });
 
@@ -280,6 +337,7 @@ describe('EVERY outcome is persisted, including the infra ones (AC1)', () => {
           persist: {
             writeResult: async (_runId, snapshot) => {
               persisted.push(snapshot);
+              return { durable: true };
             },
           },
         }),
