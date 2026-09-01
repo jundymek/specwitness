@@ -171,6 +171,32 @@ const SENSITIVE_HEADER_LINE =
   /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)[^\S\r\n]*:/gi;
 
 /**
+ * Index of the first unescaped `quote` in `text`, or -1.
+ *
+ * A backslash escapes the character after it. Without this,
+ * `curl -H "Authorization: prefix\\"Bearer SECRET" ...` ends the value at the ESCAPED
+ * quote, and everything after it - the credential - survives into the persisted command.
+ *
+ * Backslash escaping is applied inside single quotes too, which POSIX `sh` does not do.
+ * The divergence is deliberate and one-directional: in the only case where the two
+ * readings differ (an escaped delimiter of the same kind), treating it as escaped means
+ * scanning FURTHER and redacting MORE. This is a redactor, not a shell parser; where the
+ * two disagree it takes the reading that cannot leak.
+ */
+function indexOfUnescaped(text: string, quote: string): number {
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '\\') {
+      i += 1;
+      continue;
+    }
+    if (text[i] === quote) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
  * Redacts every sensitive header value in `raw`.
  *
  * A hand-written scan rather than `String.replace`, for one reason: the extent of a value
@@ -182,9 +208,11 @@ const SENSITIVE_HEADER_LINE =
  * and `curl -H "Authorization: ..." -H "X-Api-Key: ..."` is exactly the shape
  * `displayCommand` was added for. Found by re-reading this code, not by a review.
  *
- * Line and quote state are tracked INCREMENTALLY as the scan advances, never by searching
- * backwards from each match. With k headers on a line of length L that is O(L) rather than
- * O(k*L) - the same quadratic trap this file has already paid for once.
+ * Line ends and quote state are both tracked INCREMENTALLY as the scan advances - never by
+ * searching backwards from a match, and never by re-scanning a line that has already been
+ * measured. Every character of the input is examined at most a constant number of times,
+ * so k headers on a line of length L cost O(L) rather than O(k*L) - the same quadratic
+ * trap this file has already paid for once.
  *
  * The extent rules, restated where they are implemented:
  *
@@ -206,12 +234,35 @@ function redactSensitiveHeaders(raw: string): string {
   /** How far the line/quote tracker has consumed. Only ever moves forwards. */
   let scanned = 0;
   let openQuote: string | undefined;
+  /**
+   * End of the line the scan is currently in (index of its `\n`, or the length).
+   *
+   * Cached rather than recomputed per match: `indexOf('\n', ...)` from each match would
+   * re-scan to the end of the line every time, which is O(k*L) for k headers on a line of
+   * length L. V8's character scan is fast enough that it does not show up at realistic
+   * sizes - 4000 headers on a 135 KB line measured 8 ms - but "fast enough today" is
+   * exactly what the quadratic this file already fixed looked like from the outside.
+   * With the cache each line is scanned once, so the total is genuinely linear.
+   */
+  let lineEnd = -1;
+
+  /** True when the previous character was a backslash, so the next one is escaped. */
+  let escaped = false;
 
   const trackTo = (index: number): void => {
     for (let i = scanned; i < index; i += 1) {
       const character = raw[i];
-      if (character === '\n') {
+      if (escaped) {
+        // Carried across calls deliberately: `trackTo` is invoked at arbitrary offsets,
+        // and a backslash landing on the boundary must still escape what follows it.
+        escaped = false;
+        continue;
+      }
+      if (character === '\\') {
+        escaped = true;
+      } else if (character === '\n') {
         openQuote = undefined;
+        escaped = false;
       } else if (character === '"' || character === "'") {
         if (openQuote === character) {
           openQuote = undefined;
@@ -230,13 +281,15 @@ function redactSensitiveHeaders(raw: string): string {
 
     const name = match[1] as string;
     const valueStart = start + match[0].length;
-    const newline = raw.indexOf('\n', valueStart);
-    const lineEnd = newline === -1 ? raw.length : newline;
+    if (valueStart > lineEnd) {
+      const newline = raw.indexOf('\n', valueStart);
+      lineEnd = newline === -1 ? raw.length : newline;
+    }
     const value = raw.slice(valueStart, lineEnd);
 
     let consumed = value.length;
     if (openQuote !== undefined) {
-      const closing = value.indexOf(openQuote);
+      const closing = indexOfUnescaped(value, openQuote);
       if (closing !== -1) {
         consumed = closing;
       }

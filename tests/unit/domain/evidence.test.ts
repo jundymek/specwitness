@@ -821,3 +821,59 @@ describe('more than one sensitive header on a single line (self-review)', () => 
     expect(elapsed).toBeLessThan(2000);
   });
 });
+
+describe('an escaped quote is not a closing delimiter (Codex review, fifth leak)', () => {
+  const SECRET = `${['sk', 'ant'].join('-')}-escapedquote`;
+
+  it('does not end the value at an ESCAPED quote inside a quoted argument', () => {
+    // `value.indexOf(openQuote)` treated the escaped quote as the argument's close, so
+    // redaction stopped early and the credential survived after the marker — the same
+    // "looks redacted" shape as the four before it.
+    const redacted = redactText(
+      `curl -H "Authorization: prefix\\"Bearer ${SECRET}" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('handles an escaped quote in the single-quoted form', () => {
+    const redacted = redactText(
+      `curl -H 'Authorization: prefix\\'Bearer ${SECRET}' http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+  });
+
+  it('still ends the value at a genuine closing quote after an escaped one', () => {
+    // The escape must not swallow the whole line either: over-redaction defeats
+    // displayCommand, which exists so a reader can see what ran.
+    const redacted = redactText(
+      `curl -H "Authorization: a\\"b ${SECRET}" -X POST http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('-X POST');
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('treats a backslash before an ordinary character as nothing special', () => {
+    const redacted = redactText(
+      `curl -H "Authorization: Bearer ${SECRET}\\n" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('tracks an escaped quote in the PREFIX, so the argument state stays right', () => {
+    // The escape state has to be tracked while scanning up to the header too: a `\\"`
+    // before the header name must not be read as opening or closing an argument.
+    const redacted = redactText(
+      `curl -d "a\\"b" -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+});
