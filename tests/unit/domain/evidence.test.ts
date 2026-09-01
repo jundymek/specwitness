@@ -588,9 +588,7 @@ describe('how far a redacted header value extends (Codex review, follow-up round
   });
 
   it('stops at a quote it did not open, so a double-quoted command keeps its URL', () => {
-    const redacted = redactText(
-      `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
     // The whole point of displayCommand: a reader can still see what ran.
@@ -599,9 +597,7 @@ describe('how far a redacted header value extends (Codex review, follow-up round
   });
 
   it('does the same for the single-quoted shell form, which is just as common', () => {
-    const redacted = redactText(
-      `curl -H 'Authorization: Bearer ${SECRET}' http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H 'Authorization: Bearer ${SECRET}' http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
     expect(redacted).toContain('http://localhost:3000/health');
@@ -707,18 +703,14 @@ describe('a quote INSIDE a header value is not a terminator (Codex review, third
   it('still keeps the tail of a genuinely quoted shell argument', () => {
     // The distinguishing fact is the line PREFIX: here a quote is open before the header
     // name, so the value really does end at that argument's closing quote.
-    const redacted = redactText(
-      `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
     expect(redacted).toContain('http://localhost:3000/health');
   });
 
   it('handles a quoted argument nested after other quoted arguments', () => {
-    const redacted = redactText(
-      `curl -X "POST" -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -X "POST" -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
     expect(redacted).toContain('http://localhost:3000/health');
@@ -727,9 +719,7 @@ describe('a quote INSIDE a header value is not a terminator (Codex review, third
   it('treats the other quote character inside an open quote as literal text', () => {
     // `'` inside a double-quoted argument is not a delimiter, so the argument still ends
     // at its own `"`.
-    const redacted = redactText(
-      `curl -H "Authorization: Bearer ${SECRET}'x" http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H "Authorization: Bearer ${SECRET}'x" http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
     expect(redacted).toContain('http://localhost:3000/health');
@@ -738,25 +728,28 @@ describe('a quote INSIDE a header value is not a terminator (Codex review, third
   it('falls back to the whole line when the quoted argument is never closed', () => {
     // A truncated capture. Fail closed: an unterminated quote is exactly where guessing
     // less costs a credential.
-    const redacted = redactText(`curl -H "Authorization: Bearer ${SECRET}`);
+    const redacted = redactText(`curl -H "Authorization: Bearer ${SECRET}`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
   });
 
-  it('redacts each line of a multi-line wire log independently', () => {
-    // The line prefix is computed per match from the start of ITS line, so one line's
-    // quotes cannot change another line's extent.
+  it('redacts each line of a multi-line wire log to its own line ending', () => {
+    // Captured output, so no quote anywhere is a shell delimiter: every sensitive value
+    // goes entirely, and a quote inside one is an ordinary character.
     const redacted = redactText(
       [
-        `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
-        `Cookie: session="${SECRET}"; HttpOnly`,
+        `> Authorization: Bearer ${SECRET}`,
+        `< Set-Cookie: session="${SECRET}"; HttpOnly`,
         'Accept: application/json',
+        'Content-Type: application/json',
       ].join('\n'),
     );
 
     expect(redacted).not.toContain(SECRET);
-    expect(redacted).toContain('http://localhost:3000/health');
+    // Non-sensitive headers survive intact — evidence nobody can read is evidence people
+    // work around by opening the unredacted file.
     expect(redacted).toContain('Accept: application/json');
+    expect(redacted).toContain('Content-Type: application/json');
   });
 });
 
@@ -771,9 +764,7 @@ describe('more than one sensitive header on a single line (self-review)', () => 
   // header is exactly the case `displayCommand` was added for.
 
   it('redacts BOTH quoted headers in one command', () => {
-    const redacted = redactText(
-      `curl -H "Authorization: Bearer ${A}" -H "X-Api-Key: ${B}" http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H "Authorization: Bearer ${A}" -H "X-Api-Key: ${B}" http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(A);
     expect(redacted).not.toContain(B);
@@ -781,9 +772,7 @@ describe('more than one sensitive header on a single line (self-review)', () => 
   });
 
   it('redacts a mix of quote styles on one line', () => {
-    const redacted = redactText(
-      `curl -H 'Authorization: Bearer ${A}' -H "Cookie: session=${B}" http://localhost:3000/x`,
-    );
+    const redacted = redactText(`curl -H 'Authorization: Bearer ${A}' -H "Cookie: session=${B}" http://localhost:3000/x`, { shellCommand: true });
 
     expect(redacted).not.toContain(A);
     expect(redacted).not.toContain(B);
@@ -791,16 +780,18 @@ describe('more than one sensitive header on a single line (self-review)', () => 
   });
 
   it('keeps quote state per line, so one line cannot open a quote for the next', () => {
+    // Even declaring the input a command, an unclosed quote must not leak its state into
+    // the following line: line two has no open quote, so its whole value goes.
     const redacted = redactText(
       [
         `curl -H "Authorization: Bearer ${A}" http://localhost:3000/a`,
         `Cookie: session=${B}; HttpOnly`,
       ].join('\n'),
+      { shellCommand: true },
     );
 
     expect(redacted).not.toContain(A);
     expect(redacted).not.toContain(B);
-    // The second line has no open quote, so its whole value goes.
     expect(redacted).toContain('Cookie: [REDACTED]');
     expect(redacted).toContain('http://localhost:3000/a');
   });
@@ -814,7 +805,7 @@ describe('more than one sensitive header on a single line (self-review)', () => 
     ).join(' ');
 
     const started = performance.now();
-    const redacted = redactText(`curl ${line} http://localhost:3000/health`);
+    const redacted = redactText(`curl ${line} http://localhost:3000/health`, { shellCommand: true });
     const elapsed = performance.now() - started;
 
     expect(redacted).not.toContain(A);
@@ -829,18 +820,14 @@ describe('an escaped quote is not a closing delimiter (Codex review, fifth leak)
     // `value.indexOf(openQuote)` treated the escaped quote as the argument's close, so
     // redaction stopped early and the credential survived after the marker — the same
     // "looks redacted" shape as the four before it.
-    const redacted = redactText(
-      `curl -H "Authorization: prefix\\"Bearer ${SECRET}" http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H "Authorization: prefix\\"Bearer ${SECRET}" http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
     expect(redacted).toContain('http://localhost:3000/health');
   });
 
   it('handles an escaped quote in the single-quoted form', () => {
-    const redacted = redactText(
-      `curl -H 'Authorization: prefix\\'Bearer ${SECRET}' http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H 'Authorization: prefix\\'Bearer ${SECRET}' http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
   });
@@ -848,9 +835,7 @@ describe('an escaped quote is not a closing delimiter (Codex review, fifth leak)
   it('still ends the value at a genuine closing quote after an escaped one', () => {
     // The escape must not swallow the whole line either: over-redaction defeats
     // displayCommand, which exists so a reader can see what ran.
-    const redacted = redactText(
-      `curl -H "Authorization: a\\"b ${SECRET}" -X POST http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H "Authorization: a\\"b ${SECRET}" -X POST http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
     expect(redacted).toContain('-X POST');
@@ -858,9 +843,7 @@ describe('an escaped quote is not a closing delimiter (Codex review, fifth leak)
   });
 
   it('treats a backslash before an ordinary character as nothing special', () => {
-    const redacted = redactText(
-      `curl -H "Authorization: Bearer ${SECRET}\\n" http://localhost:3000/health`,
-    );
+    const redacted = redactText(`curl -H "Authorization: Bearer ${SECRET}\\n" http://localhost:3000/health`, { shellCommand: true });
 
     expect(redacted).not.toContain(SECRET);
     expect(redacted).toContain('http://localhost:3000/health');
@@ -869,11 +852,67 @@ describe('an escaped quote is not a closing delimiter (Codex review, fifth leak)
   it('tracks an escaped quote in the PREFIX, so the argument state stays right', () => {
     // The escape state has to be tracked while scanning up to the header too: a `\\"`
     // before the header name must not be read as opening or closing an argument.
+    const redacted = redactText(`curl -d "a\\"b" -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`, { shellCommand: true });
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+});
+
+describe('shell quoting is declared, never inferred (Codex review, sixth leak)', () => {
+  const SECRET = `${['sk', 'ant'].join('-')}-prosequote`;
+
+  it('does not treat an apostrophe in English prose as a shell quote', () => {
+    // The leak that ended the guessing. `User's` opened a "quoted argument", the next
+    // apostrophe closed it, and the credential survived after the marker. No pattern can
+    // tell an apostrophe in prose from a shell delimiter, because nothing in the text
+    // distinguishes them — which is why the caller now says.
+    const redacted = redactText(`User's Authorization: prefix'Bearer ${SECRET}`);
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toBe("User's Authorization: [REDACTED]");
+  });
+
+  it('redacts to end of line by DEFAULT, so anything undeclared fails closed', () => {
+    // The same command text, not declared as one: the URL goes too. Losing a URL is the
+    // safe direction; a caller that forgets to declare itself is treated as output.
     const redacted = redactText(
-      `curl -d "a\\"b" -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+      `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).not.toContain('http://localhost:3000/health');
+  });
+
+  it('honours quoting only when the caller declares a command', () => {
+    const redacted = redactText(
+      `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+      { shellCommand: true },
     );
 
     expect(redacted).not.toContain(SECRET);
     expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('declares it for displayCommand and not for captured output', () => {
+    // The constructors are where the fact is known, so they are where it is stated. The
+    // same text in two fields is treated differently, correctly.
+    const evidence = gateEvidence({
+      capturedAt: AT,
+      gateId: 'smoke',
+      displayCommand: `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+      status: 'fail',
+      exitCode: 1,
+      stdout: `> Authorization: Bearer ${SECRET}\nGET http://localhost:3000/health`,
+      stderr: '',
+      durationMs: 5,
+    });
+
+    expect(JSON.stringify(evidence)).not.toContain(SECRET);
+    // The command keeps its URL: a reader can still see what ran.
+    expect(evidence.displayCommand).toContain('http://localhost:3000/health');
+    // The captured wire log does not: that line is output, and its value ran to the end.
+    expect(evidence.stdout.text).toContain('Authorization: [REDACTED]');
+    expect(evidence.stdout.text).toContain('GET http://localhost:3000/health');
   });
 });

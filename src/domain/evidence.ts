@@ -128,6 +128,29 @@ export interface RedactionOptions {
    * is applied globally whether or not the caller remembered the `g` flag.
    */
   readonly extraPatterns?: readonly RegExp[];
+  /**
+   * The text is a single shell COMMAND (a `DeclaredCommand` rendered for display), not
+   * captured output. Defaults to `false`.
+   *
+   * It changes exactly one thing: how far a sensitive header's value extends. In a
+   * command, `curl -H "Authorization: ..." http://host/health` has its header value
+   * inside a quoted argument, so redaction stops at that argument's closing quote and the
+   * URL survives - which is the whole point of `GateEvidence.displayCommand`. In captured
+   * output, redaction always runs to end of line.
+   *
+   * WHY THIS IS A FLAG RATHER THAN SOMETHING INFERRED, which cost several rounds to
+   * learn: the extent cannot be recovered from the text. An earlier version decided it by
+   * looking for an unmatched quote before the header, which is a PROXY - and ordinary
+   * English prose breaks it. `User's Authorization: prefix'Bearer SECRET` opens a "quote"
+   * at `User's`, closes it at the next apostrophe, and leaks the credential. No pattern
+   * can tell an apostrophe in prose from a shell delimiter, because nothing in the text
+   * distinguishes them.
+   *
+   * Only the CALLER knows which it is holding, so the caller says. The default is
+   * `false`, so anything that forgets to declare itself is treated as output and redacted
+   * to end of line - the failing-closed direction.
+   */
+  readonly shellCommand?: boolean;
 }
 
 /** Header names whose ENTIRE value is a credential. Compared case-insensitively. */
@@ -226,7 +249,7 @@ function indexOfUnescaped(text: string, quote: string): number {
  * Quote state comes from the ORIGINAL text, including across a region that was redacted,
  * because it is the shell's quoting that decides where an argument ends.
  */
-function redactSensitiveHeaders(raw: string): string {
+function redactSensitiveHeaders(raw: string, shellCommand: boolean): string {
   const pattern = new RegExp(SENSITIVE_HEADER_LINE.source, SENSITIVE_HEADER_LINE.flags);
   let out = '';
   /** How much of `raw` is already copied (or replaced) into `out`. */
@@ -287,8 +310,10 @@ function redactSensitiveHeaders(raw: string): string {
     }
     const value = raw.slice(valueStart, lineEnd);
 
+    // Captured output: the value IS the rest of the line, always. Only a declared command
+    // has shell quoting to respect, and only its caller can say that it is one.
     let consumed = value.length;
-    if (openQuote !== undefined) {
+    if (shellCommand && openQuote !== undefined) {
       const closing = indexOfUnescaped(value, openQuote);
       if (closing !== -1) {
         consumed = closing;
@@ -391,7 +416,7 @@ function isSensitiveName(name: string): boolean {
  * same as redacting once — which matters because evidence gets copied between fields.
  */
 export function redactText(raw: string, options?: RedactionOptions): string {
-  let text = redactSensitiveHeaders(raw);
+  let text = redactSensitiveHeaders(raw, options?.shellCommand === true);
 
   const rewrite = (quote: string, name: string, separator: string, value: string): string => {
     const quoted = value.startsWith('"') || value.startsWith("'");
@@ -750,7 +775,7 @@ export function gateEvidence(input: GateEvidenceInput, options?: BoundedTextOpti
     kind: 'gate',
     capturedAt: input.capturedAt,
     gateId: input.gateId,
-    displayCommand: redactText(input.displayCommand, options),
+    displayCommand: redactText(input.displayCommand, { ...options, shellCommand: true }),
     status: input.status,
     exitCode: input.exitCode,
     stdout: boundedText(input.stdout, streamOptions(options, input.stdoutFullPath)),
@@ -784,7 +809,7 @@ export function commandEvidence(
     kind: 'command',
     capturedAt: input.capturedAt,
     commandId: input.commandId,
-    displayCommand: redactText(input.displayCommand, options),
+    displayCommand: redactText(input.displayCommand, { ...options, shellCommand: true }),
     exitCode: input.exitCode,
     stdout: boundedText(input.stdout, streamOptions(options, input.stdoutFullPath)),
     stderr: boundedText(input.stderr, streamOptions(options, input.stderrFullPath)),
