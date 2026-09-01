@@ -67,6 +67,48 @@ export function applyExitCode(code: ExitCode): void {
 }
 
 /**
+ * The exit code a COMPLETED command decided, waiting to be returned by `main`.
+ *
+ * Story 3.7 needed this and there was nowhere else it could live. Until
+ * `verify`, every command signalled a non-zero outcome by THROWING, and
+ * `main.run()` returned `EXIT.PASS` for anything that finished normally. That
+ * works while every non-zero code is an error — but a FAIL verdict is not an
+ * error. It is a successful verification whose answer is "no", and it must exit
+ * 1 without an `ERROR:`/`HINT:` pair and without being classified as
+ * infrastructure. Throwing to reach exit 1 would route it through
+ * `exitCodeForError`, which answers 3.
+ *
+ * The state is module-scoped, which is a cost worth naming. It is confined to
+ * this module because this module is the exit table (AD-6): keeping the codes
+ * and the mechanism that carries them in one file is what stops a second
+ * definition appearing next to a command. `takeRecordedExitCode` CLEARS on
+ * read, so a second `run()` in the same process — which is how the tests drive
+ * this — cannot inherit the first one's answer.
+ *
+ * Contract for callers: record as the LAST act of a command. A command that
+ * records and then throws leaves a value nobody takes, and the throw wins.
+ */
+let recordedExitCode: ExitCode | undefined;
+
+/**
+ * Records the exit code of a run that completed and reached an outcome.
+ *
+ * Takes an `ExitCode`, never a number, so the only way to obtain the argument
+ * is `exitCodeForOutcome` or `EXIT` — there is no path by which a command
+ * invents a code of its own.
+ */
+export function recordExitCode(code: ExitCode): void {
+  recordedExitCode = code;
+}
+
+/** Returns and clears the recorded code. `undefined` when nothing recorded one. */
+export function takeRecordedExitCode(): ExitCode | undefined {
+  const code = recordedExitCode;
+  recordedExitCode = undefined;
+  return code;
+}
+
+/**
  * Maps a completed run's outcome to its exit code — the run-outcome half of
  * the ADR-002 table, alongside `exitCodeForError` above.
  *
