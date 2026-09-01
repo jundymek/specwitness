@@ -84,15 +84,29 @@ const RESULT_FILENAME = 'result.json';
 export const PROCESS_GROUPS_FILENAME = 'process-groups.json';
 
 /**
+ * Story 3.5's stage-and-rename staging name, reserved here by agreement.
+ *
+ * `RunStore` does not write this file — story 3.5 does — but it must be
+ * unwritable through `writeEvidenceFile`, and rambo (3.5) is right that this is
+ * the sharper half of the guard. Clobbering `result.json` directly is bad;
+ * landing on the STAGING name is worse, because the next finalize renames it
+ * over `result.json`, so the substitution happens later and looks like a normal
+ * successful write. The check belongs where the path is constructed, not in
+ * each caller remembering not to be unlucky.
+ */
+const RESULT_STAGING_FILENAME = '.result.json.tmp';
+
+/**
  * Files `RunStore` owns, which caller-named evidence may never overwrite.
  *
  * `writeEvidenceFile` takes a name chosen by a caller — ultimately derived from
- * a gate id in the operator's own config — and the crash record must not be
- * clobberable by an unlucky one.
+ * a gate id in the operator's own config — and neither the crash record nor a
+ * run result must be clobberable by an unlucky one.
  */
 const RESERVED_FILENAMES: ReadonlySet<string> = new Set([
   MANIFEST_FILENAME,
   RESULT_FILENAME,
+  RESULT_STAGING_FILENAME,
   PROCESS_GROUPS_FILENAME,
 ]);
 

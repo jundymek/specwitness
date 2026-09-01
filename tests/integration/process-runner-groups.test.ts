@@ -232,7 +232,7 @@ describe('AC2 — teardown reaps the whole process group, grandchildren included
       const script = join(dir, 'ignores-term.sh');
       await writeFile(
         script,
-        '#!/bin/sh\ntrap "" TERM\nsleep 3600 &\necho $! > "$1"\ntouch "$2"\nwait\n',
+        '#!/bin/sh\ntrap "" TERM\nsleep 3600 &\necho $! > "$1"\necho ready > "$2"\nwait\n',
         { mode: 0o755 },
       );
 
@@ -247,7 +247,10 @@ describe('AC2 — teardown reaps the whole process group, grandchildren included
         },
       });
 
-      await waitForFile(marker).catch(() => undefined);
+      // Waited on properly rather than `.catch(() => undefined)`: the fixture
+      // used to `touch` this marker, and `waitForFile` only accepts a NON-EMPTY
+      // file, so the wait could never succeed and the swallow hid it.
+      await waitForFile(marker);
       const grandchild = trackPid(Number(await waitForFile(join(dir, 'grandchild.pid'))));
 
       const startedAt = Date.now();
@@ -431,6 +434,156 @@ describe('AC1 — the pgid reaches the caller BEFORE the child is awaited', () =
       expect(grandchild).toBeGreaterThan(0);
       expect(await waitForExit(pgid)).toBe(true);
       expect(await waitForExit(grandchild)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("AC4 — the timeout belongs to the CHILD's lifetime, not to the caller's hook", () => {
+  it('still times out when onProcessGroup stalls, and reaps the group', async () => {
+    // Codex review, P1. The obvious ordering — record the pgid, THEN start the
+    // clock — makes `timeoutMs` conditional on the hook: an fsync that stalls
+    // leaves the child running with no timer at all, so it can outlive its
+    // deadline indefinitely and still be classified `completed`. A durability
+    // hook is exactly the thing that can stall, since it is doing disk I/O.
+    const dir = await scratch();
+    try {
+      const { script, pidFile } = await forkingScript(dir);
+      let pgid = 0;
+
+      const startedAt = Date.now();
+      const result = await runner().run({
+        ...base,
+        binary: '/bin/sh',
+        args: [script, pidFile],
+        timeoutMs: 400,
+        teardownGraceMs: 100,
+        onProcessGroup: async (value) => {
+          pgid = trackPid(value);
+          // Never settles. The run must still settle.
+          await new Promise(() => undefined);
+        },
+      });
+      const wallClock = Date.now() - startedAt;
+
+      expect(result.outcome).toBe('timed-out');
+      expect(result.exitCode).toBeNull();
+      expect(result.pgid).toBe(pgid);
+      expect(result.stderr).toMatch(/never settled/i);
+      // Bounded: it did not wait for the hook, which never finishes.
+      expect(wallClock).toBeLessThan(10_000);
+
+      // And the group was reaped rather than abandoned — the grandchild too.
+      const grandchild = trackPid(Number(await waitForFile(pidFile)));
+      expect(await waitForExit(pgid)).toBe(true);
+      expect(await waitForExit(grandchild)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a SLOW hook turn a hung child into a completed run', async () => {
+    // The subtler half of the same defect: the hook eventually finishes, so
+    // nothing looks wrong, but the deadline was measured from the wrong instant.
+    const dir = await scratch();
+    try {
+      const { script, pidFile } = await forkingScript(dir);
+      let pgid = 0;
+
+      const result = await runner().run({
+        ...base,
+        binary: '/bin/sh',
+        args: [script, pidFile],
+        timeoutMs: 300,
+        teardownGraceMs: 100,
+        onProcessGroup: async (value) => {
+          pgid = trackPid(value);
+          await new Promise((resolve) => setTimeout(resolve, 900));
+        },
+      });
+
+      // The child ran for longer than its timeout, so it timed out — measured
+      // from the spawn, not from the moment the record landed.
+      expect(result.outcome).toBe('timed-out');
+      expect(await waitForExit(pgid)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('AC1 — teardown resolves only once the group is actually gone', () => {
+  it('does not resolve while a SIGTERM-ignoring group is still being killed', async () => {
+    // Codex review, P2. Delivering SIGKILL is not the same as the processes
+    // having exited, and `clean` removes a worktree the instant teardown
+    // resolves — so resolving early turns a successful kill into a spurious
+    // "could not remove the worktree" failure, blamed on the wrong thing.
+    const dir = await scratch();
+    try {
+      const marker = join(dir, 'ready');
+      const script = join(dir, 'ignores-term.sh');
+      await writeFile(
+        script,
+        '#!/bin/sh\ntrap "" TERM\nsleep 3600 &\necho $! > "$1"\necho ready > "$2"\nwait\n',
+        { mode: 0o755 },
+      );
+
+      let pgid = 0;
+      const pending = runner().run({
+        ...base,
+        binary: '/bin/sh',
+        args: [script, join(dir, 'grandchild.pid'), marker],
+        timeoutMs: 20_000,
+        onProcessGroup: (value) => {
+          pgid = trackPid(value);
+        },
+      });
+
+      await waitForFile(marker);
+      const grandchild = trackPid(Number(await waitForFile(join(dir, 'grandchild.pid'))));
+
+      await terminateProcessGroup(pgid, { graceMs: 100 });
+
+      // Asserted with NO polling and no waiting: the moment teardown resolved,
+      // every member was already gone. This is the property `clean` depends on.
+      expect(isAlive(pgid)).toBe(false);
+      expect(isAlive(grandchild)).toBe(false);
+
+      await pending;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves immediately for a group that honours SIGTERM, without paying the grace', async () => {
+    // The confirmation loop must not make the ordinary case slow.
+    const dir = await scratch();
+    try {
+      const { script, pidFile } = await forkingScript(dir);
+      let pgid = 0;
+
+      const pending = runner().run({
+        ...base,
+        binary: '/bin/sh',
+        args: [script, pidFile],
+        timeoutMs: 20_000,
+        onProcessGroup: (value) => {
+          pgid = trackPid(value);
+        },
+      });
+
+      trackPid(Number(await waitForFile(pidFile)));
+
+      const startedAt = Date.now();
+      await terminateProcessGroup(pgid, { graceMs: 5_000 });
+      const elapsed = Date.now() - startedAt;
+
+      expect(isAlive(pgid)).toBe(false);
+      // Nowhere near the 5s grace: SIGTERM was enough and the poll noticed.
+      expect(elapsed).toBeLessThan(2_000);
+
+      await pending;
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

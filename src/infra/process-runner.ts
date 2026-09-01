@@ -130,6 +130,21 @@ export const TEARDOWN_GRACE_MS = 2_000;
 /** How often liveness is re-probed while waiting out the grace period. */
 const GROUP_POLL_INTERVAL_MS = 20;
 
+/**
+ * How long to wait for a process group to actually disappear after SIGKILL.
+ *
+ * Delivering a signal is not the same as the processes having exited, and this
+ * port's callers rely on the difference: `specwitness clean` removes a worktree
+ * immediately after teardown, and a process still holding files inside it turns
+ * a successful kill into a spurious removal failure. So teardown does not
+ * resolve until the group is gone.
+ *
+ * Two seconds is generous — SIGKILL is normally reaped in single-digit
+ * milliseconds — and bounded, because a task wedged in uninterruptible sleep is
+ * a real condition that must be REPORTED rather than waited on forever.
+ */
+const SIGKILL_REAP_TIMEOUT_MS = 2_000;
+
 interface SpawnFailure extends Error {
   code?: string;
   timedOut?: boolean;
@@ -408,8 +423,12 @@ function signalProcessGroup(pgid: number, signal: NodeJS.Signals | 0): boolean {
  * services (Epic 4 story 4.1) and for `specwitness clean`.
  *
  * Idempotent and safe on a group that has already exited — the COMMON case when
- * replaying a manifest, not an exceptional one. Resolves once the group is gone
- * or once SIGKILL has been delivered.
+ * replaying a manifest, not an exceptional one.
+ *
+ * RESOLVES ONLY WHEN THE GROUP IS ACTUALLY GONE, never merely when a signal was
+ * delivered. `clean` removes a worktree the instant this resolves, and a member
+ * still holding files inside it would turn a successful kill into a spurious
+ * removal failure. A group that survives SIGKILL raises rather than resolving.
  */
 export async function terminateProcessGroup(
   pgid: number,
@@ -434,7 +453,30 @@ export async function terminateProcessGroup(
     }
   }
 
-  signalProcessGroup(pgid, 'SIGKILL');
+  if (!signalProcessGroup(pgid, 'SIGKILL')) {
+    return; // exited between the last poll and the escalation
+  }
+
+  // SIGKILL cannot be caught, but delivery is not exit: the kernel still has to
+  // schedule and reap each member. Callers remove worktrees the moment this
+  // resolves, so resolving early makes a successful kill look like a failed
+  // removal.
+  const killDeadline = Date.now() + SIGKILL_REAP_TIMEOUT_MS;
+  while (Date.now() < killDeadline) {
+    await delay(Math.min(GROUP_POLL_INTERVAL_MS, Math.max(1, killDeadline - Date.now())));
+    if (!signalProcessGroup(pgid, 0)) {
+      return;
+    }
+  }
+
+  // Surviving SIGKILL means uninterruptible sleep, or a zombie whose parent has
+  // not reaped it. Neither is something to wait on, and neither may be reported
+  // as a successful teardown: `clean` turns this into "could not reap", which is
+  // the honest answer.
+  throw new InfraError(
+    `process group ${pgid} did not exit within ${SIGKILL_REAP_TIMEOUT_MS}ms of SIGKILL`,
+    `inspect it with 'ps -g ${pgid}'; a process in uninterruptible sleep cannot be killed and may be waiting on a stalled filesystem or device`,
+  );
 }
 
 function createRunner(clock: Clock): ProcessRunner {
@@ -492,29 +534,21 @@ function createRunner(clock: Clock): ProcessRunner {
       // no process, and therefore no group.
       const pgid = typeof spawned.pid === 'number' ? spawned.pid : null;
 
-      if (pgid !== null && options.onProcessGroup !== undefined) {
-        try {
-          // AWAITED before anything observes the child: this is AC1's
-          // durability ordering, and it is the whole reason the hook exists.
-          await options.onProcessGroup(pgid);
-        } catch (cause) {
-          // The record failed, so nothing on disk knows this group exists. A
-          // live process group that nothing can find is the one state `clean`
-          // cannot recover from, so kill it before the error propagates.
-          // Swallowing the error would trade a reported infra failure for a
-          // silent leak.
-          recordingFailed = true;
-          spawned.catch(() => undefined);
-          await terminateProcessGroup(pgid, { graceMs }).catch(() => undefined);
-          throw cause;
-        }
-      }
-
       let timedOut = false;
       let teardown: Promise<Error | undefined> = Promise.resolve(undefined);
 
-      // REF'D (see `delay`): this timer is what keeps the process alive long
-      // enough to notice a hang and reap it. Cleared the moment the run settles.
+      /**
+       * ARMED IMMEDIATELY AFTER SPAWN, before the durability hook is awaited.
+       *
+       * The obvious ordering — record the pgid, then start the clock — makes
+       * `timeoutMs` conditional on the hook: an fsync that stalls leaves the
+       * child running with no timer at all, so it can outlive its deadline
+       * indefinitely and still be classified `completed`. The deadline belongs
+       * to the CHILD's lifetime, and that starts here.
+       *
+       * REF'D (see `delay`): this timer is what keeps the process alive long
+       * enough to notice a hang and reap it. Cleared the moment the run settles.
+       */
       const timer = setTimeout(() => {
         timedOut = true;
         if (pgid !== null) {
@@ -524,6 +558,70 @@ function createRunner(clock: Clock): ProcessRunner {
           );
         }
       }, options.timeoutMs);
+
+      // Armed here too, and for the same reason: a watchdog that only starts
+      // after the hook is a watchdog the hook can disable by hanging.
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<{ settled: false }>((resolve) => {
+        watchdog = setTimeout(
+          () => resolve({ settled: false }),
+          options.timeoutMs + graceMs + SETTLEMENT_GRACE_MS,
+        );
+      });
+      const clearTimers = (): void => {
+        clearTimeout(timer);
+        if (watchdog !== undefined) {
+          clearTimeout(watchdog);
+        }
+      };
+
+      if (pgid !== null && options.onProcessGroup !== undefined) {
+        const hook = Promise.resolve()
+          .then(() => options.onProcessGroup?.(pgid))
+          .then(
+            () => ({ kind: 'recorded' }) as const,
+            (error: unknown) => ({ kind: 'failed', error }) as const,
+          );
+
+        // Raced against the watchdog, so a hook that never settles cannot make
+        // `run` never settle. This port's contract is that it ALWAYS settles.
+        const outcome = await Promise.race([
+          hook,
+          expired.then(() => ({ kind: 'stalled' }) as const),
+        ]);
+
+        if (outcome.kind === 'failed') {
+          // The record failed, so nothing on disk knows this group exists. A
+          // live process group that nothing can find is the one state `clean`
+          // cannot recover from, so kill it before the error propagates.
+          // Swallowing the error would trade a reported infra failure for a
+          // silent leak.
+          recordingFailed = true;
+          clearTimers();
+          spawned.catch(() => undefined);
+          await terminateProcessGroup(pgid, { graceMs }).catch(() => undefined);
+          throw outcome.error;
+        }
+
+        if (outcome.kind === 'stalled') {
+          clearTimers();
+          spawned.catch(() => undefined);
+          // The timeout above already tore the group down; this makes sure of it
+          // and explains why the run is being abandoned. Not a `completed` run
+          // under any reading.
+          await terminateProcessGroup(pgid, { graceMs }).catch(() => undefined);
+          return {
+            outcome: 'timed-out',
+            exitCode: null,
+            stdout: '',
+            stderr:
+              `timed out after ${options.timeoutMs}ms; the caller's onProcessGroup hook ` +
+              'never settled, so the process group was terminated without being recorded',
+            durationMs: elapsed(),
+            pgid,
+          };
+        }
+      }
 
       /**
        * SETTLEMENT — why a watchdog survives even now that teardown reaps.
@@ -541,28 +639,21 @@ function createRunner(clock: Clock): ProcessRunner {
        * not a product FAIL, but only if it can be DETECTED.
        *
        * The deadline now allows for the teardown itself — the timeout, then the
-       * SIGTERM-to-SIGKILL grace, then a moment for execa to notice.
+       * SIGTERM-to-SIGKILL grace, then a moment for execa to notice. It is armed
+       * at SPAWN rather than here, so a durability hook that stalls cannot
+       * postpone it.
        */
-      let watchdog: ReturnType<typeof setTimeout> | undefined;
       const settlement = await Promise.race([
         spawned.then((value) => ({ settled: true as const, value })),
-        new Promise<{ settled: false }>((resolve) => {
-          watchdog = setTimeout(
-            () => resolve({ settled: false }),
-            options.timeoutMs + graceMs + SETTLEMENT_GRACE_MS,
-          );
-        }),
+        expired,
       ]);
 
-      // CLEARED rather than unref'd. Story 2.3 unref'd this so a fast run would
-      // not be held open by the losing side of the race; clearing achieves the
-      // same thing without the failure mode unref'ing everything introduced —
-      // an event loop that empties while the run is still pending, which Node
-      // reports as exit 13 with no output.
-      clearTimeout(timer);
-      if (watchdog !== undefined) {
-        clearTimeout(watchdog);
-      }
+      // CLEARED rather than unref'd. Story 2.3 unref'd its watchdog so a fast
+      // run would not be held open by the losing side of the race; clearing
+      // achieves the same thing without the failure mode unref'ing everything
+      // introduced — an event loop that empties while the run is still pending,
+      // which Node reports as exit 13 with no output at all.
+      clearTimers();
       // Never return while a SIGKILL is still in flight: a caller that removes a
       // worktree next must not race processes still holding files inside it.
       const teardownFailure = await teardown;

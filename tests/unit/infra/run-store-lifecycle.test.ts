@@ -379,7 +379,18 @@ describe('RunStore.writeEvidenceFile: the seam 3.4 and 3.5 asked for', () => {
     const store = await makeStore();
     const { runId } = await store.createRun();
 
-    for (const reserved of ['manifest.json', 'result.json', PROCESS_GROUPS_FILENAME]) {
+    // `.result.json.tmp` is story 3.5's stage-and-rename staging name, reserved
+    // at rambo's request and for the sharper reason: landing evidence on the
+    // STAGING name is worse than clobbering `result.json` directly, because the
+    // next finalize renames it over the result — so arbitrary content is
+    // substituted for a run result later, and it looks like a normal successful
+    // write.
+    for (const reserved of [
+      'manifest.json',
+      'result.json',
+      '.result.json.tmp',
+      PROCESS_GROUPS_FILENAME,
+    ]) {
       await expect(store.writeEvidenceFile(runId, reserved, 'x')).rejects.toBeInstanceOf(InfraError);
     }
 
