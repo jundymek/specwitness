@@ -56,7 +56,7 @@ import { createStages } from '../../pipeline/stages/index.js';
 import { renderJson, renderTerminal } from '../../report/index.js';
 import { parseContract } from '../../schemas/contract.js';
 import { exitCodeForOutcome, recordExitCode } from '../exit.js';
-import { printError } from '../print-error.js';
+import { printError, printWarning } from '../print-error.js';
 
 /** Injected at build time by tsup, and by vitest for source-level runs. */
 declare const __SW_VERSION__: string;
@@ -230,7 +230,22 @@ async function verify(
     // crash-durable snapshot at position 10; this is the same writer and the
     // same serializer, one moment later, with teardown's entry included.
     onComplete: async (finished) => {
-      await store.writeResult(created.runId, finished);
+      const write = await store.writeResult(created.runId, finished);
+      if (!write.durable) {
+        // The document IS published — `rename(2)` committed it — and only the
+        // durability barrier after it did not. Discarding that left the command
+        // exiting normally while the stored run's survival of a power loss was
+        // unconfirmed, which is the same silence the contract writer had until
+        // this story wired its warning. Found by review.
+        //
+        // A warning rather than a timeline entry because the timeline is already
+        // sealed: `onComplete` receives the FINISHED result, after teardown, so
+        // there is nothing left to record into. The persist stage covers the
+        // earlier snapshot the same way, in its own detail.
+        printWarning(
+          `the run result was written but could not be made durable: ${write.barrier ?? 'the directory fsync did not complete'}`,
+        );
+      }
     },
   });
 
