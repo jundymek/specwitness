@@ -60,7 +60,7 @@ development_status:
   3-2-process-groups-run-manifest-specwitness-clean: done
   3-3-staged-pipeline-state-machine: review
   3-4-deterministic-gates-execution: ready-for-dev
-  3-5-runresult-persistence-specwitness-report: ready-for-dev
+  3-5-runresult-persistence-specwitness-report: review
   3-6-terminal-json-renderers: ready-for-dev
   3-7-end-to-end-gates-only-verify: ready-for-dev
   3-8-provider-provenance-wiring: done

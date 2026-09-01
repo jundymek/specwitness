@@ -393,8 +393,12 @@ describe('a full gates-only run through the real stages', () => {
 
     expect(detailOf('worktree')).toContain('story 3.1');
     expect(detailOf('gates')).toContain('story 3.4');
-    expect(detailOf('persist')).toContain('story 3.5');
     expect(detailOf('setup')).toContain('Epic 4');
+    // `persist` was on this list until story 3.5 filled it. A stage that is implemented
+    // no longer names a story to come — it reports what it actually did — so the shrinking
+    // of this list is how a placeholder being replaced becomes visible. 3.1 and 3.4 remove
+    // their own lines the same way.
+    expect(detailOf('persist')).not.toContain('story 3.5');
   });
 });
 

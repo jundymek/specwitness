@@ -78,8 +78,15 @@ function isRealUtcInstant(value: string): boolean {
   );
 }
 
-/** ISO-8601 UTC, milliseconds, `Z`-terminated — the house timestamp format. */
-const IsoUtcTimestamp = z
+/**
+ * ISO-8601 UTC, milliseconds, `Z`-terminated — the house timestamp format.
+ *
+ * Exported so `schemas/result.ts` validates timestamps with THIS validator rather than a
+ * second one. Two date validators in one codebase drift, and the way they drift is that
+ * one of them starts accepting `2026-02-31T…` — which `Date.parse` normalises to 3 March,
+ * so a stored artifact would mean a different instant than it claims.
+ */
+export const IsoUtcTimestamp = z
   .string()
   .refine((value) => ISO_UTC_PATTERN.test(value), {
     message: 'must be an ISO-8601 UTC timestamp ending in Z',

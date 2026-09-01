@@ -19,6 +19,7 @@ import { createGatesStage } from './gates.js';
 import { createIntegrityStage } from './integrity.js';
 import type { VerifiableContractGuard } from './integrity.js';
 import { createPersistStage } from './persist.js';
+import type { PersistDeps } from './persist.js';
 import { createProbesStage } from './probes.js';
 import { createResolveStage } from './resolve.js';
 import { createServicesStage } from './services.js';
@@ -51,6 +52,15 @@ export interface StageDependencies {
   readonly worktree?: WorktreeStageDeps;
   /** Releases the worktree and the process group. Stories 3.1 and 3.2 bind it. */
   readonly teardown?: TeardownDeps;
+  /**
+   * Durably stores `result.json` (story 3.5). The CLI edge binds it to
+   * `RunStore.writeResult`, and binds `RunPipelineInput.onComplete` to the same function
+   * so the crash-durable snapshot and the finished document share one writer.
+   *
+   * Optional so a pipeline can be assembled without storage — but the stage then records
+   * plainly that nothing was persisted, rather than reporting a clean `ok`.
+   */
+  readonly persist?: PersistDeps;
 }
 
 /** The eleven stages, in the frozen spine order. */
@@ -65,7 +75,7 @@ export function createStages(deps: StageDependencies): Stage[] {
     createDataStage(),
     createProbesStage(),
     createAggregateStage(),
-    createPersistStage(),
+    createPersistStage(deps.persist ?? {}),
     createTeardownStage(deps.teardown ?? {}),
   ];
 }
