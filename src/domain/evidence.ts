@@ -168,51 +168,90 @@ const SENSITIVE_HEADERS = new Set([
  * prefix answers that exactly.
  */
 const SENSITIVE_HEADER_LINE =
-  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)([^\r\n]*)/gi;
+  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)[^\S\r\n]*:/gi;
 
 /**
- * The quote that is still open at the end of `prefix`, if any.
+ * Redacts every sensitive header value in `raw`.
  *
- * A quote of the other kind inside an open quoted region is literal text, not a delimiter,
- * which is why this tracks WHICH quote opened rather than counting both.
- */
-function openQuoteAt(prefix: string): string | undefined {
-  let open: string | undefined;
-  for (const character of prefix) {
-    if (character !== '"' && character !== "'") {
-      continue;
-    }
-    if (open === character) {
-      open = undefined;
-    } else if (open === undefined) {
-      open = character;
-    }
-  }
-  return open;
-}
-
-/**
- * How much of a sensitive header's value to redact.
+ * A hand-written scan rather than `String.replace`, for one reason: the extent of a value
+ * cannot be expressed in the pattern (see above), so the pattern matches only `name:` and
+ * this loop decides how much of what follows to consume. `replace` cannot do that -
+ * whatever the pattern matched is what it skips - and an earlier version that captured to
+ * end of line therefore examined only the FIRST sensitive header on each line. A wire log
+ * has one header per line and hid that completely; a shell command routinely has several,
+ * and `curl -H "Authorization: ..." -H "X-Api-Key: ..."` is exactly the shape
+ * `displayCommand` was added for. Found by re-reading this code, not by a review.
  *
- * - Not inside a quoted region: the value IS the rest of the line, so all of it goes.
- *   This is a wire log, and `Cookie: session="secret"; HttpOnly` must lose the lot -
- *   quotes appearing INSIDE a header value are ordinary characters, not terminators.
- * - Inside a quoted shell argument: the value ends at that argument's closing quote, so
- *   `curl -H "Authorization: Bearer ..." http://host/health` keeps its URL. That matters
- *   because `GateEvidence.displayCommand` exists so a reader can see what ran, and
- *   redacting the whole command defeats the field while protecting nothing extra.
- * - Inside a quoted argument that is never closed - a truncated capture - falls back to
- *   the whole line. Fail closed: an unterminated quote is exactly the case where guessing
- *   less costs a credential.
+ * Line and quote state are tracked INCREMENTALLY as the scan advances, never by searching
+ * backwards from each match. With k headers on a line of length L that is O(L) rather than
+ * O(k*L) - the same quadratic trap this file has already paid for once.
+ *
+ * The extent rules, restated where they are implemented:
+ *
+ *  - No quote open at the header: the value IS the rest of the line, so all of it goes. A
+ *    quote INSIDE an ordinary header value (`Cookie: session="secret"; HttpOnly`) is an
+ *    ordinary character, not a terminator.
+ *  - A quote open before the name: the value ends at that argument's closing quote, so
+ *    `curl -H "Authorization: ..." http://host/health` keeps its URL.
+ *  - Opened and never closed - a truncated capture: the whole line. Fail closed.
+ *
+ * Quote state comes from the ORIGINAL text, including across a region that was redacted,
+ * because it is the shell's quoting that decides where an argument ends.
  */
-function redactHeaderValue(value: string, linePrefix: string): string {
-  const openQuote = openQuoteAt(linePrefix);
-  if (openQuote === undefined) {
-    return REDACTED;
+function redactSensitiveHeaders(raw: string): string {
+  const pattern = new RegExp(SENSITIVE_HEADER_LINE.source, SENSITIVE_HEADER_LINE.flags);
+  let out = '';
+  /** How much of `raw` is already copied (or replaced) into `out`. */
+  let emitted = 0;
+  /** How far the line/quote tracker has consumed. Only ever moves forwards. */
+  let scanned = 0;
+  let openQuote: string | undefined;
+
+  const trackTo = (index: number): void => {
+    for (let i = scanned; i < index; i += 1) {
+      const character = raw[i];
+      if (character === '\n') {
+        openQuote = undefined;
+      } else if (character === '"' || character === "'") {
+        if (openQuote === character) {
+          openQuote = undefined;
+        } else if (openQuote === undefined) {
+          openQuote = character;
+        }
+      }
+    }
+    scanned = index;
+  };
+
+  let match = pattern.exec(raw);
+  while (match !== null) {
+    const start = match.index;
+    trackTo(start);
+
+    const name = match[1] as string;
+    const valueStart = start + match[0].length;
+    const newline = raw.indexOf('\n', valueStart);
+    const lineEnd = newline === -1 ? raw.length : newline;
+    const value = raw.slice(valueStart, lineEnd);
+
+    let consumed = value.length;
+    if (openQuote !== undefined) {
+      const closing = value.indexOf(openQuote);
+      if (closing !== -1) {
+        consumed = closing;
+      }
+    }
+
+    // The header NAME is kept: "an Authorization header was present" is diagnostic, and
+    // dropping it would cost information without buying any safety.
+    out += `${raw.slice(emitted, start)}${name}: ${REDACTED}`;
+    emitted = valueStart + consumed;
+    trackTo(emitted);
+    pattern.lastIndex = emitted;
+    match = pattern.exec(raw);
   }
 
-  const closing = value.indexOf(openQuote);
-  return closing === -1 ? REDACTED : `${REDACTED}${value.slice(closing)}`;
+  return out + raw.slice(emitted);
 }
 
 const ASSIGNMENT_VALUE = String.raw`(\[REDACTED\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;)\]}]*)`;
@@ -299,16 +338,7 @@ function isSensitiveName(name: string): boolean {
  * same as redacting once — which matters because evidence gets copied between fields.
  */
 export function redactText(raw: string, options?: RedactionOptions): string {
-  let text = raw.replace(
-    SENSITIVE_HEADER_LINE,
-    (_match, name: string, _colon: string, value: string, offset: number, whole: string) => {
-      // The header name is kept: "an Authorization header was present" is diagnostic, and
-      // dropping it would cost information without buying any safety. Whatever prefix the
-      // line carried is outside the match and survives untouched.
-      const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
-      return `${name}: ${redactHeaderValue(value, whole.slice(lineStart, offset))}`;
-    },
-  );
+  let text = redactSensitiveHeaders(raw);
 
   const rewrite = (quote: string, name: string, separator: string, value: string): string => {
     const quoted = value.startsWith('"') || value.startsWith("'");

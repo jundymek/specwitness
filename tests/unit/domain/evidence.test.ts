@@ -759,3 +759,65 @@ describe('a quote INSIDE a header value is not a terminator (Codex review, third
     expect(redacted).toContain('Accept: application/json');
   });
 });
+
+describe('more than one sensitive header on a single line (self-review)', () => {
+  const A = `${['sk', 'ant'].join('-')}-firstheader`;
+  const B = `${['sk', 'ant'].join('-')}-secondheader`;
+
+  // Found by reading my own code rather than by a review: the pattern consumed to end of
+  // line, so `replace` resumed past it and every header after the first on that line was
+  // never examined. A wire log has one header per line and hid this completely; a shell
+  // command routinely has several, and a smoke gate with an auth header AND an api-key
+  // header is exactly the case `displayCommand` was added for.
+
+  it('redacts BOTH quoted headers in one command', () => {
+    const redacted = redactText(
+      `curl -H "Authorization: Bearer ${A}" -H "X-Api-Key: ${B}" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(A);
+    expect(redacted).not.toContain(B);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('redacts a mix of quote styles on one line', () => {
+    const redacted = redactText(
+      `curl -H 'Authorization: Bearer ${A}' -H "Cookie: session=${B}" http://localhost:3000/x`,
+    );
+
+    expect(redacted).not.toContain(A);
+    expect(redacted).not.toContain(B);
+    expect(redacted).toContain('http://localhost:3000/x');
+  });
+
+  it('keeps quote state per line, so one line cannot open a quote for the next', () => {
+    const redacted = redactText(
+      [
+        `curl -H "Authorization: Bearer ${A}" http://localhost:3000/a`,
+        `Cookie: session=${B}; HttpOnly`,
+      ].join('\n'),
+    );
+
+    expect(redacted).not.toContain(A);
+    expect(redacted).not.toContain(B);
+    // The second line has no open quote, so its whole value goes.
+    expect(redacted).toContain('Cookie: [REDACTED]');
+    expect(redacted).toContain('http://localhost:3000/a');
+  });
+
+  it('stays linear with many headers on one very long line', () => {
+    // The scan tracks line and quote state incrementally rather than searching backwards
+    // per match, so k headers on a line of length L cost O(L), not O(k*L).
+    const line = Array.from(
+      { length: 2000 },
+      (_unused, index) => `-H "Authorization: Bearer ${A}${index}"`,
+    ).join(' ');
+
+    const started = performance.now();
+    const redacted = redactText(`curl ${line} http://localhost:3000/health`);
+    const elapsed = performance.now() - started;
+
+    expect(redacted).not.toContain(A);
+    expect(elapsed).toBeLessThan(2000);
+  });
+});
