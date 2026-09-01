@@ -107,6 +107,16 @@ async function verify(
     clock: new FixedClock('2026-08-31T20:00:00.000Z'),
     stages: createStages({
       assertVerifiableContract: guard,
+      // A project that declares NO gates — which is what these tests have always
+      // exercised, and why they assert PASS with every stage `ok`. Story 3.4's
+      // stage distinguishes that (legitimate) case from an unwired composition,
+      // which is inconclusive; supplying an empty list says which one this is.
+      // `forbiddenProcessRunner` makes the no-spawn assertion STRONGER: with no
+      // gates declared nothing should spawn, and now nothing can without failing
+      // loudly. (Edit carried by story 3.4 with 3.3's written review and
+      // consent — it references `deps.gates`, which does not exist until 3.4
+      // lands, so it cannot travel in any earlier commit.)
+      gates: { gates: [], runner: forbiddenProcessRunner(), writeEvidence: async (name) => name },
       // Modelled on what stories 3.1 and 3.2 will actually do: release the worktree only
       // if one was created. That makes `spawns` a statement ABOUT THE RUN rather than a
       // constant — the last test in this describe proves the counter can reach 1.
@@ -221,6 +231,8 @@ describe('the integrity stage — AC2', () => {
     const forbidden = forbiddenProcessRunner();
     const stages = createStages({
       assertVerifiableContract: () => frozenContract(),
+      // No gates declared — see the note in `verify()` above.
+      gates: { gates: [], runner: forbidden, writeEvidence: async (name) => name },
       teardown: {
         release: async (context) => {
           const worktreePath = context.run.environment.worktreePath;
@@ -346,7 +358,13 @@ describe('a full gates-only run through the real stages', () => {
   });
 
   it('keeps criteria in contract order and never drops an undeclared result', async () => {
-    const stages = createStages({ assertVerifiableContract: () => frozenContract() });
+    // No gates declared — see the note in `verify()` above. Needed here even
+    // though this test substitutes the PROBES stage: without it the unwired
+    // gates stage ends the run before probes is ever reached.
+    const stages = createStages({
+      assertVerifiableContract: () => frozenContract(),
+      gates: { gates: [], runner: forbiddenProcessRunner(), writeEvidence: async (name) => name },
+    });
     stages[STAGE_NAMES.indexOf('probes')] = {
       name: 'probes',
       run: async (context) => {
@@ -393,13 +411,43 @@ describe('a full gates-only run through the real stages', () => {
       result.stages.find((entry) => entry.stage === stage)?.detail;
 
     expect(detailOf('worktree')).toContain('story 3.1');
-    expect(detailOf('gates')).toContain('story 3.4');
+    // `gates` was here and is deliberately gone, for the same reason `persist`
+    // is (see below): the assertion existed to prove a PLACEHOLDER announces
+    // which story fills it, and story 3.4 filling it is that assertion coming
+    // true. Re-adding a gates row to check the new stage's wording would test
+    // 3.4's strings from 3.3's file, which is worse than not testing them.
     expect(detailOf('setup')).toContain('Epic 4');
     // `persist` was on this list until story 3.5 filled it. A stage that is implemented
     // no longer names a story to come — it reports what it actually did — so the shrinking
     // of this list is how a placeholder being replaced becomes visible. 3.1 and 3.4 remove
     // their own lines the same way.
     expect(detailOf('persist')).not.toContain('story 3.5');
+  });
+
+  it('ends a run assembled WITHOUT a gate runner at exit 3, never at PASS', async () => {
+    // Named directly rather than left implicit. Everything above proves the fix
+    // by the ABSENCE of a green run, and an absence is what somebody restores an
+    // `ok` return over in six months because "it was harmless". This is the
+    // property itself: `aggregate()` over an empty gate set returns PASS, so a
+    // gates stage that returned `ok` when no runner was wired produced a green
+    // verdict for a branch on which nothing had been checked — and a harness
+    // reads the verdict, not the timeline detail beside it.
+    //
+    // Note what this does NOT say: a project that declares no gates is still a
+    // legitimate PASS, which every other test in this describe relies on. Only
+    // an absent RUNNER is inconclusive.
+    const result = await runPipeline({
+      runId: 'run-20260831T200000Z-a3f9',
+      epic: 'epic-3',
+      baseSha: 'b'.repeat(40),
+      headSha: 'c'.repeat(40),
+      environment: ENVIRONMENT,
+      clock: new FixedClock('2026-08-31T20:00:00.000Z'),
+      stages: createStages({ assertVerifiableContract: () => frozenContract() }),
+    });
+
+    expect(result.outcome).toEqual({ infraError: 'infra' });
+    expect(result.outcome.verdict).toBeUndefined();
   });
 });
 
