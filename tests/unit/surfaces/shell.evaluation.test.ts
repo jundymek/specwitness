@@ -596,3 +596,92 @@ describe('Task 6 — the attempts feed the single derivation correctly', () => {
     expect(deriveCriterionResult(human, [await attemptFor(9, 1)]).status).toBe('needs_human');
   });
 });
+
+describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness', () => {
+  it('forwards onProcessGroup to the runner so the pgid reaches the manifest', async () => {
+    // AD-8: a probe spawns a real child that gets its own process group. If
+    // nothing records the pgid, `specwitness clean` cannot reap the group after
+    // an interrupted run and the descendants outlive it with nothing on disk
+    // able to name them. Both merged spawning modules carry this hook
+    // (gates.ts:144, services.ts:405); this executor omitted it until review.
+    const runner = recordingRunner(processResult());
+    const seen: number[] = [];
+
+    await new ShellSurfaceExecutor({
+      runner,
+      clock: new FixedClock(CAPTURED_AT),
+      cwd: WORKTREE,
+      command: resolvedCommand(),
+      writeEvidence: recordingWriter(),
+      recordEvidence: recordingSink(),
+      onProcessGroup: (pgid) => {
+        seen.push(pgid);
+      },
+    }).execute({
+      criterionId: 'E4-01',
+      surface: 'shell',
+      params: {
+        probeId: 'p',
+        commandId: 'migrations-applied',
+        args: [],
+        argumentAllowlist: [],
+        assertions: [
+          {
+            description: 'exits cleanly',
+            target: { source: 'exitCode' },
+            comparison: 'equals',
+            expected: '0',
+          },
+        ],
+      } as unknown as Readonly<Record<string, unknown>>,
+    });
+
+    expect(runner.calls[0]?.onProcessGroup).toBeDefined();
+  });
+
+  it('omits onProcessGroup entirely when none was injected', async () => {
+    // Omitted rather than passed as `undefined`, matching the merged gates stage.
+    const { attempt } = await run({ exitCode: 0 });
+    expect(attempt.attempt).toBe(1);
+  });
+
+  it('gives two probe ids that NORMALISE alike distinct evidence paths', async () => {
+    // `a.b` and `a..b` are two distinct, schema-valid probe ids — 4.2 enforces
+    // uniqueness within a criterion, so both may exist side by side — and both
+    // slugify to `a.b`. Without a tiebreak the second write would silently
+    // overwrite the first, and the first probe's evidence references would
+    // point at another probe's content.
+    const first = await run({ stdout: 'one\n' }, { probeId: 'a.b' });
+    const second = await run({ stdout: 'two\n' }, { probeId: 'a..b' });
+
+    const nameOf = (h: Awaited<ReturnType<typeof run>>): string[] =>
+      h.writer.writes.map((w) => w.name);
+
+    expect(nameOf(first)).not.toEqual(nameOf(second));
+    for (const name of [...nameOf(first), ...nameOf(second)]) {
+      expect(name).not.toContain('..');
+    }
+  });
+
+  it('gives two long probe ids sharing a 64-character prefix distinct evidence paths', async () => {
+    // `Identifier` permits 128 characters; the slug budget is 64.
+    const shared = 'p'.repeat(70);
+    const first = await run({ stdout: 'one\n' }, { probeId: `${shared}alpha` });
+    const second = await run({ stdout: 'two\n' }, { probeId: `${shared}beta` });
+
+    expect(first.writer.writes.map((w) => w.name)).not.toEqual(
+      second.writer.writes.map((w) => w.name),
+    );
+  });
+
+  it('leaves an ordinary readable id unsuffixed, so a run directory stays browsable', async () => {
+    // The fingerprint is a tiebreak for a LOSSY slug, not decoration on every
+    // name. A clean id must keep the name it always had.
+    const { writer } = await run({ stdout: 'ok\n' }, { probeId: 'migrations-check' });
+
+    expect(writer.writes.map((w) => w.name)).toEqual([
+      'evidence/shell-E4-01-migrations-check-1.stdout.txt',
+      'evidence/shell-E4-01-migrations-check-1.json',
+    ]);
+  });
+});

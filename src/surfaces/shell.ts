@@ -252,6 +252,24 @@ export interface ShellExecutorDeps {
   readonly timeoutMs?: number;
   /** AD-10 config-declared extra patterns, passed through to every redaction. */
   readonly redaction?: RedactionOptions;
+  /**
+   * Passed straight to the runner so a probe's process group is recorded
+   * durably BEFORE the run proceeds (AD-8).
+   *
+   * NOT optional in spirit, only in type. A probe spawns a real child, and that
+   * child gets its own process group whether or not anyone writes the pgid
+   * down. If nothing records it, `specwitness clean` cannot find the group
+   * after an interrupted or crashed run, and the probe's descendants outlive
+   * the run with nothing on disk able to name them — the one state AD-8's
+   * crash-durable manifest exists to prevent. Both merged spawning modules
+   * carry this hook for the same reason (`pipeline/stages/gates.ts` and
+   * `pipeline/stages/services.ts`), and the composition root should bind it to
+   * `RunStore.recordProcessGroup` here too.
+   *
+   * Optional purely so a unit test can omit it; the runner awaits it before the
+   * child's outcome is observed, which is where the durability ordering lives.
+   */
+  readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
 }
 
 /** What a shell assertion reads. Mirrors the merged `ShellAssertionTarget`. */
@@ -684,10 +702,61 @@ function slugify(value: string): string {
   return trimmed.length <= 64 ? trimmed : trimmed.slice(0, 64).replace(/[-.]+$/, '');
 }
 
-/** `evidence/shell-E4-01-migrations-check-1` — the stem all three files share. */
+/**
+ * A short fingerprint of the RAW id, used only to disambiguate a lossy slug.
+ *
+ * FNV-1a over the UTF-16 code units, rendered as 8 lowercase hex characters.
+ * Hand-rolled because `src/domain/**` and its importers may not reach for
+ * `node:crypto`, and because this is a uniqueness tiebreak rather than a
+ * security primitive — nothing trusts it, it only has to differ when the
+ * inputs differ.
+ */
+function fingerprint(raw: string): string {
+  let hash = 0x811c_9dc5;
+  for (let index = 0; index < raw.length; index += 1) {
+    hash ^= raw.charCodeAt(index);
+    // FNV prime, via shifts so the arithmetic stays in 32 bits.
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * `evidence/shell-E4-01-migrations-check-1` — the stem all three files share.
+ *
+ * WHY A FINGERPRINT IS SOMETIMES APPENDED. `slugify` is LOSSY in two ways, and
+ * both make two distinct probes collide onto one filename — after which the
+ * second write silently overwrites the first, and the first probe's evidence
+ * references point at another probe's content. Silently wrong evidence is worse
+ * than missing evidence in a product whose only output is evidence.
+ *
+ *  1. SUBSTITUTION collides without any truncation: `a.b` and `a..b` are two
+ *     distinct, schema-valid probe ids (4.2 enforces uniqueness within a
+ *     criterion, so both may exist side by side) and both normalise to `a.b`.
+ *  2. TRUNCATION collides at 64 characters: `Identifier` permits 128, so two
+ *     ids sharing a long prefix become one stem.
+ *
+ * The merged `pipeline/stages/gate-evidence-path.ts` solves the same problem
+ * with the gate's DECLARATION INDEX, and its comment names this exact case —
+ * "it keeps two ids that become identical AFTER truncation apart". A probe has
+ * no index in `ProbeRequest`, so the tiebreak is derived from the id instead of
+ * supplied by the caller: no params change, and nothing for 4.7 to remember.
+ *
+ * Appended ONLY when the slug lost information, so the ordinary readable case
+ * (`shell-E4-01-migrations-check-1`) is unchanged and a run directory stays
+ * browsable by eye. Raised by the Codex review pass, which was right.
+ */
 function evidenceStem(criterionId: string, params: ShellProbeParams, attempt: number): string {
-  const slug = slugify(`${criterionId}-${params.probeId}`);
-  return slug === '' ? `shell-${attempt}` : `shell-${slug}-${attempt}`;
+  const raw = `${criterionId}-${params.probeId}`;
+  const slug = slugify(raw);
+  if (slug === '') {
+    // Nothing survived normalisation, so the fingerprint is the only thing
+    // keeping two such probes apart.
+    return `shell-${fingerprint(raw)}-${attempt}`;
+  }
+  return slug === raw
+    ? `shell-${slug}-${attempt}`
+    : `shell-${slug}-${fingerprint(raw)}-${attempt}`;
 }
 
 export class ShellSurfaceExecutor implements SurfaceExecutor {
@@ -723,6 +792,12 @@ export class ShellSurfaceExecutor implements SurfaceExecutor {
       // toolchain, exactly as gates do. FR-15's withholding is for provider
       // invocations (AD-4), not for a project inspecting itself.
       env: { inherit: true },
+      // AD-8: the runner AWAITS this before the child's outcome is observed, so
+      // the pgid is durable before the run proceeds. Omitted rather than passed
+      // as `undefined`, matching the merged gates stage.
+      ...(this.#deps.onProcessGroup === undefined
+        ? {}
+        : { onProcessGroup: this.#deps.onProcessGroup }),
     });
 
     const execError = classify(params, result, command.binary, timeoutMs, redaction);
