@@ -259,6 +259,37 @@ describe('the real gates stage, through the real pipeline: AC3 — a gate that c
   });
 });
 
+describe('the real gates stage, through the real pipeline: a rejecting runner', () => {
+  it('reaches an infra outcome with no verdict, never a FAIL nobody observed', async () => {
+    // Story 3.2's runner rejects when the durability hook that records a
+    // process group fails — swallowing it would leave a live group nothing on
+    // disk can find. The stage lets it escape; the pipeline classifies any
+    // escaping throw as infra (AD-7, fail closed).
+    //
+    // The property worth pinning is the one this epic exists to protect: an
+    // infrastructure failure must never be reported as a product FAIL. A gate
+    // whose group could not be recorded has said nothing about the branch.
+    const rejecting = {
+      run: async () => {
+        throw new Error('could not durably record the process group');
+      },
+    };
+
+    const result = await verify({
+      gates: declaredGates(THREE),
+      runner: rejecting as never,
+      writeEvidence: recordingWriter(),
+    });
+
+    expect(result.outcome).toEqual({ infraError: 'infra' });
+    expect(result.outcome.verdict).toBeUndefined();
+    expect(result.gates).toEqual([]);
+    expect(statusOf(result, 'gates')).toBe('error');
+    // Still released what it acquired.
+    expect(statusOf(result, 'teardown')).toBe('ok');
+  });
+});
+
 describe('the real gates stage, through the real pipeline: an unwired run says so', () => {
   it('does not read as a green build when no gate runner was bound', async () => {
     // A run in which nothing was checked must never look like one in which

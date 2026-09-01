@@ -344,6 +344,55 @@ describe('gates stage: AC3 — a gate that could NOT START is infrastructure', (
     expect(context.run.gates).toEqual([]);
   });
 
+  it('does not swallow a runner that REJECTS, and claims nothing about the gate', async () => {
+    // `ProcessRunner.run` never rejects for a subprocess OUTCOME — that is its
+    // contract. But story 3.2 added a path where it can reject for an
+    // infrastructure failure: if the durability hook that records the process
+    // group fails, the runner kills the group and rethrows, because swallowing
+    // it would leave a live process group nothing on disk can find.
+    //
+    // What matters here is what this stage does NOT do. It does not catch, it
+    // does not convert the rejection into a gate result, and it does not
+    // re-wrap it — the runner's message names the actual durability failure and
+    // wrapping it would replace a precise diagnosis with a vague one. The
+    // pipeline classifies any escaping throw as infra (AD-7, fail closed), so
+    // the run reaches exit 3 with no verdict rather than a FAIL nobody observed.
+    const durabilityFailure = new InfraError(
+      'could not durably record the process group',
+      'check that the run directory is writable',
+    );
+    const rejecting = {
+      calls: [],
+      run: async () => {
+        throw durabilityFailure;
+      },
+    } as unknown as ReturnType<typeof recordingRunner>;
+    const context = stageContext();
+
+    await expect(createGatesStage(deps(rejecting)).run(context)).rejects.toBe(durabilityFailure);
+
+    expect(context.run.gates).toEqual([]);
+    expect(context.run.evidence).toEqual([]);
+  });
+
+  it('lets an UNCLASSIFIED throw escape rather than reporting a gate outcome', async () => {
+    // A bare TypeError from anywhere below is not something this stage can
+    // interpret. Converting it into a gate result would be the worst available
+    // response: it would turn an unknown failure into a claim about the branch.
+    const bug = new TypeError('cannot read properties of undefined');
+    const exploding = {
+      calls: [],
+      run: async () => {
+        throw bug;
+      },
+    } as unknown as ReturnType<typeof recordingRunner>;
+    const context = stageContext();
+
+    await expect(createGatesStage(deps(exploding)).run(context)).rejects.toBe(bug);
+
+    expect(context.run.gates).toEqual([]);
+  });
+
   it('refuses to run gates at all when there is no worktree', async () => {
     // Falling back to the source repo would silently verify the wrong tree.
     const runner = recordingRunner();
