@@ -45,13 +45,22 @@ function at(invocations: readonly ShimInvocation[], index: number): ShimInvocati
  * that can take seconds. Any assertion that gives startup a fixed budget is a
  * race against the load on the box, which is not a property of this codebase.
  *
- * The ceiling is generous on purpose: it exists only so a shim that never
- * starts at all fails with a clear message instead of hanging the suite, and it
- * is never reached on a machine that is merely busy.
+ * The ceiling exists only so a shim that never starts at all fails with a clear
+ * message instead of hanging the suite, and it is never reached on a machine
+ * that is merely busy — the startup overruns that caused the original flake were
+ * seconds, not tens of seconds.
+ *
+ * It must stay COMFORTABLY BELOW `testTimeout` in `vitest.config.ts` (30s), and
+ * that relationship is the point rather than a detail. If the two are equal,
+ * Vitest's generic timeout fires at the same moment as this one: the caller
+ * never sees the message below, the `finally` that kills the subprocess may not
+ * run, and a hanging shim outlives the test that spawned it. Raising this number
+ * without raising that one re-creates exactly that. Caught in review — the first
+ * version used 30_000.
  */
 async function waitForInvocation(
   shim: { invocations(): Promise<ShimInvocation[]> },
-  ceilingMs = 30_000,
+  ceilingMs = 10_000,
 ): Promise<ShimInvocation[]> {
   const deadline = Date.now() + ceilingMs;
   for (;;) {
