@@ -83,24 +83,44 @@
  * EVIDENCE (AD-10, FR-28) — the COHORT RULE, verbatim
  * ============================================================================
  *
- * Evidence follows whether an OBSERVATION exists — not whether output was non-empty, not
- * whether it was truncated, and not whether the attempt errored. An attempt that observed
- * anything calls `recordEvidence(member)` with the member built through the merged
- * constructor, writes the serialized member to `evidence/<surface>-<slug>-<attempt>.json`
- * and refs it, and additionally writes and refs a full redacted copy of each captured
- * stream that is non-empty after redaction, passing that path as that stream's `fullPath`.
- * An attempt that observed nothing calls `recordEvidence` not at all, writes no file, and
- * refs nothing.
+ * An attempt records the typed member whenever THE CLOSED EVIDENCE UNION CAN REPRESENT WHAT
+ * HAPPENED HONESTLY, and refs it. It additionally writes and refs a full redacted copy of
+ * each captured stream that is non-empty after redaction, passing that path as that stream's
+ * `fullPath`. A ref is never invented for a file that was not written.
  *
- * WHAT "OBSERVED SOMETHING" RESOLVES TO ON THIS SURFACE (the per-surface table 4.7 needs;
- * 4.6 publishes the same table over `ProcessOutcome`):
+ * What that resolves to is decided per surface by what the union GIVES each one, not by
+ * preference — which is why the three surfaces differ here without disagreeing:
  *
- *   a response was received  => OBSERVED, always. Any status, an empty body included: a
- *                               204 carries a real status, which is a real observation even
+ *   shell        every attempt. `CommandEvidence.exitCode` is `number | null`, and null
+ *                truthfully means "killed or never started".
+ *   http         every attempt that RECEIVED A RESPONSE (below).
+ *   observation  every attempt that PRODUCED OUTPUT. `ObservationEvidence.snapshot` is a
+ *                `BoundedText` with no absence marker, so "nothing ran" and "ran and printed
+ *                nothing" are indistinguishable in the member.
+ *
+ * ON THIS SURFACE, exhaustively — the table 4.7 needs, since it cannot ask:
+ *
+ *   a response was received  => RECORDED, always. Any status, an empty body included: a 204
+ *                               carries a real status, which is a real observation even
  *                               though no byte of body exists.
- *   no response at all       => OBSERVED NOTHING. Connection refused, DNS failure, TLS
- *                               failure, or a timeout that fired before any headers.
- *   timeout AFTER headers    => OBSERVED. A real status, real headers and real bytes
+ *   no response at all       => NOT RECORDED. Connection refused, DNS failure, TLS failure,
+ *                               or a timeout that fired before any headers.
+ *                               `HttpResponseRecord.status` is `number`, so there is no
+ *                               truthful way to record a response that never arrived, and
+ *                               writing `status: 0` would manufacture an observation out of
+ *                               an infrastructure failure — the same sin as emitting
+ *                               unsatisfied assertions beside an `execError`, moved into the
+ *                               evidence field. The merged derivation contemplates exactly
+ *                               this case: "a probe that crashed before observing anything
+ *                               has nothing honest to put there, and inventing a value would
+ *                               be worse than omitting one."
+ *                               THE COST, stated rather than hidden: such an attempt derives
+ *                               to criterion `error` carrying zero evidence refs, which is a
+ *                               known FR-28 gap. Closing it properly is an ADR making
+ *                               `HttpEvidence.response` optional or its `status` nullable —
+ *                               not a fabricated status, and not a widening done quietly in
+ *                               a story branch.
+ *   timeout AFTER headers    => RECORDED. A real status, real headers and real bytes
  *                               arrived; the body simply never finished. `execError` is set
  *                               and ZERO assertions are evaluated — the observation is
  *                               incomplete, so nothing may be adjudicated from it — but the
