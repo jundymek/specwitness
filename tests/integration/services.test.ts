@@ -46,6 +46,8 @@ const tracked = new Set<number>();
 const leaked: number[] = [];
 const scratchDirs: string[] = [];
 const openServers: (Server | SocketServer)[] = [];
+/** Raw sockets held open by the silent-server fixture; destroyed in afterEach. */
+const sockets: import('node:net').Socket[] = [];
 
 function trackPid(pid: number): number {
   tracked.add(pid);
@@ -115,6 +117,9 @@ afterEach(async () => {
   }
   tracked.clear();
 
+  for (const socket of sockets.splice(0)) {
+    socket.destroy();
+  }
   for (const server of openServers.splice(0)) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -525,6 +530,78 @@ describe('AC2 — a service that never becomes ready ends the run InfraError, no
     expect((error as InfraError).message).toContain('exited');
     // It did NOT wait out the 30s deadline — the test itself would time out.
     expect(JSON.stringify(context.run.evidence)).toContain('EADDRINUSE');
+  });
+});
+
+describe('AC2 — a readiness endpoint that ACCEPTS and never answers still hits the deadline', () => {
+  it('bounds each request so `ready.timeoutSec` is actually enforced', async () => {
+    // Codex review, P1, and a real defect this story shipped once. A server that
+    // completes the TCP handshake and then never writes a response leaves `fetch`
+    // pending forever. The readiness deadline is only consulted AFTER a probe
+    // resolves, so an unbounded request meant `timeoutSec` was never enforced at
+    // all: verification hung instead of producing the required InfraError.
+    //
+    // The state is PRODUCED, not mocked — a real listener that accepts and then
+    // does nothing, which is exactly what a half-started server looks like. If
+    // the bound regresses, this test hangs until vitest kills it rather than
+    // failing quietly, which is the honest failure mode for a hang.
+    const dir = await scratch();
+    const script = await serviceScript(dir, STAYS_UP);
+
+    const silent = createSocketServer((socket) => {
+      // Accept, hold the socket open, write nothing. Ever.
+      sockets.push(socket);
+    });
+    openServers.push(silent);
+    await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', resolve));
+    const address = silent.address();
+    if (address === null || typeof address === 'string') {
+      throw new Error('the silent server did not report a port');
+    }
+
+    const services = declaredServices(
+      [
+        'version: 1',
+        'project:',
+        '  baseBranch: master',
+        'services:',
+        '  backend:',
+        `    run: ${JSON.stringify(`${NODE} ${script}`)}`,
+        '    ready:',
+        `      url: "http://127.0.0.1:${address.port}/health"`,
+        '      timeoutSec: 2',
+      ].join('\n'),
+    );
+
+    const registry = realRegistry();
+    let pgid = 0;
+    const startedAt = Date.now();
+
+    const error = await createServicesStage(
+      deps({
+        services,
+        registry,
+        // Well under the 2s readiness deadline, so several requests are abandoned
+        // and the DEADLINE is what ends the wait — not a single hung request.
+        requestTimeoutMs: 200,
+        onProcessGroup: (value) => {
+          pgid = trackPid(value);
+        },
+      }),
+    )
+      .run(stageContext(dir))
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(InfraError);
+    expect((error as InfraError).message).toContain('backend');
+    expect((error as InfraError).message).toContain('did not become ready');
+
+    // It ended at the deadline rather than hanging: comfortably under the 5s
+    // production per-request ceiling this would otherwise have waited on.
+    expect(Date.now() - startedAt).toBeLessThan(15_000);
+
+    expect(pgid).toBeGreaterThan(0);
+    expect(await waitForExit(pgid)).toBe(true);
   });
 });
 

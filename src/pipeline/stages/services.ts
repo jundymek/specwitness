@@ -229,6 +229,26 @@ export interface HttpProbeResult {
 }
 
 /**
+ * The longest a single readiness request may take before it is abandoned as
+ * "not ready yet".
+ *
+ * REQUIRED, not a nicety, and the reason is a real defect this story shipped
+ * once (Codex review, P1): a server that ACCEPTS the connection and then never
+ * responds leaves `fetch` pending forever. The readiness deadline is only
+ * consulted after a probe resolves, so an unbounded request means
+ * `ready.timeoutSec` is never enforced at all — verification hangs instead of
+ * producing the `InfraError` AC2 requires. A half-open connection is an ordinary
+ * failure of a booting server, not an exotic one.
+ *
+ * Five seconds: long enough that a slow-but-alive endpoint is not cut off and
+ * mistaken for dead, short enough that a hung one is noticed several times
+ * within any realistic `timeoutSec`. Each request is additionally clamped to the
+ * time actually remaining, so a single hung request can never outlive the
+ * deadline it is being measured against.
+ */
+export const READINESS_REQUEST_TIMEOUT_MS = 5_000;
+
+/**
  * One HTTP GET against a readiness URL.
  *
  * Injected for the same reason as everything else here, and OPTIONAL because a
@@ -244,7 +264,7 @@ export interface HttpProbeResult {
  * into a thrown error on the happy path.
  */
 export interface HttpReadinessProbe {
-  (url: string): Promise<HttpProbeResult>;
+  (url: string, options: { readonly timeoutMs: number }): Promise<HttpProbeResult>;
 }
 
 /**
@@ -387,6 +407,12 @@ export interface ServicesStageDeps {
   readonly httpProbe?: HttpReadinessProbe;
   /** Defaults to `READINESS_POLL_INTERVAL_MS`. */
   readonly pollIntervalMs?: number;
+  /**
+   * Per-request ceiling for one readiness probe. Defaults to
+   * `READINESS_REQUEST_TIMEOUT_MS`, and is clamped to the time remaining before
+   * the readiness deadline whatever it is set to.
+   */
+  readonly requestTimeoutMs?: number;
   /** Defaults to a real timer. Injected so tests never wait. */
   readonly sleep?: (ms: number) => Promise<void>;
   /** Defaults to `SERVICE_LIFETIME_MS`. */
@@ -411,9 +437,19 @@ export interface ServicesStageDeps {
  * redirect to somewhere that does would report a service ready on the strength
  * of a different endpoint's health.
  */
-export const fetchReadiness: HttpReadinessProbe = async (url) => {
+export const fetchReadiness: HttpReadinessProbe = async (url, options) => {
   try {
-    const response = await fetch(url, { method: 'GET', redirect: 'manual' });
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'manual',
+      // BOUNDED. Without this a server that accepts the connection and never
+      // answers leaves the promise pending forever, and because the deadline is
+      // only checked after a probe resolves, `ready.timeoutSec` would never be
+      // enforced. The abort surfaces below as `{status: null}` — "not ready
+      // yet" — which is exactly right: a half-open connection says nothing
+      // except that the service is not serving.
+      signal: AbortSignal.timeout(options.timeoutMs),
+    });
     return { status: response.status };
   } catch {
     return { status: null };
@@ -573,6 +609,12 @@ async function pollReadiness(
   serviceId: string,
   service: ServiceConfig,
   cwd: string,
+  /**
+   * How long THIS request may take. Clamped by the caller to the time actually
+   * remaining before the readiness deadline, so one hung request can never
+   * outlive the deadline it is being measured against.
+   */
+  requestBudgetMs: number,
 ): Promise<ReadinessPoll> {
   const ready = service.ready;
 
@@ -581,7 +623,7 @@ async function pollReadiness(
   // second opinion about a rule the schema already owns.
   if (ready.url !== undefined) {
     const probe = deps.httpProbe ?? fetchReadiness;
-    const { status } = await probe(ready.url);
+    const { status } = await probe(ready.url, { timeoutMs: requestBudgetMs });
     if (status !== null && status >= 200 && status < 300) {
       return { ready: true };
     }
@@ -619,7 +661,10 @@ async function pollReadiness(
     binary,
     args,
     cwd,
-    timeoutMs: deps.pollIntervalMs ?? READINESS_POLL_INTERVAL_MS,
+    // Bounded by the same budget as the URL probe, for the same reason: a
+    // readiness command that hangs must not outlive the deadline it is being
+    // measured against. `timed-out` is classified as "not ready yet" below.
+    timeoutMs: requestBudgetMs,
     env: { inherit: true },
   });
 
@@ -755,7 +800,16 @@ async function awaitReadiness(
       );
     }
 
-    const poll = await pollReadiness(deps, serviceId, service, cwd);
+    // Clamped to whatever is left of the readiness window, and floored at 1ms so
+    // a budget can never be zero or negative (which `AbortSignal.timeout` would
+    // treat as "abort immediately", turning every probe into a false negative).
+    const remainingMs = Math.max(1, deadline - context.clock.now().getTime());
+    const requestBudgetMs = Math.min(
+      remainingMs,
+      deps.requestTimeoutMs ?? READINESS_REQUEST_TIMEOUT_MS,
+    );
+
+    const poll = await pollReadiness(deps, serviceId, service, cwd, requestBudgetMs);
     if (poll.ready) {
       return;
     }

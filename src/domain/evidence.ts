@@ -428,6 +428,34 @@ function isSensitiveName(name: string): boolean {
  * same as redacting once — which matters because evidence gets copied between fields.
  */
 export function redactText(raw: string, options?: RedactionOptions): string {
+  return redactAtDepth(raw, options, 0);
+}
+
+/**
+ * How deep the nested-assignment recursion may go before it stops descending and
+ * redacts the remainder wholesale.
+ *
+ * A BOUND IS REQUIRED, and it is a security control rather than a performance
+ * tweak. Both recursive arms below descend into text a SERVICE printed, which is
+ * untrusted by definition, and each level of `a:` nesting inside one
+ * whitespace-free token is another stack frame: `'a:'.repeat(2000)` overflowed
+ * the stack outright (measured while adding the nested-assignment fix, before it
+ * shipped). A crash in the redactor is a denial of service triggerable by
+ * anything the verified application logs.
+ *
+ * Sixteen because real nesting is one or two deep — `INFO: KEY=secret`,
+ * `{"note":"KEY=secret"}` — so the bound is far above every shape that occurs and
+ * far below any stack limit.
+ *
+ * WHAT HAPPENS AT THE BOUND IS THE POINT: the remaining value is replaced with
+ * `[REDACTED]` wholesale rather than returned verbatim. Deep nesting therefore
+ * produces OVER-redaction (unreadable, safe) instead of a leak (readable,
+ * unsafe), which is the same failing-closed direction as `shellCommand`'s
+ * default.
+ */
+const MAX_NESTED_ASSIGNMENT_DEPTH = 16;
+
+function redactAtDepth(raw: string, options: RedactionOptions | undefined, depth: number): string {
   let text = redactSensitiveHeaders(raw, options?.shellCommand === true);
 
   const rewrite = (quote: string, name: string, separator: string, value: string): string => {
@@ -469,16 +497,45 @@ export function redactText(raw: string, options?: RedactionOptions): string {
         // processed, and any FURTHER assignment in the same line is
         // whitespace-separated and therefore matched independently by the global
         // scan rather than swallowed by this one.
-        return value.includes(REDACTION_MARKER_HEAD)
-          ? `${quote}${name}${quote}${separator}${value}`
-          : `${quote}${name}${quote}${separator}${redactText(value, options)}`;
+        if (depth >= MAX_NESTED_ASSIGNMENT_DEPTH) {
+          // Fail closed: stop descending, and do not hand back text this
+          // function has not examined.
+          return `${quote}${name}${quote}${separator}${REDACTED}`;
+        }
+        return `${quote}${name}${quote}${separator}${redactAtDepth(value, options, depth + 1)}`;
       }
       // A QUOTED value is consumed whole by the match, so a sensitive assignment nested
       // inside an innocent one — `{"note":"ANTHROPIC_API_KEY=…"}` — would never be
       // examined at all: the scan resumes past the closing quote. Recursing into the
       // inner text closes that hole. It terminates because the inner string is strictly
       // shorter than the value it came from.
-      return `${quote}${name}${quote}${separator}${wrapper}${redactText(value.slice(1, -1), options)}${wrapper}`;
+      if (depth >= MAX_NESTED_ASSIGNMENT_DEPTH) {
+        return `${quote}${name}${quote}${separator}${wrapper}${REDACTED}${wrapper}`;
+      }
+      return `${quote}${name}${quote}${separator}${wrapper}${redactAtDepth(value.slice(1, -1), options, depth + 1)}${wrapper}`;
+    }
+
+    // ALREADY REDACTED: hand it back untouched rather than re-wrapping.
+    //
+    // This is where idempotency belongs, and putting it here rather than on the
+    // innocent branch is a security fix in its own right (Codex review, P1).
+    // Guarding the INNOCENT branch on "the value contains a marker" let
+    // adversarial output opt out of the scan entirely: a service printing
+    // `INFO: [REDACTED_ANTHROPIC_API_KEY=secret` matched the marker head, the
+    // recursion was skipped, and `secret` survived. Captured output is
+    // attacker-influenced, so the presence of a marker can never be taken as
+    // proof that this function produced it.
+    //
+    // Comparing the WHOLE value is what makes that safe: only a value that is
+    // exactly the marker is passed through, so no attacker-supplied text can
+    // ride along inside it. Both spellings are accepted because
+    // `ASSIGNMENT_VALUE` excludes `]`, so a second pass over this function's own
+    // output captures `[REDACTED` with the closing bracket left outside the
+    // match — re-wrapping that produced `[REDACTED]]`, and evidence is copied
+    // between fields, so a redactor that grows its own output every pass is not
+    // merely untidy.
+    if (value === REDACTED || value === REDACTION_MARKER_HEAD) {
+      return `${quote}${name}${quote}${separator}${wrapper}${value}${wrapper}`;
     }
 
     return `${quote}${name}${quote}${separator}${wrapper}${REDACTED}${wrapper}`;

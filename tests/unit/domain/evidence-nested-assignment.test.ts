@@ -85,10 +85,54 @@ describe('a sensitive assignment nested inside an INNOCENT BARE assignment', () 
     expect(redactText(text)).not.toContain(SECRET);
   });
 
+  it('does NOT let a marker FRAGMENT inside a token buy an exemption', () => {
+    // Codex review, P1, and a genuine hole in the first version of this fix.
+    // Idempotency was guarded on the INNOCENT branch by "does this value contain
+    // a marker head?", which adversarial output can satisfy on purpose: here the
+    // marker fragment and the secret live in the SAME whitespace-free token, so
+    // the global scan never gets a second chance at it and `secret` survived.
+    //
+    // Captured output is attacker-influenced, so marker presence can never prove
+    // this function produced it. Idempotency now lives on the sensitive branch
+    // and compares the WHOLE value, which nothing can ride inside.
+    const text = `INFO: [REDACTED_ANTHROPIC_API_KEY=${SECRET}`;
+    expect(redactText(text)).not.toContain(SECRET);
+  });
+
   it('remains idempotent', () => {
     // `[REDACTED]` contains no sensitive assignment, so redacting twice must be
     // the same as redacting once — evidence gets copied between fields.
     const once = redactText(`INFO: ANTHROPIC_API_KEY=${SECRET}`);
     expect(redactText(once)).toBe(once);
+  });
+});
+
+describe('the recursion is BOUNDED — untrusted text cannot exhaust the stack', () => {
+  it('survives a pathologically nested token instead of overflowing', () => {
+    // Measured while adding the nested-assignment fix, BEFORE it shipped: an
+    // unbounded recursion threw `RangeError: Maximum call stack size exceeded`
+    // on this exact input. Service output is untrusted, so a crash in the
+    // redactor is a denial of service triggerable by anything the verified
+    // application logs — this is a security guard, not a benchmark.
+    const nested = `${'a:'.repeat(5000)}x`;
+
+    expect(() => redactText(nested)).not.toThrow();
+  });
+
+  it('fails CLOSED at the depth bound: over-redacts rather than passing text through', () => {
+    // Beyond the bound the remainder is replaced wholesale. Deep nesting is
+    // therefore unreadable (safe) rather than unexamined (unsafe).
+    const deep = `${'a:'.repeat(40)}ANTHROPIC_API_KEY=${SECRET}`;
+
+    expect(redactText(deep)).not.toContain(SECRET);
+  });
+
+  it('stays fast on a large realistic service log', () => {
+    const line = 'INFO: NODE_ENV=production PORT=3000 host=127.0.0.1\n';
+    const started = Date.now();
+
+    redactText(line.repeat(20000));
+
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 });
