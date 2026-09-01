@@ -25,12 +25,18 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Contract } from '../../../src/domain/contract.js';
-import { InfraError } from '../../../src/domain/errors.js';
+import {
+  ConfigError,
+  InfraError,
+  IngestError,
+  IntegrityError,
+  ProviderError,
+} from '../../../src/domain/errors.js';
 import type { RunEnvironment, RunResult } from '../../../src/domain/run-result.js';
 import { exitCodeForOutcome } from '../../../src/cli/exit.js';
 import { runPipeline } from '../../../src/pipeline/run-pipeline.js';
 import { createStages } from '../../../src/pipeline/stages/index.js';
-import { stageProductNegative } from '../../../src/pipeline/stage.js';
+import { stageOk, stageProductNegative } from '../../../src/pipeline/stage.js';
 import { FixedClock } from '../../fakes/ports.js';
 
 const ENVIRONMENT: RunEnvironment = {
@@ -243,6 +249,128 @@ describe('a persist failure never rewrites a decided verdict (AC1)', () => {
 
     const teardown = result.stages.find((s) => s.stage === 'teardown');
     expect(teardown?.status).not.toBe('skipped');
+  });
+});
+
+describe('EVERY outcome is persisted, including the infra ones (AC1)', () => {
+  /**
+   * Runs a pipeline with a stage swapped, capturing both writes.
+   *
+   * `persisted` records the crash-durable snapshot from the persist stage; `completed`
+   * records the finished document from `onComplete`. Which of the two fires is the whole
+   * point of this describe.
+   */
+  async function runCapturing(
+    swap: (stages: ReturnType<typeof createStages>) => ReturnType<typeof createStages>,
+    guard: () => Contract = frozenContract,
+  ): Promise<{ result: RunResult; persisted: RunResult[]; completed: RunResult[] }> {
+    const persisted: RunResult[] = [];
+    const completed: RunResult[] = [];
+
+    const result = await runPipeline({
+      runId: 'run-20260831T200000Z-a3f9',
+      epic: 'epic-3',
+      baseSha: 'b'.repeat(40),
+      headSha: 'c'.repeat(40),
+      environment: ENVIRONMENT,
+      clock: new FixedClock('2026-08-31T20:00:00.000Z'),
+      stages: swap(
+        createStages({
+          assertVerifiableContract: guard,
+          persist: {
+            writeResult: async (_runId, snapshot) => {
+              persisted.push(snapshot);
+            },
+          },
+        }),
+      ),
+      onComplete: async (finished) => {
+        completed.push(finished);
+      },
+    });
+
+    return { result, persisted, completed };
+  }
+
+  it('persists a PASS through both writes', async () => {
+    const { persisted, completed } = await runCapturing((s) => s);
+
+    expect(persisted[0]?.outcome).toEqual({ verdict: 'PASS' });
+    expect(completed[0]?.outcome).toEqual({ verdict: 'PASS' });
+  });
+
+  it('persists a NEEDS_HUMAN run', async () => {
+    const { result, persisted, completed } = await runCapturing((stages) =>
+      stages.map((stage) =>
+        stage.name === 'probes'
+          ? {
+              name: 'probes' as const,
+              run: async (context: Parameters<typeof stage.run>[0]) => {
+                context.run.criteria.push({
+                  criterionId: 'E3-01',
+                  status: 'needs_human' as const,
+                  statement: 'A person must read the error message.',
+                  severity: 'normal' as const,
+                });
+                return stageOk();
+              },
+            }
+          : stage,
+      ),
+    );
+
+    expect(result.outcome).toEqual({ verdict: 'NEEDS_HUMAN' });
+    expect(persisted[0]?.outcome).toEqual({ verdict: 'NEEDS_HUMAN' });
+    expect(completed[0]?.outcome).toEqual({ verdict: 'NEEDS_HUMAN' });
+  });
+
+  it('persists an INFRA run even though the persist stage never ran', async () => {
+    // THE case AC1 calls out by name: a run that ended `{infraError: 'integrity'}` before
+    // a worktree existed still leaves a result.json, because that is what makes a failed
+    // run diagnosable later.
+    //
+    // The mechanism is not obvious and is worth pinning: an early throw stops the
+    // pipeline, so the persist stage at position 10 is SKIPPED and write 1 never happens.
+    // `onComplete` runs after teardown regardless of outcome, so write 2 is what stores
+    // the run. Remove that callback and infra-failed runs would silently persist nothing —
+    // the failures most worth reading about would be the only ones with no record.
+    const { result, persisted, completed } = await runCapturing(
+      (s) => s,
+      () => {
+        throw new IntegrityError('contract fingerprint does not match', 'regenerate it');
+      },
+    );
+
+    expect(result.outcome).toEqual({ infraError: 'integrity' });
+    expect(result.stages.find((s) => s.stage === 'persist')?.status).toBe('skipped');
+    expect(persisted).toHaveLength(0);
+    expect(completed[0]?.outcome).toEqual({ infraError: 'integrity' });
+  });
+
+  it('persists each infra classification, not just the one the guard raises', async () => {
+    // The taxonomy is closed and every arm reaches storage. A classification that could
+    // not be persisted would be one nobody could diagnose after the fact.
+    const cases: { error: Error; classification: string }[] = [
+      { error: new IntegrityError('tampered', 'regenerate'), classification: 'integrity' },
+      { error: new ConfigError('bad config', 'fix it'), classification: 'config' },
+      { error: new IngestError('cannot read epics', 'check the path'), classification: 'ingest' },
+      { error: new ProviderError('cli failed', 'check the provider'), classification: 'provider' },
+      { error: new InfraError('disk full', 'free space'), classification: 'infra' },
+      // Fail closed: anything unrecognised is infrastructure, never a product verdict.
+      { error: new Error('something nobody classified'), classification: 'infra' },
+    ];
+
+    for (const { error, classification } of cases) {
+      const { result, completed } = await runCapturing(
+        (s) => s,
+        () => {
+          throw error;
+        },
+      );
+
+      expect(result.outcome).toEqual({ infraError: classification });
+      expect(completed[0]?.outcome).toEqual({ infraError: classification });
+    }
   });
 });
 
