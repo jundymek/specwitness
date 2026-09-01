@@ -608,6 +608,80 @@ describe('gates stage: AC1/AC2 — evidence', () => {
     expect(evidence.stdout.fullPath).toBeUndefined();
   });
 
+  it('keeps the path of the stream that DID write when its sibling fails', async () => {
+    // `Promise.all` would discard the successful path along with the failed
+    // one, leaving a real file in the run directory that nothing in the
+    // evidence can reach — worst exactly when the inline copy is truncated and
+    // the pointer is the only way to the rest.
+    const half = Object.assign(
+      async (name: string) => {
+        if (name.endsWith('.stderr.txt')) {
+          throw new Error('ENOSPC: no space left on device');
+        }
+        return name;
+      },
+      { writes: [] as { name: string; contents: string }[] },
+    );
+    // Both streams must EXCEED THE CAP, or the pointer never appears at all:
+    // `boundedText` attaches `fullPath` only when the inline copy was actually
+    // truncated, so a small fixture would make this pass without exercising
+    // anything. That is precisely the case the finding is about — the pointer
+    // matters most when the inline copy is incomplete.
+    const huge = 'x'.repeat(EVIDENCE_INLINE_CAP_BYTES * 2);
+    const runner = recordingRunner(processResult({ exitCode: 1, stdout: huge, stderr: huge }));
+    const context = stageContext();
+
+    const result = await createGatesStage(deps(runner, half)).run(context);
+
+    expect(result.status).toBe('product-negative');
+    const evidence = context.run.evidence.find((e) => e.kind === 'gate') as GateEvidence;
+    expect(evidence.stdout.truncated).toBe(true);
+    expect(evidence.stdout.fullPath).toBe('evidence/gate-00-lint.stdout.txt');
+    expect(evidence.stderr.truncated).toBe(true);
+    expect(evidence.stderr.fullPath).toBeUndefined();
+  });
+
+  it('does not let a write failure replace a TIMEOUT diagnosis', async () => {
+    // The classification paths are about to throw a precise InfraError. A write
+    // failure escaping from evidence capture would replace "timed out after
+    // 400ms" with "ENOSPC" — still exit 3, but telling the operator the wrong
+    // thing about why. Same durability-rewrites-a-conclusion mistake as the
+    // gate path, one classification over.
+    const exploding = Object.assign(
+      async () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+      { writes: [] as { name: string; contents: string }[] },
+    );
+    const runner = recordingRunner(
+      processResult({ outcome: 'timed-out', exitCode: null, stdout: 'still compiling' }),
+    );
+
+    const error = await infraErrorFrom(
+      createGatesStage({ ...deps(runner, exploding), timeoutMs: 400 }).run(stageContext()),
+    );
+
+    expect(error.message).toMatch(/timed out/i);
+    expect(error.message).not.toMatch(/ENOSPC/);
+  });
+
+  it('does not let a write failure replace a MISSING BINARY diagnosis', async () => {
+    const exploding = Object.assign(
+      async () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+      { writes: [] as { name: string; contents: string }[] },
+    );
+    const runner = recordingRunner(
+      processResult({ outcome: 'not-found', exitCode: null, stderr: 'spawn node ENOENT' }),
+    );
+
+    const error = await infraErrorFrom(createGatesStage(deps(runner, exploding)).run(stageContext()));
+
+    expect(error.message).toMatch(/not on PATH/);
+    expect(error.message).not.toMatch(/ENOSPC/);
+  });
+
   it('DOES fail closed when a PASSING gate cannot have its evidence written', async () => {
     // The deliberate asymmetry. No conclusion has been reached yet, the run is
     // not owed a verdict, and "we could not record what we observed" is an

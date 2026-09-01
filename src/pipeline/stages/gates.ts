@@ -182,22 +182,55 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** `{stdoutFullPath, stderrFullPath}`, each key present only when a file was written. */
+/** What persisting the two streams produced: whatever landed, and whatever did not. */
+interface PersistOutcome {
+  readonly paths: StreamPaths;
+  /** One reason per stream that could not be written. Empty when all writes landed. */
+  readonly failures: readonly string[];
+}
+
+/**
+ * Persist both streams INDEPENDENTLY, and never throw.
+ *
+ * `Promise.allSettled` rather than `Promise.all`, and the difference is not
+ * academic: with `all`, one stream failing discards the OTHER stream's returned
+ * path even though its file was written successfully. On the path where the
+ * caller deliberately continues — a gate that failed, whose conclusion must
+ * survive a durability problem — that left a real file in the run directory
+ * that nothing in the evidence could reach, precisely when the inline copy was
+ * truncated and the pointer mattered most.
+ *
+ * Returning failures instead of throwing keeps the decision with the caller,
+ * which is the only place that knows whether a conclusion has already been
+ * reached and therefore whether a write failure may be tolerated.
+ */
 async function persistStreams(
   deps: GatesStageDeps,
   gateId: string,
   index: number,
   result: ProcessResult,
-): Promise<StreamPaths> {
-  const [stdoutFullPath, stderrFullPath] = await Promise.all([
+): Promise<PersistOutcome> {
+  const settled = await Promise.allSettled([
     persistStream(deps, gateId, index, 'stdout', result.stdout),
     persistStream(deps, gateId, index, 'stderr', result.stderr),
   ]);
 
-  return {
-    ...(stdoutFullPath === undefined ? {} : { stdoutFullPath }),
-    ...(stderrFullPath === undefined ? {} : { stderrFullPath }),
-  };
+  const paths: { stdoutFullPath?: string; stderrFullPath?: string } = {};
+  const failures: string[] = [];
+  const keys = ['stdoutFullPath', 'stderrFullPath'] as const;
+
+  settled.forEach((outcome, position) => {
+    const key = keys[position] as (typeof keys)[number];
+    if (outcome.status === 'rejected') {
+      failures.push(reasonOf(outcome.reason));
+      return;
+    }
+    if (outcome.value !== undefined) {
+      paths[key] = outcome.value;
+    }
+  });
+
+  return { paths, failures };
 }
 
 /**
@@ -225,7 +258,14 @@ async function recordAttempt(
     return;
   }
 
-  const paths = await persistStreams(deps, gate.id, index, result);
+  // Write failures are IGNORED here on purpose. This runs on the paths that are
+  // about to throw a precise `InfraError` — "gate 'lint' timed out after 400ms",
+  // "'pnpm' is not on PATH". Letting a write failure escape would replace that
+  // diagnosis with "ENOSPC", which is the same durability-rewrites-a-conclusion
+  // mistake the gate path just fixed, one classification over: the outcome would
+  // still be exit 3, but the operator would be told the wrong thing about why.
+  // The inline evidence still lands, because the constructor performs no I/O.
+  const { paths } = await persistStreams(deps, gate.id, index, result);
   const evidence: Evidence = commandEvidence({
     capturedAt: context.clock.now().toISOString(),
     commandId: gate.id,
@@ -460,16 +500,20 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
         // conclusion has been reached yet, the run is not owed a verdict, and
         // "we could not record what we observed" is an honest infrastructure
         // failure rather than a green light.
-        let paths: StreamPaths = {};
+        const persisted = await persistStreams(deps, gate.id, index, result);
         let evidenceNote = '';
-        try {
-          paths = await persistStreams(deps, gate.id, index, result);
-        } catch (error) {
+        if (persisted.failures.length > 0) {
           if (status !== 'fail') {
-            throw error;
+            throw new InfraError(
+              `gate '${gate.id}' passed but its output could not be written: ` +
+                persisted.failures.join('; '),
+              'check that the run directory is writable and rerun',
+            );
           }
-          evidenceNote = `; the gate's full output could not be written (${reasonOf(error)})`;
+          evidenceNote =
+            `; the gate's full output could not be written (${persisted.failures.join('; ')})`;
         }
+        const paths = persisted.paths;
 
         // Pushed even when the file write failed: `gateEvidence` performs no
         // I/O, so the bounded inline output — the part a report actually shows —
