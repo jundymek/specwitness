@@ -586,6 +586,25 @@ describe('gates stage: FR-28 — a seeded secret never reaches evidence OR disk'
     expect(serialised).not.toContain(SEEDED_COOKIE);
   });
 
+  it('keeps the secret out of an InfraError message that quotes gate output', async () => {
+    // An error travels further than evidence does. The pipeline redacts stage
+    // timeline details in its recorder, but the SAME error also reaches
+    // `printError` at the CLI edge, which writes ERROR:/HINT: to stderr
+    // verbatim. Without redacting where the untrusted text enters the message,
+    // the persisted copy would be clean while the terminal showed the
+    // credential — the same split that made the full-file write a hole,
+    // arriving through the error path instead of the evidence path.
+    const runner = recordingRunner(
+      processResult({ outcome: 'spawn-failed', exitCode: null, stderr: NOISY_GATE_OUTPUT }),
+    );
+
+    const error = await infraErrorFrom(createGatesStage(deps(runner)).run(stageContext()));
+
+    expect(error.message).not.toContain(SEEDED_API_KEY);
+    expect(error.message).not.toContain(SEEDED_COOKIE);
+    expect(`${error.message}\n${error.hint ?? ''}`).not.toContain(SEEDED_API_KEY);
+  });
+
   it('keeps the secret out of the bytes written to the run directory', async () => {
     const writer = recordingWriter();
     const runner = recordingRunner(

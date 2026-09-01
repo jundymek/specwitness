@@ -297,7 +297,17 @@ async function classify(
     case 'spawn-failed':
       await recordAttempt(deps, context, gate, index, result);
       throw new InfraError(
-        `gate '${gate.id}' could not be spawned: ${result.stderr.trim() || 'the process did not start'}`,
+        // REDACTED before it goes into the message, and this is not belt-and-
+        // braces. This is the only error here that embeds CAPTURED OUTPUT, and
+        // an error travels further than evidence does: the pipeline redacts
+        // timeline details in its recorder, but the same error also reaches
+        // `printError` at the CLI edge, which writes ERROR:/HINT: to stderr
+        // verbatim. So the persisted copy would be clean while the terminal
+        // showed the secret — the same split that made the full-file write a
+        // hole, arriving through the error path instead of the evidence path.
+        // Redacting at the point untrusted text enters the message closes it
+        // wherever the message is later printed.
+        `gate '${gate.id}' could not be spawned: ${redactText(result.stderr).trim() || 'the process did not start'}`,
         'check that the verification worktree exists and is readable, then rerun',
       );
 
