@@ -290,13 +290,9 @@ describe('the real gates stage, through the real pipeline: a rejecting runner', 
   });
 });
 
-describe('the real gates stage, through the real pipeline: an unwired run says so', () => {
-  it('does not read as a green build when no gate runner was bound', async () => {
-    // A run in which nothing was checked must never look like one in which
-    // everything passed. The verdict is still PASS over an empty gate set —
-    // that is the correct reading of "nothing was checked" — but the timeline
-    // has to say why.
-    const result = await runPipeline({
+describe('the real gates stage, through the real pipeline: an unwired run FAILS CLOSED', () => {
+  const unwired = async (): Promise<RunResult> =>
+    runPipeline({
       runId: 'run-20260901T000000Z-ab12',
       epic: 'epic-3',
       baseSha: 'a'.repeat(40),
@@ -306,9 +302,44 @@ describe('the real gates stage, through the real pipeline: an unwired run says s
       stages: createStages({ assertVerifiableContract: () => frozenContract() }),
     });
 
+  it('is INCONCLUSIVE, never a green verdict, when no gate runner was bound', async () => {
+    // The finding this replaced an earlier, weaker version of. `aggregate()`
+    // over an empty gate set returns PASS, so an unwired run used to produce a
+    // green verdict for a branch on which nothing had been checked — and a
+    // timeline detail does not stop a consumer treating the verdict as green,
+    // because the verdict IS the machine contract.
+    const result = await unwired();
+
+    expect(result.outcome).toEqual({ infraError: 'infra' });
+    expect(result.outcome.verdict).toBeUndefined();
     expect(result.gates).toEqual([]);
+  });
+
+  it('says which stage and why, so the defect is diagnosable', async () => {
+    const result = await unwired();
+
+    expect(statusOf(result, 'gates')).toBe('error');
     expect(result.stages.find((entry) => entry.stage === 'gates')?.detail).toContain(
       'no gate runner',
     );
+  });
+
+  it('still runs teardown', async () => {
+    expect(statusOf(await unwired(), 'teardown')).toBe('ok');
+  });
+
+  it('does NOT fail closed when the project simply declares no gates', async () => {
+    // The distinction that makes the rule above safe rather than blunt. A
+    // project with an empty `gates:` block has declared nothing, so nothing was
+    // expected, and PASS is the correct reading. Only an absent RUNNER is
+    // inconclusive.
+    const result = await verify({
+      gates: [],
+      runner: recordingRunner(),
+      writeEvidence: recordingWriter(),
+    });
+
+    expect(result.outcome).toEqual({ verdict: 'PASS' });
+    expect(statusOf(result, 'gates')).toBe('ok');
   });
 });

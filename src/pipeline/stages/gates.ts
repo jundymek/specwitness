@@ -333,23 +333,39 @@ async function classify(
 }
 
 /**
- * The `gates` stage for a run that was assembled without a gate runner.
+ * The `gates` stage for a run assembled without a gate runner. IT FAILS CLOSED,
+ * and that is the whole reason it exists.
  *
- * Deliberately NOT `createPlaceholderStage`: that renders "not implemented yet",
- * which stopped being true when this file was written. An unwired run must say
- * what actually happened — no gates ran, and not because none are declared —
- * because the one thing a gates stage must never do is let a run in which
- * nothing was checked read like a green build.
+ * An earlier version returned `ok` with an explanatory timeline detail. That is
+ * not sufficient, and a review was right to call it a P1: `aggregate()` over an
+ * empty gate set returns PASS, so an unwired run produced a **green verdict for
+ * a branch on which nothing was checked**. A detail string does not stop a
+ * consumer treating the verdict as green — the verdict IS the machine contract,
+ * and a harness reads that, not the prose beside it.
  *
- * Reachable only until the CLI edge (story 3.7) binds the runner. Kept here
- * rather than in `stages/index.ts` so that assembling a pipeline stays a matter
- * of choosing between two stages this story owns.
+ * "Nothing was checked" and "everything passed" are the two states this product
+ * exists to keep apart. So this throws: the run is INCONCLUSIVE (exit 3), which
+ * is what actually happened, rather than successful.
+ *
+ * NOT the same as a project that declares no gates. That case belongs to the
+ * wired stage, which sees an empty `gates` array and legitimately returns `ok` —
+ * nothing was declared, so nothing was expected. This stage cannot tell the two
+ * apart, because a composition that omitted the runner also omitted the config,
+ * so failing closed is the only safe reading available to it.
+ *
+ * Reachable only from a composition root that forgot to bind the runner.
  */
 export function createUnwiredGatesStage(): Stage {
   return {
     name: 'gates',
-    run: async () =>
-      stageOk('no gate runner was wired into this run, so story 3.4 executed no gates'),
+    run: async () => {
+      throw new InfraError(
+        'gates could not run: no gate runner was wired into this verification',
+        'this is a SpecWitness defect — bind `gates` when assembling the pipeline. ' +
+          'The run is reported as inconclusive rather than passing, because a run in ' +
+          'which nothing was checked must never read as a green build',
+      );
+    },
   };
 }
 
