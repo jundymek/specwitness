@@ -1211,6 +1211,72 @@ export function assertPlanMatchesContract(plan: Plan, contract: Contract): void 
       `re-run 'specwitness plan ${contract.spec.epic}' to recompile the plan against the current contract`,
     );
   }
+
+  assertPlanCoversContract(plan, contract);
+}
+
+/**
+ * Refuses a plan whose criteria no longer correspond to the contract's.
+ *
+ * **THE FINGERPRINT CANNOT SEE THIS, WHICH IS WHY IT IS A SEPARATE CHECK.** The stored
+ * fingerprint describes the CONTRACT, not the plan. Deleting a criterion entry from a
+ * committed plan file therefore leaves it untouched, and without this the plan would verify
+ * clean while silently checking fewer criteria than the frozen contract requires — Q38's
+ * failure mode ("never silently dropped") arriving at verify time instead of compile time,
+ * through a hand edit rather than through a provider draft.
+ *
+ * Compilation already enforces coverage at the gate (`planDraftSchemaFor`), so a plan
+ * SpecWitness wrote always passes this. What it guards is the gap afterwards: plans are
+ * committed and reviewed (Q11), but a review that has to notice an ABSENCE is the weakest
+ * kind, and a truncated file is not an edit anybody reviewed at all.
+ *
+ * Dispositions are checked too, for the criteria where the contract decides them: a
+ * `verifiability: human` criterion must still be carried as needs-human. `deriveCriterionResult`
+ * would refuse to let a probe adjudicate one regardless — it is unconditional there — but a
+ * plan that CLAIMS otherwise should be refused where the claim is written down, rather than
+ * quietly ignored three stages later.
+ *
+ * Raised by the third Codex review pass.
+ */
+function assertPlanCoversContract(plan: Plan, contract: Contract): void {
+  const planned = new Map(plan.plan.criteria.map((entry) => [entry.criterionId, entry]));
+  const declared = new Set(contract.spec.criteria.map((criterion) => criterion.id));
+
+  const missing = contract.spec.criteria
+    .map((criterion) => criterion.id)
+    .filter((id) => !planned.has(id));
+
+  if (missing.length > 0) {
+    throw new IntegrityError(
+      `the plan for ${plan.plan.epic} does not cover every criterion of the frozen contract: ` +
+        `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing, so ` +
+        `${missing.length === 1 ? 'it' : 'they'} would not be verified at all`,
+      `re-run 'specwitness plan ${contract.spec.epic}' to recompile the plan; if the plan file was edited by hand, inspect the change with 'git diff ${'.specwitness/plans'}/${contract.spec.epic}.yaml' first`,
+    );
+  }
+
+  const unknown = [...planned.keys()].filter((id) => !declared.has(id));
+  if (unknown.length > 0) {
+    throw new IntegrityError(
+      `the plan for ${plan.plan.epic} plans ${unknown.join(', ')}, which the frozen contract ` +
+        'does not contain — those probes would be executed against an expectation nobody froze',
+      `re-run 'specwitness plan ${contract.spec.epic}' to recompile the plan against the current contract`,
+    );
+  }
+
+  for (const criterion of contract.spec.criteria) {
+    if (criterion.verifiability !== 'human') {
+      continue;
+    }
+    const entry = planned.get(criterion.id);
+    if (entry !== undefined && entry.disposition !== 'needs-human') {
+      throw new IntegrityError(
+        `the plan for ${plan.plan.epic} plans ${criterion.id} as '${entry.disposition}', but ` +
+          'the frozen contract declares it verifiability: human — no machine may decide it',
+        `re-run 'specwitness plan ${contract.spec.epic}' to recompile the plan; if the plan file was edited by hand, restore it with 'git checkout'`,
+      );
+    }
+  }
 }
 
 export type { Plan, PlanCriterion, ProbeSpec };

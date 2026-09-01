@@ -196,8 +196,15 @@ export function planFor(contract: Contract, overrides: PlanOverrides = {}): Plan
         seed: overrides.seed ?? 'k3n8v2qz7m4d1p6b',
         bindings: overrides.bindings ?? [FIXED_BINDING, VOLATILE_BINDING],
       },
+      // The default respects each criterion's VERIFIABILITY. Mapping a human criterion to a
+      // probe would build a plan the product refuses by design, so a helper that did it
+      // would quietly make every default-built plan unrealistic — and would have hidden the
+      // verify-time disposition check this file is used to test.
       criteria:
-        overrides.criteria ?? contract.spec.criteria.map((c) => automated(c.id, HTTP_PROBE)),
+        overrides.criteria ??
+        contract.spec.criteria.map((c) =>
+          c.verifiability === 'human' ? needsHuman(c.id) : automated(c.id, HTTP_PROBE),
+        ),
     },
     meta: {
       schemaVersion: overrides.schemaVersion ?? 1,

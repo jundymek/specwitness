@@ -640,6 +640,75 @@ describe('AC3: the stale-plan refusal', () => {
     expect((thrown as IntegrityError).message).toMatch(/epic-7/);
   });
 
+  /**
+   * A HAND-EDITED PLAN IS THE CASE THE FINGERPRINT CANNOT SEE.
+   *
+   * The stored fingerprint describes the CONTRACT, not the plan, so deleting a criterion
+   * from a committed plan file leaves it untouched. Without the coverage check below, that
+   * plan verifies clean while silently checking fewer criteria than the frozen contract
+   * requires — Q38's failure mode arriving through the back door, at verify time instead of
+   * compile time. Plans are committed and reviewed, but a review that has to notice an
+   * ABSENCE is the weakest kind.
+   *
+   * Raised by the third Codex review pass.
+   */
+  it('refuses a plan that no longer covers every contract criterion', () => {
+    const short = planFor(CONTRACT, {
+      criteria: [automated('E7-01', HTTP_PROBE), needsHuman('E7-02')],
+    });
+
+    let thrown: unknown;
+    try {
+      assertPlanMatchesContract(short, CONTRACT);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(IntegrityError);
+    expect((thrown as IntegrityError).message).toContain('E7-03');
+    expect((thrown as IntegrityError).hint).toMatch(/specwitness plan/);
+  });
+
+  it('refuses a plan carrying a criterion the contract does not contain', () => {
+    const extra = planFor(CONTRACT, {
+      criteria: [
+        automated('E7-01', HTTP_PROBE),
+        needsHuman('E7-02'),
+        automated('E7-03', HTTP_PROBE),
+        automated('E7-04', HTTP_PROBE),
+      ],
+    });
+
+    expect(() => assertPlanMatchesContract(extra, CONTRACT)).toThrow(/E7-04/);
+  });
+
+  it('refuses a plan that turned a human criterion into an automated one', () => {
+    // `deriveCriterionResult` would refuse to let a probe decide it anyway, but a plan that
+    // claims otherwise should be refused where the claim is made rather than quietly ignored
+    // three stages later.
+    const rewritten = planFor(CONTRACT, {
+      criteria: [
+        automated('E7-01', HTTP_PROBE),
+        automated('E7-02', HTTP_PROBE),
+        automated('E7-03', HTTP_PROBE),
+      ],
+    });
+
+    expect(() => assertPlanMatchesContract(rewritten, CONTRACT)).toThrow(/E7-02/);
+  });
+
+  it('accepts a plan that covers the contract exactly', () => {
+    const full = planFor(CONTRACT, {
+      criteria: [
+        automated('E7-01', HTTP_PROBE),
+        needsHuman('E7-02'),
+        needsHuman('E7-03', 'not-safely-automatable'),
+      ],
+    });
+
+    expect(() => assertPlanMatchesContract(full, CONTRACT)).not.toThrow();
+  });
+
   it('refuses to compare against a contract that is not frozen', () => {
     const unfrozen = { ...CONTRACT, meta: { ...CONTRACT.meta, frozen: false, fingerprint: null } };
 

@@ -132,13 +132,36 @@ export async function readPlanFile(
   }
 }
 
-/** True when a plan file exists for this epic. */
+/**
+ * True when a plan file exists for this epic.
+ *
+ * ONLY "it is not there" yields `false`, exactly as in `readPlanFile` above — an unreadable
+ * file or directory (EACCES) or an I/O error is an `InfraError`.
+ *
+ * **This is the distinction story 4.7 depends on.** 4.7 auto-compiles a plan when none
+ * exists (its AC3). A helper that answered "absent" for a plan it merely failed to OPEN
+ * would let an infrastructure failure become a destructive product action: SpecWitness
+ * replacing a reviewed, committed plan because a permission bit was wrong. Swallowing every
+ * error here is one `catch` that reads as tidy and is the opposite.
+ *
+ * Raised by the third Codex review pass; `readPlanFile` had drawn the distinction from the
+ * start and this function had not.
+ */
 export async function planFileExists(projectRoot: string, epicId: string): Promise<boolean> {
+  const path = resolvePlanPath(projectRoot, epicId);
+
   try {
-    await access(resolvePlanPath(projectRoot, epicId), constants.F_OK);
+    await access(path, constants.F_OK);
     return true;
-  } catch {
-    return false;
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false;
+    }
+    throw new InfraError(
+      `could not determine whether ${planRelativePath(epicId)} exists: ${describe(cause)}`,
+      `check that ${path} and its parent directories are readable`,
+    );
   }
 }
 
