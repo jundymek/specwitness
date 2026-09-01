@@ -198,6 +198,66 @@ describe('AC2: there is nowhere in the schema to put a command string (AD-3)', (
     expectRefusedAt(document, 'plan.criteria.0.probes.0.mechanics.path');
   });
 
+  /**
+   * THE BACKSLASH ORIGIN ESCAPE — the sharpest hole found in this schema, and the one that
+   * would have made this story's headline claim false.
+   *
+   * WHATWG URL parsing treats a backslash as a slash for special schemes, so
+   * `new URL('/\\evil.example/x', 'https://backend:8080/')` resolves to
+   * `https://evil.example/x`. The leading-slash rule and the protocol-relative lookahead
+   * both pass it: it starts with exactly one `/` and the second character is not a slash.
+   * A hostile plan could therefore reach any host it liked while the schema still had no
+   * field named `url` and no field named `host` — the "there is nowhere to put a host"
+   * property, defeated by a character nobody thought about.
+   *
+   * A backslash has no legitimate place in a request path (a literal one is `%5C`), so it
+   * is refused outright rather than escaped. Verified against Node's own URL parser before
+   * being fixed, not assumed. Raised by the fifth Codex review pass.
+   */
+  it.each([
+    ['a backslash after the leading slash', '/\\\\evil.example/x'],
+    ['a doubled backslash', '/\\\\\\\\evil.example/x'],
+    ['a backslash anywhere in the path', '/a\\\\b'],
+  ])('rejects %s, which WHATWG resolves to another origin', (_why, path) => {
+    const document = asDocument(planFor(CONTRACT, { criteria: [automated('E7-01', HTTP_PROBE)] }));
+    const probe = (document.plan as { criteria: { probes: Record<string, unknown>[] }[] }).criteria[0]
+      ?.probes[0] as Record<string, unknown>;
+    (probe.mechanics as Record<string, unknown>).path = path;
+
+    expectRefusedAt(document, 'plan.criteria.0.probes.0.mechanics.path');
+  });
+
+  it('rejects a backslash in a browser probe path too', () => {
+    const document = asDocument(
+      planFor(CONTRACT, { criteria: [automated('E7-01', BROWSER_PROBE)] }),
+    );
+    const probe = (document.plan as { criteria: { probes: Record<string, unknown>[] }[] }).criteria[0]
+      ?.probes[0] as Record<string, unknown>;
+    (probe.mechanics as Record<string, unknown>).path = '/\\\\evil.example/x';
+
+    expectRefusedAt(document, 'plan.criteria.0.probes.0.mechanics.path');
+  });
+
+  it('every accepted path stays on its declared origin', () => {
+    // The property behind the rules, asserted directly against Node's URL parser rather than
+    // against the regex: whatever the schema lets through must resolve inside the service.
+    const base = 'https://backend.internal:8080/';
+    for (const path of ['/health', '/a/b?q=1', '/x#frag', '/%5Cnot-a-backslash', '/a-b_c.d']) {
+      const document = asDocument(
+        planFor(CONTRACT, {
+          criteria: [
+            automated('E7-01', { ...HTTP_PROBE, mechanics: { ...HTTP_PROBE.mechanics, path } }),
+          ],
+        }),
+      );
+
+      expect(check(document).success, `schema should accept ${path}`).toBe(true);
+      expect(new URL(path, base).origin, `${path} must stay on the declared origin`).toBe(
+        new URL(base).origin,
+      );
+    }
+  });
+
   it('rejects a `url` key on an http probe, however plausible it looks', () => {
     const document = asDocument(planFor(CONTRACT, { criteria: [automated('E7-01', HTTP_PROBE)] }));
     const probe = (document.plan as { criteria: { probes: Record<string, unknown>[] }[] }).criteria[0]
@@ -695,6 +755,22 @@ describe('AC3: the stale-plan refusal', () => {
     });
 
     expect(() => assertPlanMatchesContract(rewritten, CONTRACT)).toThrow(/E7-02/);
+  });
+
+  it('refuses a plan claiming an automated criterion is human-verifiable', () => {
+    // The mirror of the check above, and it matters for what the REPORT says: a plan
+    // claiming `human-verifiability` for a criterion the contract marks automated makes the
+    // run tell a reviewer that the contract's author asked for a human, when they did not.
+    // Only `not-safely-automatable` can defer an automated criterion (Q38/Q39).
+    const mislabelled = planFor(CONTRACT, {
+      criteria: [
+        automated('E7-01', HTTP_PROBE),
+        needsHuman('E7-02'),
+        needsHuman('E7-03', 'human-verifiability'),
+      ],
+    });
+
+    expect(() => assertPlanMatchesContract(mislabelled, CONTRACT)).toThrow(/E7-03/);
   });
 
   it('accepts a plan that covers the contract exactly', () => {

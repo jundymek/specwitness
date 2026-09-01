@@ -205,18 +205,32 @@ const Prose = z.string().refine((value) => value.trim().length > 0, {
 /**
  * A SERVICE-RELATIVE request path.
  *
- * Must begin with exactly one `/`. That single rule carries AD-3's "no production URL
- * defaults": `https://prod.example.com/x` has no leading slash and is refused, and
- * `//prod.example.com/x` — a protocol-relative URL, which resolves to another origin and is
- * the version of this attack that looks like a path — is refused by the negative lookahead.
+ * Must begin with exactly one `/`, and must contain NO BACKSLASH ANYWHERE. Together those
+ * carry AD-3's "no production URL defaults":
+ *
+ *  - `https://prod.example.com/x` has no leading slash and is refused.
+ *  - `//prod.example.com/x` — a protocol-relative URL, the version of this attack that looks
+ *    like a path — is refused by the negative lookahead.
+ *  - `/\prod.example.com/x` is refused by the same lookahead and by the class below, and it
+ *    is the one that nearly got through. **WHATWG URL parsing treats a backslash as a slash
+ *    for special schemes**, so `new URL('/\evil.example/x', 'https://backend:8080/')`
+ *    resolves to `https://evil.example/x`. It begins with exactly one `/` and its second
+ *    character is not a `/`, so every rule that existed before this one passed it — and the
+ *    whole "there is nowhere in this schema to put a host" property would have been false,
+ *    defeated by a character rather than by a field. Verified against Node's own URL parser
+ *    rather than reasoned about. A backslash has no legitimate place in a request path (a
+ *    literal one is `%5C`), so it is refused outright rather than escaped.
+ *
  * Whitespace and control characters are refused too, since neither can appear in a real
  * request target and both are how a value gets smuggled past a later naive parser.
+ *
+ * Raised by the fifth Codex review pass.
  */
 const RelativePath = z
   .string()
-  .regex(/^\/(?!\/)[^\s\u0000-\u001f]*$/, {
+  .regex(/^\/(?![/\\])[^\s\u0000-\u001f\\]*$/, {
     message:
-      "must be a service-relative path beginning with a single '/' — a plan names a declared service, never a host",
+      "must be a service-relative path beginning with a single '/' and containing no backslash — a plan names a declared service, never a host",
   });
 
 /** An RFC 7230 header field name. */
@@ -1299,16 +1313,48 @@ function assertPlanCoversContract(plan: Plan, contract: Contract): void {
     );
   }
 
+  // BOTH DIRECTIONS OF THE DISPOSITION RULE, because each lies about something different.
+  //
+  // A human criterion planned as `automated` claims a machine may decide what its author
+  // said no machine may. An AUTOMATED criterion deferred as `human-verifiability` is the
+  // quieter lie and was missed at first: it makes the report tell a reviewer that the
+  // contract's author asked for a human judgement, when in fact compilation simply could not
+  // map it — which is `not-safely-automatable`, a different fact with a different remedy
+  // (sharpen the criterion) (Q38/Q39).
+  //
+  // The second direction was raised by the fifth Codex review pass.
+  const recompile = `re-run 'specwitness plan ${contract.spec.epic}' to recompile the plan; if the plan file was edited by hand, restore it with 'git checkout'`;
+
   for (const criterion of contract.spec.criteria) {
-    if (criterion.verifiability !== 'human') {
+    const entry = planned.get(criterion.id);
+    if (entry === undefined) {
       continue;
     }
-    const entry = planned.get(criterion.id);
-    if (entry !== undefined && entry.disposition !== 'needs-human') {
+
+    if (criterion.verifiability === 'human') {
+      if (entry.disposition !== 'needs-human') {
+        throw new IntegrityError(
+          `the plan for ${plan.plan.epic} plans ${criterion.id} as '${entry.disposition}', but ` +
+            'the frozen contract declares it verifiability: human — no machine may decide it',
+          recompile,
+        );
+      }
+      if (entry.reason !== 'human-verifiability') {
+        throw new IntegrityError(
+          `the plan for ${plan.plan.epic} defers ${criterion.id} with reason '${entry.reason}', ` +
+            'but the frozen contract declares it verifiability: human',
+          recompile,
+        );
+      }
+      continue;
+    }
+
+    if (entry.disposition === 'needs-human' && entry.reason !== 'not-safely-automatable') {
       throw new IntegrityError(
-        `the plan for ${plan.plan.epic} plans ${criterion.id} as '${entry.disposition}', but ` +
-          'the frozen contract declares it verifiability: human — no machine may decide it',
-        `re-run 'specwitness plan ${contract.spec.epic}' to recompile the plan; if the plan file was edited by hand, restore it with 'git checkout'`,
+        `the plan for ${plan.plan.epic} defers ${criterion.id} with reason '${entry.reason}', ` +
+          'but the frozen contract declares it verifiability: automated — only ' +
+          "'not-safely-automatable' can defer an automated criterion",
+        recompile,
       );
     }
   }
