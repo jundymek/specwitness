@@ -12,7 +12,7 @@
  * them to us as ordinary values.
  */
 
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -383,8 +383,9 @@ describe('removal only ever touches worktrees SpecWitness created', () => {
     // what AC2 forbids. Checking only the MAIN worktree misses this, and the
     // agents on this machine all work from linked checkouts.
     const previous = process.env.TMPDIR;
-    process.env.TMPDIR = join(linked, 'scratch');
-    await mkdir(process.env.TMPDIR, { recursive: true });
+    const tmpInsideCheckout = join(linked, 'scratch');
+    process.env.TMPDIR = tmpInsideCheckout;
+    await mkdir(tmpInsideCheckout, { recursive: true });
     try {
       await expect(
         createGitVcs({ runner: real }).addWorktree(resolved.root, repo.headSha, recordNothing),
@@ -397,8 +398,21 @@ describe('removal only ever touches worktrees SpecWitness created', () => {
       }
     }
 
-    // And nothing was left behind in the operator's checkout.
+    // Nothing was left behind in the operator's checkout — asserted on the
+    // DIRECTORY, not only on `git status`.
+    //
+    // Both assertions are here on purpose, and the order matters. Measured:
+    // git does not report an EMPTY untracked directory (an empty `scratch/` is
+    // silent; a `scratch/` with a file in it shows `?? scratch/`). So the
+    // status check alone would miss a leaked empty `mkdtemp` container — which
+    // is exactly what a broken guard leaves behind. Reading the directory
+    // catches that; the status check still earns its place by catching any
+    // FILE the attempt might have written.
+    expect(await readdir(tmpInsideCheckout)).toEqual([]);
     expect((await git(linked, 'status', '--porcelain')).trim()).toBe('');
+
+    // And leave the fixture as we found it, so nothing downstream inherits it.
+    await rm(tmpInsideCheckout, { recursive: true, force: true });
   });
 
   it('refuses the main worktree outright', async () => {
