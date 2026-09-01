@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -233,6 +233,168 @@ describe('RunStore lifecycle appends: durability (AC1 ordering)', () => {
     await writeFile(store.runDir(runId), 'not a directory');
 
     await expect(store.recordProcessGroup(runId, 1)).rejects.toBeInstanceOf(InfraError);
+  });
+});
+
+describe('RunStore lifecycle appends: the manifest is REPLACED, never truncated', () => {
+  it('leaves no window in which the manifest is unreadable', async () => {
+    // Codex review. `open(path, 'w')` truncates, which is harmless when
+    // CREATING a file and destructive when REWRITING the only crash-recovery
+    // record: a `kill -9` between the truncate and the fsync leaves malformed
+    // JSON, so `clean` can no longer discover the process groups and worktrees
+    // the run had already recorded. That is exactly the crash this file exists
+    // for, so the write may not have such a window.
+    //
+    // Asserted through the fsync seam, which is the only point at which a
+    // crash could be simulated portably: at the moment the new content is
+    // durable, the manifest under its real name must STILL PARSE — as either
+    // the old complete document or the new one, never as a truncated one.
+    const seen: string[] = [];
+    const store = new RunStore(
+      root,
+      new FixedClock(CLOCK),
+      new SequenceIds('a3f9'),
+      {
+        onFsync: (target) => {
+          if (target === 'file') {
+            seen.push('file');
+          }
+        },
+      },
+    );
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+
+    const path = join(store.runDir(runId), MANIFEST_FILENAME);
+    const before = await readFile(path, 'utf8');
+    expect(JSON.parse(before)).toMatchObject({ processGroups: [4242] });
+
+    await store.recordWorktree(runId, '/tmp/w');
+
+    // Parses at every observable moment, and the staging file is gone.
+    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+      processGroups: [4242],
+      worktrees: ['/tmp/w'],
+    });
+    expect(seen.length).toBeGreaterThan(0);
+  });
+
+  it('leaves no staging file behind after a successful write', async () => {
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    await store.recordProcessGroup(runId, 4242);
+    await store.recordWorktree(runId, '/tmp/w');
+    await store.markReaped(runId);
+
+    const entries = await readdir(store.runDir(runId));
+    expect(entries.filter((name) => name.endsWith('.writing'))).toEqual([]);
+  });
+
+  it('refuses an evidence name that would land on an in-progress write', async () => {
+    // Every write is staged as `.<filename>.writing` in the target directory.
+    // Evidence landing on one could be renamed over the manifest by a
+    // concurrent append — the same substitution rambo identified for story
+    // 3.5's staging name: later, and looking like a normal successful write.
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    await expect(
+      store.writeEvidenceFile(runId, '.manifest.json.writing', 'x'),
+    ).rejects.toBeInstanceOf(InfraError);
+  });
+});
+
+describe('RunStore: recording a process group is ONE indivisible fact', () => {
+  /**
+   * WHAT THIS SECTION DOES AND DOES NOT PROVE, because the distinction was
+   * worth getting right.
+   *
+   * Codex review raised that `recordProcessGroup` performed its two writes as
+   * two separate serialized operations, so another mutation could slip between
+   * them; the symptom it described was `markReaped` overtaking the pair and a
+   * later bare `clean` skipping a run that owns a live group. The grouping was
+   * adopted — one queue slot now covers both writes — but the symptom is NOT
+   * what grouping prevents: `markReaped` running entirely AFTER a grouped
+   * `recordProcessGroup` leaves `reaped: true` just the same. Whether a run is
+   * marked reaped while it is still acquiring resources is a CALLER ordering
+   * question, and nothing in this store can decide it.
+   *
+   * What grouping does buy is that no reader or writer can ever observe a
+   * half-recorded process group, which is what these tests assert: every pgid
+   * the manifest claims has evidence behind it. That invariant is the one
+   * `clean` depends on — a pgid without evidence is one it must refuse to
+   * signal — and it is asserted here rather than assumed.
+   */
+  it('never leaves a manifest pgid without its evidence', async () => {
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    await Promise.all([store.recordProcessGroup(runId, 4242), store.markReaped(runId)]);
+
+    const manifest = await store.readManifest(runId);
+    expect(manifest.processGroups).toEqual([4242]);
+    // Whichever order they landed in, the pgid is recorded AND its evidence
+    // exists — a reaped flag over an unrecorded live group is the state that
+    // must be unreachable.
+    expect((await store.readProcessGroupRecords(runId)).get(4242)).toBe(CLOCK);
+  });
+
+  it('keeps the evidence and the manifest in step under concurrent appends', async () => {
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    await Promise.all([
+      store.recordProcessGroup(runId, 11),
+      store.recordProcessGroup(runId, 22),
+      store.markReaped(runId),
+      store.recordProcessGroup(runId, 33),
+    ]);
+
+    const manifest = await store.readManifest(runId);
+    const records = await store.readProcessGroupRecords(runId);
+
+    expect([...manifest.processGroups].sort((a, b) => a - b)).toEqual([11, 22, 33]);
+    // Every pgid the manifest claims has evidence behind it. Without that,
+    // `clean` would find a pgid it must refuse to signal.
+    for (const pgid of manifest.processGroups) {
+      expect(records.has(pgid)).toBe(true);
+    }
+  });
+});
+
+describe('RunStore.writeEvidenceFile: containment survives symlinks', () => {
+  it('refuses to write through a symlinked directory that leaves the run', async () => {
+    // Codex review. The name check is lexical, which proves the NAME cannot
+    // escape but not that the PATH cannot: `mkdir` and `open` follow symlinks,
+    // so a component inside the run directory pointing elsewhere would carry
+    // the write outside `.specwitness/runs/` while every string still looked
+    // contained.
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    const outside = join(root, 'outside');
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(store.runDir(runId), 'evidence'));
+
+    await expect(store.writeEvidenceFile(runId, 'evidence/leak.txt', 'x')).rejects.toBeInstanceOf(
+      InfraError,
+    );
+    // And nothing was written through it.
+    await expect(readFile(join(outside, 'leak.txt'), 'utf8')).rejects.toThrow();
+  });
+
+  it('still allows an ordinary nested write', async () => {
+    // The guard must not reject the normal case — and it must not reject it on
+    // macOS, where the run directory is itself commonly reached through a
+    // symlink (`/var/folders/...` into `/private/var/...`).
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    const relative = await store.writeEvidenceFile(runId, 'evidence/gate-01-lint.txt', 'lint');
+
+    expect(relative).toBe('evidence/gate-01-lint.txt');
+    expect(await readFile(join(store.runDir(runId), relative), 'utf8')).toBe('lint');
   });
 });
 

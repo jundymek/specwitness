@@ -34,7 +34,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, open, readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { InfraError } from '../domain/errors.js';
@@ -342,11 +342,13 @@ export class RunStore {
    * second fsync, because `clean` and a retrying pipeline both replay.
    */
   async recordWorktree(runId: string, worktreePath: string): Promise<void> {
-    await this.#updateManifest(runId, (manifest) =>
-      manifest.worktrees.includes(worktreePath)
-        ? null
-        : { ...manifest, worktrees: [...manifest.worktrees, worktreePath] },
-    );
+    await this.#serialize(async () => {
+      await this.#updateManifest(runId, (manifest) =>
+        manifest.worktrees.includes(worktreePath)
+          ? null
+          : { ...manifest, worktrees: [...manifest.worktrees, worktreePath] },
+      );
+    });
   }
 
   /**
@@ -368,12 +370,25 @@ export class RunStore {
    * must refuse to signal.
    */
   async recordProcessGroup(runId: string, pgid: number): Promise<void> {
-    await this.#recordProcessGroupEvidence(runId, pgid);
-    await this.#updateManifest(runId, (manifest) =>
-      manifest.processGroups.includes(pgid)
-        ? null
-        : { ...manifest, processGroups: [...manifest.processGroups, pgid] },
-    );
+    // ONE serialized operation covering BOTH writes, not two in a row, so no
+    // reader or writer can observe a half-recorded process group: every pgid
+    // the manifest claims has its evidence already on disk, which is the
+    // invariant `clean` leans on (a pgid without evidence is one it must refuse
+    // to signal).
+    //
+    // Honest about the limit, since it was raised as preventing more than it
+    // does: grouping does NOT stop `markReaped` running entirely after this and
+    // leaving `reaped: true` over a freshly recorded live group. Whether a run
+    // is marked reaped while it is still acquiring resources is a CALLER
+    // ordering question and nothing here can decide it.
+    await this.#serialize(async () => {
+      await this.#recordProcessGroupEvidence(runId, pgid);
+      await this.#updateManifest(runId, (manifest) =>
+        manifest.processGroups.includes(pgid)
+          ? null
+          : { ...manifest, processGroups: [...manifest.processGroups, pgid] },
+      );
+    });
   }
 
   /**
@@ -385,9 +400,11 @@ export class RunStore {
    * policy would delete.
    */
   async markReaped(runId: string): Promise<void> {
-    await this.#updateManifest(runId, (manifest) =>
-      manifest.reaped ? null : { ...manifest, reaped: true },
-    );
+    await this.#serialize(async () => {
+      await this.#updateManifest(runId, (manifest) =>
+        manifest.reaped ? null : { ...manifest, reaped: true },
+      );
+    });
   }
 
   /**
@@ -457,13 +474,54 @@ export class RunStore {
    * fine and their parent directories are created.
    */
   async writeEvidenceFile(runId: string, relativeName: string, contents: string): Promise<string> {
-    const dir = this.runDir(runId);
-    const contained = this.#containedPath(dir, relativeName);
+    return this.#serialize(async () => {
+      const dir = this.runDir(runId);
+      const contained = this.#containedPath(dir, relativeName);
+      const parent = dirname(contained.absolute);
 
-    await mkdir(dirname(contained.absolute), { recursive: true });
-    await this.#writeDurably(dirname(contained.absolute), basename(contained.absolute), contents);
+      await mkdir(parent, { recursive: true });
+      // The lexical check above proves the NAME cannot escape. It does not
+      // prove the PATH cannot: a component inside the run directory could be a
+      // symlink pointing elsewhere, and `mkdir`/`open` follow symlinks happily.
+      // So the resolved parent is checked against the resolved run directory
+      // after the directories exist — the only point at which the question can
+      // actually be answered.
+      await this.#assertResolvesInside(dir, parent, relativeName);
 
-    return contained.relative;
+      await this.#writeDurably(parent, basename(contained.absolute), contents);
+
+      return contained.relative;
+    });
+  }
+
+  /**
+   * Fails unless `candidate` really lives inside `dir` once symlinks are
+   * resolved.
+   *
+   * `realpath` on BOTH sides, because the run directory itself is commonly
+   * reached through one — `os.tmpdir()` on macOS is `/var/folders/...`, a
+   * symlink into `/private/var/...` — so resolving only one side would reject
+   * every legitimate write on this platform.
+   */
+  async #assertResolvesInside(dir: string, candidate: string, relativeName: string): Promise<void> {
+    let resolvedRoot: string;
+    let resolvedCandidate: string;
+    try {
+      resolvedRoot = await realpath(dir);
+      resolvedCandidate = await realpath(candidate);
+    } catch (cause) {
+      throw new InfraError(
+        `could not verify that '${relativeName}' stays inside the run directory: ${describe(cause)}`,
+        'check permissions on the run directory',
+      );
+    }
+
+    if (resolvedCandidate !== resolvedRoot && !resolvedCandidate.startsWith(`${resolvedRoot}${sep}`)) {
+      throw new InfraError(
+        `refusing to write evidence to '${relativeName}': it resolves outside the run directory through a symbolic link`,
+        'a component of that path links outside the run directory; SpecWitness writes only inside it',
+      );
+    }
   }
 
   /**
@@ -498,6 +556,14 @@ export class RunStore {
     if (RESERVED_FILENAMES.has(rel)) {
       return reject('that file belongs to SpecWitness');
     }
+    // `#writeDurably` stages every write as `.<filename>.writing` in the target
+    // directory. An evidence name landing on one could be renamed over the
+    // manifest by a concurrent append, which is the same substitution rambo
+    // identified for story 3.5's staging name — later, and looking like a
+    // normal successful write.
+    if (basename(rel).startsWith('.') && basename(rel).endsWith('.writing')) {
+      return reject('that name is reserved for in-progress SpecWitness writes');
+    }
 
     return { absolute, relative: rel };
   }
@@ -518,42 +584,47 @@ export class RunStore {
     runId: string,
     mutate: (manifest: RunManifest) => RunManifest | null,
   ): Promise<void> {
-    await this.#serialize(async () => {
-      const manifest = await this.readManifest(runId);
-      const next = mutate(manifest);
-      if (next === null) {
-        return;
-      }
-      await this.#writeDurably(
-        this.runDir(runId),
-        MANIFEST_FILENAME,
-        `${JSON.stringify(next, null, 2)}\n`,
-      );
-    });
+    // NOT serialized here: every caller already holds the queue, and taking it
+    // again from inside would deadlock on a chain waiting for itself. The
+    // serialization boundary is the PUBLIC method, so that a method performing
+    // two writes performs them as one indivisible fact.
+    const manifest = await this.readManifest(runId);
+    const next = mutate(manifest);
+    if (next === null) {
+      return;
+    }
+    await this.#writeDurably(
+      this.runDir(runId),
+      MANIFEST_FILENAME,
+      `${JSON.stringify(next, null, 2)}\n`,
+    );
   }
 
-  /** Adds one pgid to the reaping-evidence file, durably. Serialised. */
+  /**
+   * Adds one pgid to the reaping-evidence file, durably.
+   *
+   * NOT serialized here — see `#updateManifest`. Its caller holds the queue for
+   * both writes together.
+   */
   async #recordProcessGroupEvidence(runId: string, pgid: number): Promise<void> {
     const recordedAt = this.#clock.now().toISOString();
 
-    await this.#serialize(async () => {
-      const existing = await this.readProcessGroupRecords(runId);
-      if (existing.has(pgid)) {
-        return;
-      }
+    const existing = await this.readProcessGroupRecords(runId);
+    if (existing.has(pgid)) {
+      return;
+    }
 
-      const merged: Record<string, string> = {};
-      for (const [key, value] of existing) {
-        merged[String(key)] = value;
-      }
-      merged[String(pgid)] = recordedAt;
+    const merged: Record<string, string> = {};
+    for (const [key, value] of existing) {
+      merged[String(key)] = value;
+    }
+    merged[String(pgid)] = recordedAt;
 
-      await this.#writeDurably(
-        this.runDir(runId),
-        PROCESS_GROUPS_FILENAME,
-        `${JSON.stringify(merged, null, 2)}\n`,
-      );
-    });
+    await this.#writeDurably(
+      this.runDir(runId),
+      PROCESS_GROUPS_FILENAME,
+      `${JSON.stringify(merged, null, 2)}\n`,
+    );
   }
 
   /**
@@ -573,20 +644,39 @@ export class RunStore {
   }
 
   /**
-   * Writes a file and fsyncs it, then fsyncs its directory.
+   * Writes a file durably, REPLACING any previous version atomically.
    *
-   * The directory fsync is not optional and is the step most often missed:
-   * fsyncing a file guarantees its CONTENTS survive a crash, but not that its
-   * name still appears in the directory. Without the second sync a run can
-   * come back from a crash as an empty directory — the exact case story 3.2's
-   * cleanup cannot recover from, because there is nothing left to tell it what
-   * to reap.
+   * Two properties, and the second was a defect until story 3.2 fixed it.
+   *
+   * 1. The directory fsync is not optional and is the step most often missed:
+   *    fsyncing a file guarantees its CONTENTS survive a crash, but not that
+   *    its name still appears in the directory. Without the second sync a run
+   *    can come back from a crash as an empty directory — the exact case
+   *    `specwitness clean` cannot recover from, because there is nothing left
+   *    to tell it what to reap.
+   *
+   * 2. STAGE AND RENAME rather than `open(path, 'w')`. Truncating is harmless
+   *    for a file being created, which is all story 1.6 ever did with this —
+   *    but story 3.2 turned this into the path that REWRITES an existing
+   *    manifest on every append, and truncation destroys the only recovery
+   *    record before the replacement exists. A `kill -9` in that window leaves
+   *    malformed JSON, so `clean` can no longer discover the process groups and
+   *    worktrees the run had already recorded. That is precisely the crash this
+   *    manifest exists for, so the write it uses may not have a window in which
+   *    the record is unreadable. A reader now sees either the previous complete
+   *    file or the new complete one.
+   *
+   * Note for story 3.5: this is NOT the atomic `result.json` finalize reserved
+   * for you. That one is about publishing a completed document under its final
+   * name; this is the manifest's own append discipline. The staging names do
+   * not collide (`.<filename>.writing` here, `.result.json.tmp` there).
    */
   async #writeDurably(dir: string, filename: string, contents: string): Promise<void> {
     const path = join(dir, filename);
+    const staging = join(dir, `.${filename}.writing`);
 
     try {
-      const file = await open(path, 'w');
+      const file = await open(staging, 'w');
       try {
         await file.writeFile(contents, 'utf8');
         await file.sync();
@@ -595,8 +685,16 @@ export class RunStore {
         await file.close();
       }
 
+      // POSIX rename is atomic within a filesystem, and staging inside the
+      // SAME directory is what keeps it so — a cross-filesystem rename is a
+      // copy, which would reintroduce the window this exists to close.
+      await rename(staging, path);
+
       await this.#syncDirectory(dir, 'directory');
     } catch (cause) {
+      // Leave no half-written staging file behind for `clean` or an operator to
+      // puzzle over. Best-effort: the original error is what matters.
+      await rm(staging, { force: true }).catch(() => undefined);
       // Never report a durability failure as success: the caller is about to
       // create a worktree on the strength of this manifest existing.
       throw new InfraError(
