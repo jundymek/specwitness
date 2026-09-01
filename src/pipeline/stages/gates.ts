@@ -230,6 +230,49 @@ async function recordAttempt(
 }
 
 /**
+ * The diagnosis for a binary the OS could not find — which has two causes, and
+ * conflating them is the confidently-wrong answer this project treats as
+ * first-order.
+ *
+ * A bare name (`pnpm`) is looked up on PATH: "it is not installed" is right.
+ * A token carrying a separator (`./scripts/check`, `bin/gate`) is not a PATH
+ * lookup at all — it names a FILE, resolved relative to the process's working
+ * directory, which here is the verification worktree. Telling an operator to
+ * install `./scripts/check` would be nonsense, and telling them it is missing
+ * from PATH would send them to edit their shell profile over a file that is
+ * simply not in the commit under verification.
+ *
+ * That second case is a real and reachable operator experience, and it is worth
+ * naming rather than hiding: `doctor` resolves a relative command against the
+ * PROJECT ROOT, because it runs before any worktree exists and structurally
+ * cannot do otherwise. Gates run in the worktree, at the head SHA (AD-8) — and
+ * must, since spawning in the source repo would verify the wrong tree. So a
+ * script that is present but UNTRACKED, or not committed to the revision under
+ * verification, passes doctor and then legitimately cannot be executed here.
+ * The hint says exactly that, because the useful instruction is "commit it",
+ * not "install it".
+ */
+function notFoundError(gate: GateConfig, binary: string): InfraError {
+  // The same test doctor's resolver applies, and for the same reason.
+  const namesAFile = binary.includes('/') || binary.includes('\\');
+
+  if (namesAFile) {
+    return new InfraError(
+      `gate '${gate.id}' could not start: '${binary}' does not exist in the verification worktree`,
+      `gates run against the revision under verification, not your working copy — commit ` +
+        `'${binary}' (an untracked or uncommitted file will not be there), or correct ` +
+        `gates[${gate.id}].run in .specwitness/config.yaml`,
+    );
+  }
+
+  return new InfraError(
+    `gate '${gate.id}' could not start: '${binary}' is not on PATH`,
+    `install '${binary}', or correct gates[${gate.id}].run in .specwitness/config.yaml — ` +
+      'this is an environment problem, not a failure of the branch under verification',
+  );
+}
+
+/**
  * Turn one settled spawn into a gate status, or throw.
  *
  * Exhaustive over `ProcessOutcome`. The `never` binding in the default branch is
@@ -249,11 +292,7 @@ async function classify(
 
     case 'not-found':
       await recordAttempt(deps, context, gate, index, result);
-      throw new InfraError(
-        `gate '${gate.id}' could not start: '${binary}' is not on PATH`,
-        `install '${binary}', or correct gates[${gate.id}].run in .specwitness/config.yaml — ` +
-          'this is an environment problem, not a failure of the branch under verification',
-      );
+      throw notFoundError(gate, binary);
 
     case 'spawn-failed':
       await recordAttempt(deps, context, gate, index, result);

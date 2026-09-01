@@ -32,11 +32,23 @@
  * does not run as written. That is not a regression introduced here — the
  * merged `src/cli/doctor/checks/commands-resolvable.ts` already documents
  * exactly this and already reports such a command's literal first token as
- * unresolvable. Doctor and the gate runner therefore AGREE: a command doctor
- * calls broken does not silently work at verify time, and one doctor calls fine
- * is one the runner can spawn. `tests/unit/pipeline/stages/gate-command.test.ts`
- * pins that agreement against `firstToken()` with a property rather than
- * leaving it to this comment.
+ * unresolvable. Doctor and the gate runner therefore agree about WHICH TOKEN IS
+ * THE EXECUTABLE, and `tests/unit/pipeline/stages/gate-command.test.ts` pins
+ * that against `firstToken()` with a property rather than leaving it to this
+ * comment. A command doctor calls broken does not silently work at verify time.
+ *
+ * THE AGREEMENT IS ABOUT THE TOKEN, NOT ABOUT WHETHER IT RESOLVES — stated
+ * because the broader claim is tempting and false. Doctor resolves a relative
+ * executable (`./scripts/check`) against the PROJECT ROOT; it runs before any
+ * worktree exists and structurally cannot do otherwise. Gates run in the
+ * verification worktree at the head SHA (AD-8), and must, since spawning in the
+ * source repo would verify the wrong tree. So a script that is present in the
+ * operator's working copy but UNTRACKED, or absent from the revision under
+ * verification, passes doctor and then genuinely cannot be executed by a gate.
+ * That is correct behaviour on both sides rather than a defect in either, and
+ * the remedy is a diagnosis that names it: `notFoundError` in `gates.ts` tells
+ * such an operator to COMMIT the file rather than to install it or to edit
+ * their PATH.
  *
  * SHAPE. `splitCommandLine` takes a plain `string`, not a `DeclaredCommand`,
  * following the merged precedent for this exact problem: `firstToken(command:

@@ -292,6 +292,57 @@ describe('gates stage: AC3 — a gate that could NOT START is infrastructure', (
     expect(error.hint).toBeDefined();
   });
 
+  it('does not blame PATH for a relative executable that names a file', async () => {
+    // ENOENT for `./scripts/check` is not a PATH lookup failure — the token
+    // names a FILE, resolved against the process's working directory, which
+    // here is the verification worktree. "Install ./scripts/check" is nonsense
+    // and "not on PATH" would send an operator to edit their shell profile over
+    // a file that is simply not in the commit under verification.
+    const gates = declaredGates([{ id: 'custom', run: './scripts/check --ci' }]);
+    const runner = recordingRunner(processResult({ outcome: 'not-found', exitCode: null }));
+
+    const error = await infraErrorFrom(
+      createGatesStage({ gates, runner, writeEvidence: recordingWriter() }).run(stageContext()),
+    );
+
+    expect(error.message).toContain('./scripts/check');
+    expect(error.message).not.toMatch(/on PATH/);
+    expect(error.message).toMatch(/worktree/);
+    // The useful instruction is "commit it", not "install it".
+    expect(error.hint).toMatch(/commit/i);
+    expect(error.hint).not.toMatch(/install/i);
+  });
+
+  it('still blames PATH for a bare binary name', async () => {
+    const runner = recordingRunner(processResult({ outcome: 'not-found', exitCode: null }));
+
+    const error = await infraErrorFrom(createGatesStage(deps(runner)).run(stageContext()));
+
+    expect(error.message).toMatch(/not on PATH/);
+    expect(error.hint).toMatch(/install/i);
+  });
+
+  it('gives a relative executable and a bare name DIFFERENT diagnoses', async () => {
+    // The property that matters: two different causes must not produce one
+    // answer. A single "could not start" for both is the confidently-wrong
+    // diagnosis this story exists to avoid.
+    const relative = await infraErrorFrom(
+      createGatesStage({
+        gates: declaredGates([{ id: 'custom', run: 'bin/gate' }]),
+        runner: recordingRunner(processResult({ outcome: 'not-found', exitCode: null })),
+        writeEvidence: recordingWriter(),
+      }).run(stageContext()),
+    );
+    const bare = await infraErrorFrom(
+      createGatesStage(deps(recordingRunner(processResult({ outcome: 'not-found', exitCode: null })))).run(
+        stageContext(),
+      ),
+    );
+
+    expect(relative.message).not.toBe(bare.message);
+    expect(relative.hint).not.toBe(bare.hint);
+  });
+
   it('distinguishes a missing binary from an unusable working directory', async () => {
     // The merged runner already separates these by asking the filesystem
     // whether `cwd` is a directory. Telling an operator to install a binary
