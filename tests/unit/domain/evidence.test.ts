@@ -559,3 +559,68 @@ describe('gate evidence carries the command that produced it (owner-approved add
     expect(evidence.displayCommand).toContain('--dry-run');
   });
 });
+
+describe('how far a redacted header value extends (Codex review, follow-up round)', () => {
+  const SECRET = `${['sk', 'ant'].join('-')}-extentcanary`;
+
+  it('consumes a value that OPENS with a quote as a whole quoted unit', () => {
+    // The regression this replaces was worse than not matching at all: treating the
+    // opening quote as a terminator produced `Cookie: [REDACTED]"session=secret"` — the
+    // marker present, the secret still sitting there, and the line LOOKING handled.
+    const redacted = redactText(`Cookie: "session=${SECRET}"`);
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('[REDACTED]');
+  });
+
+  it('consumes a single-quoted value the same way', () => {
+    const redacted = redactText(`Cookie: 'session=${SECRET}'`);
+
+    expect(redacted).not.toContain(SECRET);
+  });
+
+  it('runs to end of line for a bare wire-log header', () => {
+    const redacted = redactText(`Authorization: Bearer ${SECRET} extra trailing words`);
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).not.toContain('trailing');
+    expect(redacted).toBe('Authorization: [REDACTED]');
+  });
+
+  it('stops at a quote it did not open, so a double-quoted command keeps its URL', () => {
+    const redacted = redactText(
+      `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    // The whole point of displayCommand: a reader can still see what ran.
+    expect(redacted).toContain('curl');
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('does the same for the single-quoted shell form, which is just as common', () => {
+    const redacted = redactText(
+      `curl -H 'Authorization: Bearer ${SECRET}' http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('redacts every header on a multi-line wire log independently', () => {
+    const redacted = redactText(
+      [
+        `> Authorization: Bearer ${SECRET}`,
+        '> Accept: application/json',
+        `< Set-Cookie: session=${SECRET}; HttpOnly`,
+        '< Content-Type: application/json',
+      ].join('\n'),
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    // Non-sensitive headers survive intact — evidence nobody can read is evidence people
+    // work around by opening the unredacted file.
+    expect(redacted).toContain('Accept: application/json');
+    expect(redacted).toContain('Content-Type: application/json');
+  });
+});

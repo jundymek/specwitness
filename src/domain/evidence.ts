@@ -155,14 +155,25 @@ const SENSITIVE_HEADERS = new Set([
  * persisted evidence. Found by review, not by a test — which is why the test beside it
  * now covers the prefixed forms.
  *
- * The value runs to end of line OR to the next double quote, whichever comes first. End
- * of line is the right extent for a wire log, where the header value IS the rest of the
- * line. The quote matters for a declared COMMAND, which is a single line: in
- * `curl -H "Authorization: Bearer ..." http://localhost:3000/health` a bare end-of-line
- * rule swallows the URL too, and `displayCommand` exists precisely so a reader can see
- * what ran - redacting the whole command defeats the field while protecting nothing extra.
- * A quote is also where a quoted header value genuinely ends. The residual risk is a
- * credential containing a literal `"`, which base64 and hex tokens cannot.
+ * THE VALUE'S EXTENT handles three shapes. Two of them cost a review round each, so they
+ * are spelled out rather than left to the pattern:
+ *
+ *  - A value that OPENS with a quote is consumed as a whole quoted unit, so
+ *    `Cookie: "session=secret"` redacts the string, quotes included. An earlier version
+ *    treated that opening quote as a TERMINATOR and produced
+ *    `Cookie: [REDACTED]"session=secret"` - the marker present and the secret still
+ *    sitting there, which is worse than not matching at all, because it looks handled.
+ *  - Otherwise the value runs to end of line. That is the right extent for a wire log,
+ *    where the header value IS the rest of the line.
+ *  - ...except that it stops at a quote it did not open, because a declared COMMAND is a
+ *    single line: in `curl -H "Authorization: Bearer ..." http://localhost:3000/health`
+ *    a bare end-of-line rule swallows the URL too. `displayCommand` exists precisely so a
+ *    reader can see what ran, and redacting the whole command defeats the field while
+ *    protecting nothing extra.
+ *
+ * Both quote characters are handled, because `-H 'Authorization: ...'` is as common in a
+ * shell command as the double-quoted form. The residual risk is a credential containing a
+ * literal quote, which base64 and hex tokens cannot.
  *
  * The lookbehind is what keeps it from over-matching: the header name must not be
  * preceded by another name character, so `X-Custom-Authorization-Policy` is not treated
@@ -170,7 +181,7 @@ const SENSITIVE_HEADERS = new Set([
  * is exactly the extent of a header value.
  */
 const SENSITIVE_HEADER_LINE =
-  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^"\r\n]*/gi;
+  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^"'\r\n]*)/gi;
 
 /**
  * `NAME=value`, `NAME: value`, `"name": "value"`, `name='value'`.
