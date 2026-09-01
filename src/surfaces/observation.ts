@@ -559,24 +559,56 @@ type SnapshotOutcome =
   | { readonly ok: false; readonly error: ProbeExecError; readonly result: ProcessResult };
 
 /**
- * Was anything OBSERVED at all?
+ * Did this attempt produce anything the evidence union can represent HONESTLY?
  *
- * The cohort's shared rule, settled with 4.4 and 4.6 and worded by 4.4: "no OBSERVATION, no
- * ref" — not "no output" and not "execError". `completed` always counts, because an exit
- * code was genuinely observed even from a silent command. A timeout or a spawn failure
- * counts only if it left captured text (story 3.2's runner returns the child's output on a
- * timeout rather than an empty string, which is why the gates stage keeps `recordAttempt`).
- * `not-found` never counts: nothing ran.
+ * THE COHORT'S RULE, in 4.4's final wording, identical in all three surface PRs:
  *
- * The alternative — writing evidence only when the inline copy overflowed — leaves a SHORT
- * failing snapshot with no evidence ref at all, and FR-28 requires at least one on every
- * non-pass result. That would make FR-28 true whenever a payload happened to be large,
- * which is a coincidence rather than a guarantee.
+ *   An attempt records the typed member whenever the closed evidence union can represent
+ *   what happened honestly, and refs it. What that resolves to is decided PER SURFACE by
+ *   what the union gives each one, not by preference:
+ *     - shell       — every attempt (`CommandEvidence.exitCode` is `number | null`, and
+ *                     null truthfully means "killed or never started");
+ *     - http        — every attempt that RECEIVED A RESPONSE (`status` is `number`, so a
+ *                     response that never arrived would have to be invented as status 0);
+ *     - observation — every attempt that PRODUCED OUTPUT (this one; see below).
+ *   Stream files only for streams non-empty after redaction, and a ref is never invented
+ *   for a file that was not written.
+ *
+ * ONE rule — the union's shape decides — instantiated three ways because the union is
+ * shaped three ways. It is checkable by READING THE UNION rather than by trusting any of
+ * the three of us, which is the property that matters once nobody from this cohort is
+ * around for 4.7's conformance test.
+ *
+ * WHY OBSERVATION LANDS ON "PRODUCED OUTPUT". `ObservationEvidence` is
+ * `{kind, observationId, snapshot: BoundedText}` — there is no nullable field, so there is
+ * no way to say "nothing ran" as distinct from "ran and printed nothing". An empty
+ * `snapshot` is not an absence marker; it is the claim "I observed the state and it was
+ * empty". Recording one for an attempt that produced nothing would put a statement about
+ * the world into a record of an attempt that never made one.
+ *
+ * This costs a real thing and the cost is stated rather than hidden: a `not-found`, a
+ * timeout before any output, or a silent `completed` run derives to criterion `error` with
+ * ZERO evidence refs. `deriveCriterionResult` tolerates that deliberately — "a probe that
+ * crashed before observing anything has nothing honest to put there, and inventing a value
+ * would be worse than omitting one" — and the PR body names it as this surface's remaining
+ * FR-28 exposure. Closing it means an absence marker on `ObservationEvidence`, i.e. an ADR
+ * widening a closed union; 4.4 has the same exposure on its `status` field and the two are
+ * worth one ADR rather than two.
+ *
+ * (History, because the wording moved twice and the reasons are the useful part: the first
+ * rule was "write the full copy only when it overflows the inline cap", which left a SHORT
+ * failing snapshot with no ref at all and made FR-28 true only when a payload happened to
+ * be large. The second was "every attempt records a member", correct for shell and wrong
+ * here for the reason above — generalised from a member that has a null slot to one that
+ * does not, because both wrap commands.)
  */
 function observedAnything(result: ProcessResult): boolean {
+  // Uniform across every outcome: text is the only thing `snapshot` can honestly hold. A
+  // timeout still counts when it left output, because story 3.2's runner returns the
+  // child's captured output on a timeout rather than an empty string — which is exactly
+  // why the gates stage keeps `recordAttempt` at all.
   switch (result.outcome) {
     case 'completed':
-      return true;
     case 'timed-out':
     case 'spawn-failed':
       return result.stdout !== '' || result.stderr !== '';

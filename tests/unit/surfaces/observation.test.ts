@@ -581,16 +581,45 @@ describe('AC2 — the classification that matters most', () => {
     expect(evidence.members).toEqual([]);
   });
 
-  it('still records evidence for a command that COMPLETED but printed nothing', async () => {
-    // `completed` means an exit code WAS observed, so the attempt has something honest to
-    // record even though stdout was empty — and FR-28 gets its reference.
+  it('records nothing for a command that COMPLETED but printed nothing', async () => {
+    // The cohort's final rule, in 4.4's wording: observation records a member for every
+    // attempt that PRODUCED OUTPUT. `ObservationEvidence.snapshot` is a `BoundedText` with
+    // no absence marker, so an empty snapshot is not "nothing ran" — it is the claim "I
+    // observed the state and it was empty", a statement about the world this attempt never
+    // made. It would also be byte-identical to a `not-found` member, collapsing two
+    // different facts about the run into one audit record.
+    //
+    // The cost is real and stated rather than hidden: this derives to criterion `error`
+    // with ZERO evidence refs, which is this surface's remaining FR-28 exposure. Closing it
+    // means an absence marker on the member, i.e. an ADR widening a closed union.
     const { executor: subject, evidence } = executor(new ScriptedRunner(processResult()));
 
     const attempt = await subject.execute(request());
 
     expect(attempt.execError).toBeDefined();
-    expect(attempt.evidence.length).toBeGreaterThan(0);
-    expect(evidence.members).toHaveLength(1);
+    expect(attempt.evidence).toEqual([]);
+    expect(evidence.members).toEqual([]);
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
+  });
+
+  it('records a member whenever the attempt DID produce output, on every outcome', async () => {
+    // The other half of the same rule, and the half that keeps FR-28 satisfied wherever it
+    // honestly can be: a timeout that printed before it was killed still has real
+    // diagnostic bytes, because story 3.2's runner returns the child's captured output on a
+    // timeout rather than an empty string.
+    for (const result of [
+      processResult({ stdout: 'not json' }),
+      processResult({ outcome: 'timed-out', exitCode: null, stdout: '{"partial":' }),
+      processResult({ outcome: 'spawn-failed', exitCode: null, stderr: 'EACCES' }),
+    ]) {
+      const { executor: subject, evidence } = executor(new ScriptedRunner(result));
+
+      const attempt = await subject.execute(request());
+
+      expect(attempt.execError).toBeDefined();
+      expect(evidence.members).toHaveLength(1);
+      expect(attempt.evidence.length).toBeGreaterThan(0);
+    }
   });
 
   it('never lets a probe adjudicate a human-verifiability criterion', async () => {
