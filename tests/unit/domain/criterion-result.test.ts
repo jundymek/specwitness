@@ -180,3 +180,67 @@ describe('deriveCriterionResult — AD-13, the single producer of a CriterionSta
     }
   });
 });
+
+describe('redaction of criterion diagnostics (Codex review, P1)', () => {
+  // `expected` and `actual` are copied from what a surface OBSERVED — a response body, a
+  // command's output, an exec error's message — and they are persisted to result.json and
+  // printed to a terminal exactly like evidence is. Before this they were the one path by
+  // which a captured credential reached a stored run unredacted, sitting right beside the
+  // evidence fields that were protected.
+  const SEEDED = `API_TOKEN=${['sk', 'live'].join('-')}-criterionleak`;
+
+  it('redacts expected and actual on a failing criterion', () => {
+    const result = deriveCriterionResult(CRITERION, [
+      attempt({
+        assertionEvaluations: [
+          {
+            description: 'body echoes the configured token',
+            satisfied: false,
+            expected: `body contains ${SEEDED}`,
+            actual: `body contained ${SEEDED} twice`,
+          },
+        ],
+      }),
+    ]);
+
+    expect(JSON.stringify(result)).not.toContain('criterionleak');
+    expect(result.expected).toContain('[REDACTED]');
+    expect(result.actual).toContain('[REDACTED]');
+  });
+
+  it('redacts an exec error message', () => {
+    const result = deriveCriterionResult(CRITERION, [
+      attempt({
+        assertionEvaluations: [],
+        execError: { message: `curl failed: > Authorization: Bearer ${SEEDED}` },
+      }),
+    ]);
+
+    expect(result.status).toBe('error');
+    expect(JSON.stringify(result)).not.toContain('criterionleak');
+  });
+
+  it('applies config-declared extra patterns', () => {
+    const result = deriveCriterionResult(
+      CRITERION,
+      [
+        attempt({
+          assertionEvaluations: [
+            { description: 'x', satisfied: false, actual: 'saw ACME-4242' },
+          ],
+        }),
+      ],
+      { extraPatterns: [/ACME-\d+/] },
+    );
+
+    expect(result.actual).not.toContain('ACME-4242');
+  });
+
+  it('leaves the contract statement verbatim', () => {
+    // A human wrote and reviewed it. Redacting the contract's own words would mangle the
+    // report without protecting anything a probe captured.
+    const result = deriveCriterionResult(CRITERION, []);
+
+    expect(result.statement).toBe(CRITERION.statement);
+  });
+});

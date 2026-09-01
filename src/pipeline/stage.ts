@@ -29,7 +29,12 @@ import type { Evidence } from '../domain/evidence.js';
 import type { Clock } from '../domain/ports.js';
 import type { GateResult } from '../domain/result.js';
 import type { RunOutcome } from '../domain/run-outcome.js';
-import type { ContractSummary, ProviderUsage, RunEnvironment } from '../domain/run-result.js';
+import type {
+  ContractSummary,
+  ProviderUsage,
+  RunEnvironment,
+  RunResult,
+} from '../domain/run-result.js';
 import type { StageName } from '../domain/stage.js';
 
 /**
@@ -89,6 +94,26 @@ export interface StageContext {
   /** AD-9. A stage never reads the wall clock directly. */
   readonly clock: Clock;
   readonly run: RunAccumulator;
+  /**
+   * The run so far, as the immutable `RunResult` every consumer outside the pipeline
+   * sees. Built by the runner on demand.
+   *
+   * This exists for the `persist` stage (story 3.5), which has to write a `RunResult` and
+   * cannot assemble one: `startedAt`, `finishedAt` and the stage timeline live in the
+   * runner, not in the accumulator. Without it that story would have to duplicate the
+   * runner's state or reopen this interface in wave B.
+   *
+   * WHAT IT DOES NOT CONTAIN, because it cannot: the stages that have not run yet. Called
+   * from `persist` (position 10 of 11) the snapshot shows `teardown` as `skipped` and a
+   * `finishedAt` of "now" — which is exactly the crash-durable snapshot that stage is
+   * for. The complete document, with teardown's entry and the real `finishedAt`, reaches
+   * the caller through `RunPipelineInput.onComplete` after teardown.
+   *
+   * @throws {InfraError} before the aggregate stage has decided an outcome. A "result"
+   * with no verdict and no infra error is not a result, and inventing one here would put
+   * a fabricated outcome into a persisted document.
+   */
+  snapshot(): RunResult;
 }
 
 /** One named step of the verification state machine. */

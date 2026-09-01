@@ -419,11 +419,14 @@ describe('the resolve stage', () => {
 describe('the teardown stage', () => {
   it('is a no-op with nothing to release, rather than a stub that proves nothing', async () => {
     const stage = createTeardownStage();
-    const context = {
+    const context: StageContext = {
       runId: 'run-20260831T200000Z-a3f9',
       clock: new FixedClock('2026-08-31T20:00:00.000Z'),
       run: {} as RunAccumulator,
-    } as StageContext;
+      snapshot: () => {
+        throw new Error('the teardown stage must not need a snapshot');
+      },
+    };
 
     await expect(stage.run(context)).resolves.toEqual({
       status: 'ok',

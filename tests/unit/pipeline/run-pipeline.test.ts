@@ -169,9 +169,18 @@ describe('runPipeline — a stage that throws (infrastructure)', () => {
       // Teardown always runs — including after an early stop. The worktree and the
       // process group have to be released whatever else happened.
       expect(statusOf(result, 'teardown')).toBe('ok');
-      expect(result.outcome).toEqual({ infraError: 'infra' });
-      // An infrastructure failure is NEVER a product verdict.
-      expect(result.outcome.verdict).toBeUndefined();
+
+      if (failedIndex > STAGE_NAMES.indexOf('aggregate')) {
+        // `persist` is the only stage here that runs AFTER the outcome is decided, and a
+        // failure there must not rewrite it: a run that concluded PASS and then could not
+        // write result.json is still a PASS with a recorded persistence problem. Exit 3
+        // would tell a harness the environment is broken and invite a retry.
+        expect(result.outcome).toEqual({ verdict: 'PASS' });
+      } else {
+        expect(result.outcome).toEqual({ infraError: 'infra' });
+        // An infrastructure failure reached before a conclusion is NEVER a product verdict.
+        expect(result.outcome.verdict).toBeUndefined();
+      }
     },
   );
 
@@ -492,5 +501,127 @@ describe('classifyInfraError', () => {
     expect(classifyInfraError(new Error('x'))).toBe('infra');
     expect(classifyInfraError('a thrown string')).toBe('infra');
     expect(classifyInfraError(undefined)).toBe('infra');
+  });
+});
+
+describe('runPipeline — a failure AFTER the outcome is decided (Codex review, P1)', () => {
+  it('keeps a FAIL verdict when the persist stage throws', async () => {
+    // The bug this replaces was a verdict-correctness bug, which is the one class this
+    // story exists to prevent: a run that FAILed on a gate and then could not write
+    // result.json was being reported as exit 3. A harness reads exit 3 as "environment
+    // broken, retry" — and the retry merges a branch that does not build.
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: {
+        name: 'gates',
+        run: async (context) => {
+          ran.push('gates');
+          context.run.gates.push({ gateId: 'lint', status: 'fail', durationMs: 40 });
+          return stageProductNegative("gate 'lint' failed");
+        },
+      },
+      aggregate: instrumented(createAggregateStage(), ran),
+      persist: fakeStage('persist', ran, async () => {
+        throw new InfraError('disk full');
+      }),
+    });
+
+    const result = await run(stages);
+
+    expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+    expect(statusOf(result, 'persist')).toBe('error');
+    expect(result.stages.find((entry) => entry.stage === 'persist')?.detail).toContain(
+      'disk full',
+    );
+    // And teardown still ran, as it does after anything.
+    expect(statusOf(result, 'teardown')).toBe('ok');
+  });
+
+  it('keeps a PASS verdict when the persist stage throws', async () => {
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      aggregate: passingAggregate(ran),
+      persist: fakeStage('persist', ran, async () => {
+        throw new InfraError('disk full');
+      }),
+    });
+
+    const result = await run(stages);
+
+    expect(result.outcome).toEqual({ verdict: 'PASS' });
+    expect(statusOf(result, 'persist')).toBe('error');
+  });
+
+  it('still classifies a failure BEFORE the outcome is decided as an infra error', async () => {
+    // The other half of the rule, so the fix cannot quietly swallow real infra failures:
+    // nothing had been decided yet, so there is no verdict to protect.
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: fakeStage('gates', ran, async () => {
+        throw new ConfigError('bad gate config');
+      }),
+    });
+
+    const result = await run(stages);
+
+    expect(result.outcome).toEqual({ infraError: 'config' });
+  });
+});
+
+describe('runPipeline — the snapshot the persist stage needs (Codex review, P1)', () => {
+  it('hands the persist stage a complete RunResult it could not otherwise assemble', async () => {
+    // `startedAt`, `finishedAt` and the stage timeline live in the runner, not in the
+    // accumulator, so without this the persist stage (story 3.5) would have to duplicate
+    // the runner's state or reopen the published StageContext in wave B.
+    const ran: StageName[] = [];
+    const seen: RunResult[] = [];
+    const stages = stagesWith(ran, {
+      aggregate: passingAggregate(ran),
+      persist: {
+        name: 'persist',
+        run: async (context) => {
+          ran.push('persist');
+          seen.push(context.snapshot());
+          return stageOk();
+        },
+      },
+    });
+
+    await run(stages);
+
+    const snapshot = seen[0];
+    expect(snapshot?.outcome).toEqual({ verdict: 'PASS' });
+    expect(snapshot?.runId).toBe('run-20260831T200000Z-a3f9');
+    expect(snapshot?.stages).toHaveLength(11);
+    // What it honestly cannot contain: teardown has not run yet. That is precisely why
+    // the complete document goes out through onComplete after teardown.
+    expect(snapshot?.stages.find((entry) => entry.stage === 'teardown')?.status).toBe(
+      'skipped',
+    );
+  });
+
+  it('refuses a snapshot before an outcome has been decided', async () => {
+    // Fail closed rather than fabricate: a document with neither a verdict nor an infra
+    // error is not a result, and persisting one would put an outcome nobody decided into
+    // the run directory.
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: {
+        name: 'gates',
+        run: async (context) => {
+          ran.push('gates');
+          context.snapshot();
+          return stageOk();
+        },
+      },
+    });
+
+    const result = await run(stages);
+
+    expect(result.outcome).toEqual({ infraError: 'infra' });
+    expect(statusOf(result, 'gates')).toBe('error');
+    expect(result.stages.find((entry) => entry.stage === 'gates')?.detail).toContain(
+      'before the aggregate stage decided an outcome',
+    );
   });
 });

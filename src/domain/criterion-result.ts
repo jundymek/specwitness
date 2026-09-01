@@ -25,7 +25,8 @@
  */
 
 import type { Severity } from './contract.js';
-import type { EvidenceRef } from './evidence.js';
+import { redactText } from './evidence.js';
+import type { EvidenceRef, RedactionOptions } from './evidence.js';
 import type { CriterionResult, CriterionStatus } from './result.js';
 
 /** The four probe surfaces (AD-13). All implement the same executor interface. */
@@ -170,7 +171,11 @@ function outcomeOf(attempt: ProbeAttempt): AttemptOutcome {
 export function deriveCriterionResult(
   criterion: ContractCriterionRef,
   attempts: readonly ProbeAttempt[],
+  options?: RedactionOptions,
 ): DerivedCriterionResult {
+  // `statement` and `severity` come from the frozen contract — text a human wrote and
+  // reviewed, not text a probe captured — so they are carried verbatim. Redacting them
+  // would mangle the contract's own words in the report.
   const base = {
     criterionId: criterion.criterionId,
     statement: criterion.statement,
@@ -195,9 +200,22 @@ export function deriveCriterionResult(
   // reference — when the attempt produced them. The fields are optional rather than
   // required because a probe that crashed before observing anything has nothing honest to
   // put there, and inventing a value would be worse than omitting one.
+  //
+  // REDACTED HERE, at the same boundary as evidence. `expected` and `actual` are copied
+  // from what a surface observed — an HTTP response body, a shell command's output, an
+  // exec error's message — and they are persisted to result.json and printed to a
+  // terminal exactly like evidence is. Without this they would be the one path by which
+  // a captured credential reaches a stored run unredacted, sitting right beside the
+  // evidence fields that are protected. AD-10 says redaction happens at capture; this is
+  // capture.
   const firstUnsatisfied = final.assertionEvaluations.find((evaluation) => !evaluation.satisfied);
-  const expected = firstUnsatisfied?.expected;
-  const actual = status === 'error' ? final.execError?.message : firstUnsatisfied?.actual;
+  const redact = (value: string | undefined): string | undefined =>
+    value === undefined ? undefined : redactText(value, options);
+
+  const expected = redact(firstUnsatisfied?.expected);
+  const actual = redact(
+    status === 'error' ? final.execError?.message : firstUnsatisfied?.actual,
+  );
 
   return {
     ...base,

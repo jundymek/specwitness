@@ -164,8 +164,6 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     contractCriteria: [],
   };
 
-  const context: StageContext = { runId: input.runId, clock, run: accumulator };
-
   /** One entry per stage, keyed so an outcome-time correction can amend one in place. */
   const timeline = new Map<StageName, StageTimelineEntry>();
   const record = (
@@ -194,6 +192,50 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     }
   };
 
+  /**
+   * The run so far as an immutable `RunResult`. Used three times: for the `persist`
+   * stage's snapshot, for the value returned to the caller, and for the rebuild after an
+   * `onComplete` failure.
+   */
+  const build = (runOutcome: RunOutcome, finishedAtIso: string): RunResult => ({
+    runId: input.runId,
+    epic: accumulator.epic,
+    baseSha: accumulator.baseSha,
+    headSha: accumulator.headSha,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAtIso,
+    outcome: runOutcome,
+    // Emitted in STAGE_NAMES order regardless of the order stages actually finished, so
+    // the timeline always reads as the pipeline is defined.
+    stages: STAGE_NAMES.map(
+      (name) => timeline.get(name) ?? { stage: name, status: 'skipped' as const, durationMs: 0 },
+    ),
+    gates: accumulator.gates,
+    criteria: accumulator.criteria,
+    evidence: accumulator.evidence,
+    providerUsage: accumulator.providerUsage,
+    environment: accumulator.environment,
+    ...(accumulator.contract === undefined ? {} : { contract: accumulator.contract }),
+  });
+
+  const context: StageContext = {
+    runId: input.runId,
+    clock,
+    run: accumulator,
+    snapshot: () => {
+      if (accumulator.outcome === undefined) {
+        // Fail closed rather than fabricate. A document with no verdict and no infra
+        // error is not a result, and a stage that persisted one would put an outcome
+        // nobody decided into the run directory.
+        throw new InfraError(
+          'a run snapshot was requested before the aggregate stage decided an outcome',
+          'snapshot() is meaningful from the persist stage onward; earlier stages have no result to write',
+        );
+      }
+      return build(accumulator.outcome, clock.now().toISOString());
+    },
+  };
+
   let infraError: InfraErrorClassification | undefined;
   /** A UsageError that must propagate — held so teardown runs before it is rethrown. */
   let escaped: unknown;
@@ -218,7 +260,26 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
         break;
       }
 
-      infraError = classifyInfraError(error);
+      const classification = classifyInfraError(error);
+
+      if (accumulator.outcome !== undefined) {
+        // ONCE THE OUTCOME IS DECIDED, NOTHING AFTER IT MAY REWRITE IT — the same rule
+        // teardown has, and for the same reason. The stage this actually protects is
+        // `persist`: a run that FAILed on a gate and then could not write result.json is
+        // still a FAIL. Reporting exit 3 there would tell a harness "the environment is
+        // broken, retry", and the retry would merge a branch that does not build. The
+        // failure is recorded and classified in the timeline; the conclusion stands.
+        record(
+          stage.name,
+          'error',
+          durationMs,
+          `${classification}: ${stage.name} failed after the outcome was decided: ${reasonOf(error)}`,
+        );
+        skip(index + 1, TEARDOWN_INDEX, `skipped: the run stopped at '${stage.name}'`);
+        break;
+      }
+
+      infraError = classification;
       record(stage.name, 'error', durationMs, `${infraError}: ${reasonOf(error)}`);
       skip(index + 1, TEARDOWN_INDEX, `skipped: the run stopped at '${stage.name}'`);
       break;
@@ -290,28 +351,7 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
   // would disagree about when the run ended. A run has one finishing time.
   const finishedAt = clock.now().toISOString();
 
-  const build = (): RunResult => ({
-    runId: input.runId,
-    epic: accumulator.epic,
-    baseSha: accumulator.baseSha,
-    headSha: accumulator.headSha,
-    startedAt: startedAt.toISOString(),
-    finishedAt,
-    outcome,
-    // Emitted in STAGE_NAMES order regardless of the order stages actually finished, so
-    // the timeline always reads as the pipeline is defined.
-    stages: STAGE_NAMES.map(
-      (name) => timeline.get(name) ?? { stage: name, status: 'skipped' as const, durationMs: 0 },
-    ),
-    gates: accumulator.gates,
-    criteria: accumulator.criteria,
-    evidence: accumulator.evidence,
-    providerUsage: accumulator.providerUsage,
-    environment: accumulator.environment,
-    ...(accumulator.contract === undefined ? {} : { contract: accumulator.contract }),
-  });
-
-  const finished = build();
+  const finished = build(outcome, finishedAt);
 
   if (input.onComplete !== undefined) {
     try {
@@ -326,7 +366,7 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
       );
       // Rebuilt so the amended persist entry is visible, with the SAME outcome — the
       // write failed, the conclusion did not change.
-      return build();
+      return build(outcome, finishedAt);
     }
   }
 
