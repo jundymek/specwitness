@@ -37,7 +37,31 @@ import { exitCodeForOutcome } from '../../../src/cli/exit.js';
 import { runPipeline } from '../../../src/pipeline/run-pipeline.js';
 import { createStages } from '../../../src/pipeline/stages/index.js';
 import { stageOk, stageProductNegative } from '../../../src/pipeline/stage.js';
+import { forbiddenProcessRunner } from '../../fakes/agent-provider.js';
 import { FixedClock } from '../../fakes/ports.js';
+
+/**
+ * A pipeline with NO GATES DECLARED, which is what every test in this file
+ * exercises — the persist stage, not the gate stage.
+ *
+ * Required since story 3.4: a `createStages()` call with no gate runner at all
+ * now fails closed (exit 3), because `aggregate()` over an empty gate set
+ * returns PASS and an unwired run would otherwise produce a green verdict for a
+ * branch on which nothing was checked. Declaring zero gates is a different and
+ * legitimate thing, and this says which one these tests mean.
+ *
+ * `forbiddenProcessRunner` throws on any call, so it also asserts the empty gate
+ * list really does spawn nothing.
+ *
+ * Carried by story 3.4 with 3.5's author notified: the value references
+ * `GatesStageDeps`, which does not exist until 3.4 lands, so it cannot travel in
+ * an earlier commit.
+ */
+const NO_GATES_DECLARED = {
+  gates: [],
+  runner: forbiddenProcessRunner(),
+  writeEvidence: async (name: string) => name,
+};
 
 const ENVIRONMENT: RunEnvironment = {
   nodeVersion: 'v22.12.0',
@@ -101,6 +125,7 @@ async function verifyWith(
     clock: new FixedClock('2026-08-31T20:00:00.000Z'),
     stages: createStages({
       assertVerifiableContract: options.guard ?? frozenContract,
+      gates: NO_GATES_DECLARED,
       persist: {
         writeResult: async (runId, snapshot) => {
           recorder.calls.push({ runId, result: snapshot });
@@ -162,7 +187,7 @@ describe('the persist stage writes the run so far (AC1)', () => {
       headSha: 'c'.repeat(40),
       environment: ENVIRONMENT,
       clock: new FixedClock('2026-08-31T20:00:00.000Z'),
-      stages: createStages({ assertVerifiableContract: frozenContract }),
+      stages: createStages({ assertVerifiableContract: frozenContract, gates: NO_GATES_DECLARED }),
     });
 
     const persist = result.stages.find((s) => s.stage === 'persist');
@@ -190,6 +215,7 @@ describe('a published-but-unbarriered write is NOT a failure (AC1)', () => {
       clock: new FixedClock('2026-08-31T20:00:00.000Z'),
       stages: createStages({
         assertVerifiableContract: frozenContract,
+        gates: NO_GATES_DECLARED,
         persist: {
           writeResult: async () => ({
             durable: false,
@@ -237,6 +263,7 @@ describe('a persist failure never rewrites a decided verdict (AC1)', () => {
     // keeps the name and only changes the body.
     const stages = createStages({
       assertVerifiableContract: frozenContract,
+      gates: NO_GATES_DECLARED,
       persist: {
         writeResult: async () => {
           throw new InfraError('disk full', 'free some space');
@@ -334,6 +361,7 @@ describe('EVERY outcome is persisted, including the infra ones (AC1)', () => {
       stages: swap(
         createStages({
           assertVerifiableContract: guard,
+          gates: NO_GATES_DECLARED,
           persist: {
             writeResult: async (_runId, snapshot) => {
               persisted.push(snapshot);
