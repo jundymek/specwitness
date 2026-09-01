@@ -414,14 +414,30 @@ describe('removal only ever touches worktrees SpecWitness created', () => {
     // assertion would then fail for a reason that has nothing to do with this
     // code, making the suite platform-dependent — and a test that fails for the
     // wrong reason teaches the next reader to ignore it.
+    // Property one: no container of ours survived the refusal.
     const strays = (await readdir(tmpInsideCheckout)).filter((name) =>
       name.startsWith('specwitness-worktree-'),
     );
     expect(strays).toEqual([]);
-    expect((await git(linked, 'status', '--porcelain')).trim()).toBe('');
 
-    // And leave the fixture as we found it, so nothing downstream inherits it.
+    // The scaffolding comes out BEFORE the status check, and the order is the
+    // point rather than tidiness. `scratch/` is a directory THIS TEST created to
+    // point `TMPDIR` at; it is not SpecWitness output. Leaving it in place made
+    // the status assertion depend on whether anything had dropped a cache file
+    // into it — macOS can, when a tool spawns — in which case `git status` would
+    // report `?? scratch/` and the test would fail for a reason that has nothing
+    // to do with the code under test. Filtering the `readdir` above hardened one
+    // assertion and left this one exposed to the identical condition.
+    //
+    // Not reproduced on this machine (the exact single-test command passes
+    // repeatedly, and a direct probe spawning git with `TMPDIR` pointed inside a
+    // checkout leaves it empty), but the exposure is real and removing it costs
+    // nothing.
     await rm(tmpInsideCheckout, { recursive: true, force: true });
+
+    // Property two, now asserted about SpecWitness alone: nothing was written
+    // anywhere else in the operator's checkout.
+    expect((await git(linked, 'status', '--porcelain')).trim()).toBe('');
   });
 
   it('refuses the main worktree outright', async () => {
