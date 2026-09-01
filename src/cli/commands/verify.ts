@@ -35,7 +35,11 @@ import { relative } from 'node:path';
 
 import type { Command } from 'commander';
 
-import { assertVerifiableContract, type LoadedContract } from '../../authoring/verifiable.js';
+import {
+  assertVerifiableContract,
+  contractStatusState,
+  type LoadedContract,
+} from '../../authoring/verifiable.js';
 import { readContractFile, resolveContractPath } from '../../authoring/contract-file.js';
 import { loadConfig, type SpecwitnessConfig } from '../../config/index.js';
 import { ConfigError, InfraError, UsageError } from '../../domain/errors.js';
@@ -133,9 +137,33 @@ async function verify(
 
   // Refs are resolved HERE, not in the pipeline: `Vcs.resolveRef` never fetches
   // and the pipeline spawns no git, so the SHAs a run is about are fixed before
-  // it starts and cannot change under it.
-  const baseSha = await resolveRef(vcs, root, 'base', baseFlag ?? config.project.baseBranch);
-  const headSha = await resolveRef(vcs, root, 'head', headFlag ?? 'HEAD');
+  // it starts and cannot change under it. The pipeline's resolve stage refuses
+  // an empty SHA outright, so this cannot be deferred to it.
+  //
+  // A CONTRACT THAT CANNOT GATE VERIFICATION OUTRANKS A REF THAT WILL NOT
+  // RESOLVE. When both are wrong, reporting the ref first masks the refusal the
+  // operator most needs — and for a tampered contract the masked hint is the one
+  // naming `--amend`, so the operator is left with "your ref is missing" and
+  // reaches for `--freeze` next. That is the laundering ADR-005 exists to
+  // prevent, reached by way of an unrelated error message. Found by review.
+  //
+  // The refusal is normally the integrity STAGE's to report, which is why it is
+  // not raised here in the ordinary case: it belongs in the timeline and the
+  // persisted run. This path is only for the run that can never be built,
+  // because there are no revisions to build it from.
+  let baseSha: string;
+  let headSha: string;
+  try {
+    baseSha = await resolveRef(vcs, root, 'base', baseFlag ?? config.project.baseBranch);
+    headSha = await resolveRef(vcs, root, 'head', headFlag ?? 'HEAD');
+  } catch (refFailure) {
+    if (contractStatusState(loaded) !== 'frozen') {
+      // Throws the specific refusal — absent, never frozen, or tampered — each
+      // with its own hint, exactly as the stage would have.
+      assertVerifiableContract(loaded);
+    }
+    throw refFailure;
+  }
 
   const clock = new SystemClock();
   const store = new RunStore(projectRoot, clock, new RandomIds());

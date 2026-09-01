@@ -408,6 +408,38 @@ describe('verify — the contract guard refuses, exits 3, and says how to fix it
     expect(await project.markers()).toEqual([]);
   });
 
+  it('lets the contract refusal outrank a ref that will not resolve', async () => {
+    const project = await fixture({ contract: 'tampered' });
+
+    const { exitCode, stderr } = await runCli(
+      ['verify', 'epic-1', '--head', 'refs/heads/no-such-branch'],
+      { cwd: project.root },
+    );
+
+    expect(exitCode).toBe(3);
+    // Both are wrong. Reporting the ref first would leave the operator with
+    // "your ref is missing" and no mention of --amend — and their next move for
+    // a contract that "no longer matches" is --freeze, which launders the
+    // tamper. The refusal that must not be masked wins.
+    expect(errorLine(stderr)).toContain('edited after it was frozen');
+    expect(hintLine(stderr)).toContain('--amend');
+    expect(hintLine(stderr)).not.toContain('--freeze');
+    expect(stderr).not.toContain('cannot resolve head ref');
+  });
+
+  it('still reports a ref failure when the contract is fine', async () => {
+    const project = await fixture();
+
+    const { exitCode, stderr } = await runCli(
+      ['verify', 'epic-1', '--head', 'refs/heads/no-such-branch'],
+      { cwd: project.root },
+    );
+
+    // The precedence rule must not swallow the ordinary case.
+    expect(exitCode).toBe(3);
+    expect(errorLine(stderr)).toContain('cannot resolve head ref');
+  });
+
   it('prints exactly one ERROR/HINT pair for a refusal', async () => {
     const project = await fixture({ contract: 'tampered' });
 
