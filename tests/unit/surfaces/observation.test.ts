@@ -608,6 +608,82 @@ describe('AC2 — the classification that matters most', () => {
   });
 });
 
+describe('evidence paths cannot collide across probes', () => {
+  /**
+   * FOUND BY THE CODEX REVIEW PASS, and it was right.
+   *
+   * A collision does not lose evidence loudly — `RunStore.writeEvidenceFile` OVERWRITES, and
+   * the earlier probe's evidence reference still resolves, now pointing at a different
+   * probe's output. Silent corruption of the audit record, which is worse than a missing
+   * file because nothing about the run looks wrong.
+   */
+  const pathsFor = async (criterionId: string, probeId: string): Promise<string[]> => {
+    const { executor: subject, evidence } = executor(
+      new ScriptedRunner(processResult({ stdout: '{"count":1}' })),
+    );
+    await subject.execute({
+      criterionId,
+      surface: 'observation',
+      params: params({ probeId }),
+    });
+    return evidence.files.map((file) => file.name);
+  };
+
+  it('separates two criteria that legitimately reuse one probe id', async () => {
+    // The merged schema scopes probe-id uniqueness to WITHIN a criterion — "probe ids
+    // identify a probe within its criterion" — so this is an ordinary plan, not a bad one.
+    const first = await pathsFor('E4-01', 'count-companies');
+    const second = await pathsFor('E4-02', 'count-companies');
+
+    expect(first.length).toBeGreaterThan(0);
+    expect(first).not.toEqual(second);
+    for (const path of first) {
+      expect(second).not.toContain(path);
+    }
+  });
+
+  it('separates two probe ids that differ only past the filename budget', async () => {
+    // `Identifier` permits 128 characters and the slug is truncated well below that.
+    const stem = 'p'.repeat(80);
+    const first = await pathsFor('E4-01', `${stem}alpha`);
+    const second = await pathsFor('E4-01', `${stem}omega`);
+
+    expect(first).not.toEqual(second);
+  });
+
+  it('produces byte-identical paths for the same identity on every run', async () => {
+    // Determinism is load-bearing, not incidental: two runs of the same plan must yield the
+    // same evidence paths or a run directory stops being comparable across runs.
+    expect(await pathsFor('E4-01', 'count-companies')).toEqual(
+      await pathsFor('E4-01', 'count-companies'),
+    );
+  });
+
+  it('keeps attempt 2 from clobbering attempt 1', async () => {
+    const attemptPaths = async (attempt: number): Promise<string[]> => {
+      const { executor: subject, evidence } = executor(
+        new ScriptedRunner(processResult({ stdout: '{"count":1}' })),
+      );
+      await subject.execute(request({ attempt }));
+      return evidence.files.map((file) => file.name);
+    };
+
+    // `deriveCriterionResult` reads the FINAL attempt, so a clobbered file would make a
+    // flaky pass point at evidence that no longer shows the failure it was flaky about.
+    expect(await attemptPaths(1)).not.toEqual(await attemptPaths(2));
+  });
+
+  it('keeps every path relative and free of traversal segments (Q48)', async () => {
+    const paths = await pathsFor('E4-01', '../../etc/passwd');
+
+    expect(paths.length).toBeGreaterThan(0);
+    for (const path of paths) {
+      expect(path.startsWith('/')).toBe(false);
+      expect(path.split('/')).not.toContain('..');
+    }
+  });
+});
+
 describe('malformed params are a wiring defect, not an execError', () => {
   const assertion = (overrides: Record<string, unknown> = {}) => ({
     description: 'd',

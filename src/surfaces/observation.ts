@@ -252,6 +252,8 @@ interface ObservationParams {
   readonly around?: string;
   readonly assertions: readonly ObservationAssertionSpec[];
   readonly attempt: number;
+  /** From the REQUEST, not from params — it disambiguates evidence paths. */
+  readonly criterionId: string;
 }
 
 const PHASES: readonly ObservationPhase[] = ['snapshot', 'before', 'after', 'delta'];
@@ -335,7 +337,8 @@ function readAssertion(raw: unknown, index: number): ObservationAssertionSpec {
   };
 }
 
-function readParams(raw: Readonly<Record<string, unknown>>): ObservationParams {
+function readParams(request: ProbeRequest): ObservationParams {
+  const raw = request.params;
   const mechanics = asRecord(raw['mechanics'], 'mechanics');
 
   const rawArgs = mechanics['args'];
@@ -382,6 +385,7 @@ function readParams(raw: Readonly<Record<string, unknown>>): ObservationParams {
     ...(around === undefined ? {} : { around }),
     assertions,
     attempt: readAttempt(raw['attempt']),
+    criterionId: request.criterionId,
   };
 }
 
@@ -599,13 +603,59 @@ function observedAnything(result: ProcessResult): boolean {
  * that three branches all want to edit is how a trivial conflict becomes a bad one. All
  * three PRs flag it as a 4.7 consolidation candidate (agreed with 4.4).
  */
+/** Budget for each id-derived portion, in characters. Generous next to a real id. */
+const SLUG_MAX_CHARS = 48;
+
 function slugify(id: string): string {
   const substituted = id
     .replace(/[^A-Za-z0-9._-]+/g, '-')
     .replace(/-{2,}/g, '-')
     .replace(/\.{2,}/g, '.');
   const trimmed = substituted.replace(/^[-.]+/, '').replace(/[-.]+$/, '');
-  return trimmed.slice(0, 64).replace(/[-.]+$/, '');
+  return trimmed.slice(0, SLUG_MAX_CHARS).replace(/[-.]+$/, '');
+}
+
+/**
+ * A short, stable discriminator for a probe's FULL identity.
+ *
+ * WHY A HASH AND NOT THE SLUGS ALONE. `slugify` is lossy twice over — it substitutes unsafe
+ * characters and it truncates — so two DISTINCT, schema-valid identities can normalise to
+ * one filename. Two ways that happens, and the second is the one that matters:
+ *
+ *  1. `Identifier` in 4.2's schema permits 128 characters, so two probe ids differing only
+ *     after the budget above collide.
+ *  2. **Probe ids are unique only WITHIN A CRITERION.** The merged `superRefine` says so in
+ *     as many words — "probe ids identify a probe within its criterion" — so two criteria
+ *     reusing one id is an ordinary plan, not a malformed one.
+ *
+ * On a collision `RunStore.writeEvidenceFile` overwrites, and the earlier probe's evidence
+ * REFERENCE still resolves — now pointing at a different probe's output. That is silent
+ * corruption of the audit record, which is worse than a missing file because nothing looks
+ * wrong. (Raised by the Codex review pass, and it was right: I carried across
+ * `gate-evidence-path.ts`'s slug treatment without its declaration INDEX, and the index is
+ * precisely the part that "keeps two ids that become identical AFTER truncation apart".
+ * This executor sees one probe per call and has no index, so the discriminator is derived
+ * from the identity itself.)
+ *
+ * FNV-1a, inline over `criterionId` + probe id: deterministic, and dependency-free so this
+ * module still imports nothing but `src/domain` (AD-1). Determinism is load-bearing rather
+ * than incidental — two runs of the same plan must produce byte-identical evidence paths,
+ * which is what makes a run directory comparable across runs.
+ *
+ * NOT a security control. Nothing here defends against an attacker choosing a colliding id;
+ * it separates honest ids, so a short non-cryptographic digest is the right tool.
+ */
+function discriminator(criterionId: string, probeId: string): string {
+  // The separator keeps ('ab','c') and ('a','bc') apart. It is a character `Identifier`
+  // forbids, so neither side can contain one and the concatenation stays unambiguous.
+  const identity = `${criterionId}/${probeId}`;
+  let hash = 0x811c_9dc5;
+  for (let index = 0; index < identity.length; index += 1) {
+    hash ^= identity.charCodeAt(index);
+    // The FNV prime. `Math.imul` keeps the multiply in 32 bits without a BigInt.
+    hash = Math.imul(hash, 0x0100_0193) >>> 0;
+  }
+  return hash.toString(36).padStart(7, '0');
 }
 
 export class ObservationSurfaceExecutor implements SurfaceExecutor {
@@ -618,7 +668,7 @@ export class ObservationSurfaceExecutor implements SurfaceExecutor {
   }
 
   async execute(request: ProbeRequest): Promise<ProbeAttempt> {
-    const params = readParams(request.params);
+    const params = readParams(request);
     const started = this.#deps.clock.now().getTime();
 
     const finish = (
@@ -839,7 +889,11 @@ export class ObservationSurfaceExecutor implements SurfaceExecutor {
     }
 
     const options = this.#captureRedaction();
-    const stem = `${EVIDENCE_DIR}/observation-${slugify(params.probeId)}-${phase}-${params.attempt}`;
+    // criterion + probe + a discriminator over the FULL identity: probe ids are unique only
+    // within a criterion, and both slugs are truncated. See `discriminator`.
+    const stem =
+      `${EVIDENCE_DIR}/observation-${slugify(params.criterionId)}-${slugify(params.probeId)}` +
+      `-${discriminator(params.criterionId, params.probeId)}-${phase}-${params.attempt}`;
     const refs: EvidenceRef[] = [];
 
     let fullPath: string | undefined;
@@ -919,12 +973,24 @@ export class ObservationSurfaceExecutor implements SurfaceExecutor {
         // from what the observation command printed, and they are persisted to `result.json`
         // and printed to a terminal exactly like evidence is. `redactText` is idempotent.
         expected: redactText(assertion.expected, options),
-        actual: read.found ? redactText(read.value, options) : this.#absence(assertion),
+        actual: read.found
+          ? redactText(read.value, options)
+          : redactText(this.#absence(assertion), options),
       };
     });
   }
 
-  /** What to report when a path did not resolve. Never `0`, never `''`. */
+  /**
+   * What to report when a path did not resolve. Never `0`, never `''`.
+   *
+   * Redacted by the caller like every other value that reaches `actual`, even though the
+   * only untrusted text here is a JSON path from the plan rather than captured output.
+   * That is the fail-closed direction and it costs nothing: `redactText` is idempotent, a
+   * plan is provider-authored, and a rule of "redact everything that lands in this field"
+   * is one a reviewer can check by eye — whereas "redact this field except on the branch
+   * where the value came from somewhere we currently believe is safe" is one that quietly
+   * stops being true the first time somebody widens what a path may contain.
+   */
   #absence(assertion: ObservationAssertionSpec): string {
     return assertion.phase === 'delta'
       ? `absent: '${assertion.path}' is missing or non-numeric in one of the two snapshots`
