@@ -200,6 +200,17 @@ function houseStyleLines(stderr: string) {
   };
 }
 
+
+/** The single ERROR: line, without its prefix. */
+function errorLine(stderr: string): string {
+  return houseStyleLines(stderr).errors.join('\n');
+}
+
+/** The single HINT: line, without its prefix. */
+function hintLine(stderr: string): string {
+  return houseStyleLines(stderr).hints.join('\n');
+}
+
 /**
  * The exit table, proven live through the built binary.
  *
@@ -272,5 +283,126 @@ describe('verify — a project that declares nothing is refused, never PASSed (D
     // fixes: whoever opens the run directory later has no exit code to compare
     // against, so the stored verdict simply wins.
     expect(await readdir(join(project.root, '.specwitness', 'runs'))).toEqual([]);
+  });
+});
+
+/**
+ * The verifiability guard, through the binary (FR-8, ADR-005).
+ *
+ * All three refusals classify as `integrity`, so the CLASSIFICATION cannot tell
+ * them apart and the hint is the only thing that can. That is why each case
+ * asserts its own hint, and why the tampered one asserts an ABSENCE: the remedy
+ * an operator would otherwise reach for — freeze it again — is exactly the one
+ * that must never be offered, because freezing over an edit launders the tamper
+ * and destroys the only evidence it happened.
+ */
+describe('verify — the contract guard refuses, exits 3, and says how to fix it', () => {
+  it('refuses when there is no contract, naming the command that makes one', async () => {
+    const project = await fixture({ contract: 'absent' });
+
+    const { exitCode, stdout, stderr } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    expect(exitCode).toBe(3);
+    expect(exitCode).not.toBe(1);
+    expect(hintLine(stderr)).toContain('specwitness contract epic-1');
+    expect(stdout).toContain('VERDICT: (none) — infra error: integrity');
+  });
+
+  it('refuses a never-frozen draft, pointing at --freeze', async () => {
+    const project = await fixture({ contract: 'draft' });
+
+    const { exitCode, stderr } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    expect(exitCode).toBe(3);
+    expect(errorLine(stderr)).toContain('never been frozen');
+    expect(hintLine(stderr)).toContain('--freeze');
+  });
+
+  it('refuses a TAMPERED contract with --amend, and never offers --freeze', async () => {
+    const project = await fixture({ contract: 'tampered' });
+
+    const { exitCode, stderr } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    expect(exitCode).toBe(3);
+    // The diagnosis must say what actually happened...
+    expect(errorLine(stderr)).toContain('edited after it was frozen');
+    expect(errorLine(stderr)).not.toContain('never been frozen');
+    // ...and the remedy must be amendment, never a second freeze.
+    expect(hintLine(stderr)).toContain('--amend');
+    expect(hintLine(stderr)).not.toContain('--freeze');
+  });
+
+  it.each([
+    ['absent', 'absent'],
+    ['draft', 'draft'],
+    ['tampered', 'tampered'],
+  ] as const)('refuses a %s contract BEFORE creating a worktree', async (_label, contract) => {
+    const project = await fixture({ contract });
+
+    const { stdout } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    // `integrity` precedes `worktree` precisely so a contract that cannot gate
+    // verification costs nothing: no worktree, no spawn, no cleanup to get wrong.
+    expect(stdout).toMatch(/–\s+skipped\s+worktree/);
+    expect(stdout).toContain('Worktree:    (none)');
+  });
+
+  it('prints exactly one ERROR/HINT pair for a refusal', async () => {
+    const project = await fixture({ contract: 'tampered' });
+
+    const { stderr } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    const { errors, hints } = houseStyleLines(stderr);
+    expect(errors).toHaveLength(1);
+    expect(hints).toHaveLength(1);
+  });
+});
+
+/**
+ * The NEEDS_HUMAN arm (exit 2) — the fourth code, and the one nothing else in
+ * this epic can produce.
+ *
+ * `verifiability: human` is a property of the CONTRACT, not of what ran: a
+ * criterion a person must judge can never be machine-passed (Q39, and
+ * `domain/contract.ts` says so in its own words). So this asserts the
+ * UNCONDITIONAL form — the run below declares gates and they are executed, and
+ * the answer is still NEEDS_HUMAN.
+ */
+describe('verify — a human-verifiability criterion yields NEEDS_HUMAN, exit 2 (Q39)', () => {
+  it('exits 2 with verdict NEEDS_HUMAN rather than PASS', async () => {
+    const project = await fixture({ contract: 'frozen-with-human' });
+
+    const { exitCode, stdout } = await runCli(['verify', 'epic-1', '--json'], {
+      cwd: project.root,
+    });
+
+    expect(exitCode).toBe(2);
+    // Not PASS: a criterion nobody adjudicated must never be reported as one
+    // that was satisfied.
+    expect(exitCode).not.toBe(0);
+
+    const document = JSON.parse(stdout) as {
+      outcome: { verdict?: string; infraError?: string; gateFailed?: string };
+      criteria: { criterionId: string; status: string }[];
+    };
+
+    expect(document.outcome.verdict).toBe('NEEDS_HUMAN');
+    expect(document.outcome.infraError).toBeUndefined();
+    expect(document.outcome.gateFailed).toBeUndefined();
+
+    // The human criterion is the one that changed the verdict; the automated
+    // ones stay `skipped`, because nothing probes them in this epic.
+    const byId = new Map(document.criteria.map((c) => [c.criterionId, c.status]));
+    expect(byId.get('E1-03')).toBe('needs_human');
+    expect(byId.get('E1-01')).toBe('skipped');
+    expect(byId.get('E1-02')).toBe('skipped');
+  });
+
+  it('exits 0 for the same fixture without the human criterion, so the rule is not "everything needs a human"', async () => {
+    const project = await fixture();
+
+    const { exitCode } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    expect(exitCode).toBe(0);
   });
 });

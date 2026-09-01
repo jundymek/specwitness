@@ -40,7 +40,7 @@ import { readContractFile, resolveContractPath } from '../../authoring/contract-
 import { loadConfig, type SpecwitnessConfig } from '../../config/index.js';
 import { ConfigError, InfraError, UsageError } from '../../domain/errors.js';
 import { normalizeEpicId } from '../../domain/ids.js';
-import type { RunEnvironment } from '../../domain/run-result.js';
+import type { RunEnvironment, RunResult } from '../../domain/run-result.js';
 import type { RefResolution, RefRole, RepoRoot, RootResolution, Vcs } from '../../domain/vcs.js';
 import { SystemClock } from '../../infra/clock.js';
 import { RandomIds } from '../../infra/ids.js';
@@ -52,6 +52,7 @@ import { createStages } from '../../pipeline/stages/index.js';
 import { renderJson, renderTerminal } from '../../report/index.js';
 import { parseContract } from '../../schemas/contract.js';
 import { exitCodeForOutcome, recordExitCode } from '../exit.js';
+import { printError } from '../print-error.js';
 
 /** Injected at build time by tsup, and by vitest for source-level runs. */
 declare const __SW_VERSION__: string;
@@ -190,7 +191,54 @@ async function verify(
     process.stdout.write(renderTerminal(result));
   }
 
+  reportInfraFailure(result);
+
   return exitCodeForOutcome(result.outcome);
+}
+
+/**
+ * Prints the house `ERROR:`/`HINT:` pair for a run that ended in the
+ * infrastructure arm, and for nothing else.
+ *
+ * WHY THIS EXISTS AT ALL. A stage that throws is caught by the pipeline and
+ * turned into an outcome, so `main.ts`'s printer — which only ever sees a throw
+ * that ESCAPED a command — never runs for it. Before this, an exit-3 run printed
+ * zero bytes on stderr: the diagnosis survived in the timeline and the remedy
+ * did not. For a tampered contract that is not cosmetic, because the operator
+ * was told the content no longer matches its fingerprint and was NOT told about
+ * `--amend`; the obvious next move is then `--freeze`, which launders the tamper
+ * ADR-005 exists to make detectable.
+ *
+ * WHY ONLY THE INFRA ARM. A FAIL is not an error — it is a successful
+ * verification whose answer is no, and the report already says so. Printing
+ * `ERROR:` there would tell an operator, and every log scraper they own, that
+ * SpecWitness malfunctioned when it did precisely its job. NEEDS_HUMAN likewise.
+ *
+ * The text is the failing stage's own, carried through `StageTimelineEntry` by
+ * story 3.3 and already redacted there — the edge composes nothing and holds no
+ * second copy of anyone's wording.
+ */
+function reportInfraFailure(result: RunResult): void {
+  if (result.outcome.infraError === undefined) {
+    return;
+  }
+
+  // The FIRST error entry: with an early stop there is one, and taking the first
+  // means the pair names the failure that ended the run rather than a later
+  // consequence of it.
+  const failed = result.stages.find((stage) => stage.status === 'error');
+  if (failed?.detail === undefined) {
+    // Fail closed rather than silently: an infra outcome with no explanation is
+    // itself worth reporting, and a bare exit 3 with no stderr is the state this
+    // function exists to end.
+    printError(
+      `verification could not reach a conclusion: ${result.outcome.infraError} error`,
+      `inspect the stored run at ${result.environment.runDirectory}`,
+    );
+    return;
+  }
+
+  printError(failed.detail, failed.hint);
 }
 
 /**
