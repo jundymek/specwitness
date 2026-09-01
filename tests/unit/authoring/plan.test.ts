@@ -72,10 +72,36 @@ const HTTP_PROBE_DRAFT = {
   ],
 };
 
+/**
+ * The action whose effect the observation below measures.
+ *
+ * A `delta` phase compares two snapshots taken AROUND another probe, so the pair has to be
+ * drafted together — an observation asking for a delta while wrapping nothing is refused by
+ * the schema, which is exactly the point of the rule.
+ */
+const SUBMIT_PROBE_DRAFT = {
+  id: 'submit',
+  surface: 'http',
+  mechanics: {
+    serviceId: 'backend',
+    method: 'POST',
+    path: '/companies',
+    body: '{"name":"Acme Test Ltd"}',
+  },
+  assertions: [
+    {
+      description: 'the company is created',
+      target: { source: 'status' },
+      comparison: 'equals',
+      expected: '201',
+    },
+  ],
+};
+
 const OBSERVATION_PROBE_DRAFT = {
   id: 'companies',
   surface: 'observation',
-  mechanics: { commandId: 'company-count', args: [] },
+  mechanics: { commandId: 'company-count', args: [], around: 'submit' },
   assertions: [
     {
       description: 'exactly one company was created',
@@ -103,7 +129,11 @@ function validDraft(overrides: Record<string, unknown> = {}): string {
         reason: 'human-verifiability',
         guidance: 'Open the dashboard and judge whether it reads coherently.',
       },
-      { criterionId: 'E7-03', disposition: 'automated', probes: [OBSERVATION_PROBE_DRAFT] },
+      {
+        criterionId: 'E7-03',
+        disposition: 'automated',
+        probes: [SUBMIT_PROBE_DRAFT, OBSERVATION_PROBE_DRAFT],
+      },
     ],
     ...overrides,
   });

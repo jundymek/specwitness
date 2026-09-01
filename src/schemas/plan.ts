@@ -347,17 +347,48 @@ const BrowserProbeSchema = z.strictObject({
   assertions: assertions(BrowserAssertionTargetSchema),
 });
 
-const ObservationProbeSchema = z.strictObject({
-  id: Identifier,
-  surface: z.literal('observation'),
-  mechanics: z.strictObject({
-    commandId: Identifier,
-    args: z.array(Argument),
-    /** The `id` of another probe in the same criterion; validated for existence below. */
-    around: Identifier.optional(),
-  }),
-  assertions: assertions(ObservationAssertionTargetSchema),
-});
+const ObservationProbeSchema = z
+  .strictObject({
+    id: Identifier,
+    surface: z.literal('observation'),
+    mechanics: z.strictObject({
+      commandId: Identifier,
+      args: z.array(Argument),
+      /** The `id` of another probe in the same criterion; validated for existence below. */
+      around: Identifier.optional(),
+    }),
+    assertions: assertions(ObservationAssertionTargetSchema),
+  })
+  .superRefine((probe, ctx) => {
+    // THE PHASE AND THE WRAP ARE ONE FACT, so they must agree.
+    //
+    // `before`, `after` and `delta` exist only because another probe runs BETWEEN two
+    // snapshots. Without an `around` there is exactly one snapshot, so those phases describe
+    // a comparison against something that was never captured; `snapshot` WITH an `around`
+    // has the opposite problem — two snapshots exist and the assertion does not say which
+    // one it means.
+    //
+    // Both are well-formed text describing a schedule no executor can run. Story 4.5
+    // receives this schema after 4.2 has merged and cannot ask about it, so the pairing is
+    // closed here rather than left as a gap for it to discover. (Raised by the Codex review
+    // pass, which was right: it had been noted as a known gap and handing a known gap to an
+    // agent who cannot reply is not a handover.)
+    const wraps = probe.mechanics.around !== undefined;
+
+    probe.assertions.forEach((assertion, index) => {
+      const paired = assertion.target.phase !== 'snapshot';
+      if (paired === wraps) {
+        return;
+      }
+      ctx.addIssue({
+        code: 'custom',
+        path: ['assertions', index, 'target', 'phase'],
+        message: wraps
+          ? `this observation wraps '${probe.mechanics.around as string}', so it captures a before and an after — use 'before', 'after' or 'delta' rather than 'snapshot', which does not say which one it means`
+          : `phase '${assertion.target.phase}' compares two snapshots, but this observation wraps nothing — set 'mechanics.around' to the probe it should surround, or use phase 'snapshot'`,
+      });
+    });
+  });
 
 const ShellProbeSchema = z
   .strictObject({
@@ -472,6 +503,27 @@ const PlanCriterionSchema = z
           code: 'custom',
           path: ['probes', index, 'mechanics', 'around'],
           message: 'a probe cannot wrap itself',
+        });
+        return;
+      }
+
+      // AN OBSERVATION WRAPS AN ACTION, AND A WRAP IS NOT AN ACTION.
+      //
+      // The target must not itself be a wrapping observation. That single rule closes two
+      // holes at once: a cycle (`a` around `b`, `b` around `a`), where executing either
+      // requires executing the other first; and a chain of wraps, whose nesting order no
+      // executor has been told. Restricting the target to a non-wrapping probe is stricter
+      // than cycle detection and far easier to explain, and it costs nothing real — two
+      // observations may still wrap the SAME action probe, which is the case that actually
+      // occurs (rows created AND audit rows written, around one request).
+      //
+      // Raised by the Codex review pass.
+      const target = entry.probes[seen.get(probe.mechanics.around) as number];
+      if (target?.surface === 'observation' && target.mechanics.around !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['probes', index, 'mechanics', 'around'],
+          message: `'${probe.mechanics.around}' is itself a wrapping observation; an observation must wrap an action probe, not another wrap — point both at the probe whose effect you are measuring`,
         });
       }
     });
@@ -707,7 +759,11 @@ export function parsePlan(text: string, path: string): Plan {
     );
   }
 
-  return result.data as Plan;
+  // Returned WITHOUT a cast, deliberately. `parsePlan` is declared to return `Plan`, so the
+  // zod output type must be assignable to the domain model — which makes any drift between
+  // `src/domain/plan.ts` and this schema a compile error rather than something a cast
+  // silently absorbs. Four cohort-2 stories build on that agreement.
+  return result.data;
 }
 
 /* ── serialization ──────────────────────────────────────────────────────────────────── */
@@ -1053,7 +1109,9 @@ export function planDraftSchemaFor(
       }
     });
 
-  return schema as unknown as z.ZodType<PlanDraft>;
+  // Also uncast: the declared `z.ZodType<PlanDraft>` return type is what proves the draft
+  // schema still produces exactly a `PlanDraft`.
+  return schema;
 }
 
 /* ── the staleness refusal (AC3) ────────────────────────────────────────────────────── */

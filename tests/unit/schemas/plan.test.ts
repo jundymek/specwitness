@@ -268,6 +268,149 @@ describe('a needs-human entry has nowhere to put a probe', () => {
   });
 });
 
+describe('an observation wrap must be executable (Q34)', () => {
+  /**
+   * The before/after phases exist only because another probe runs BETWEEN two snapshots. A
+   * plan that names one without an `around`, or that wraps a wrap, is well-formed text
+   * describing a schedule no executor can run — and story 4.5 receives it after this story
+   * has merged, with no way to ask about it. Both were raised by the Codex review pass.
+   */
+
+  const observationOn = (
+    mechanics: Record<string, unknown>,
+    phase: string,
+  ): Record<string, unknown> => ({
+    id: 'company-count',
+    surface: 'observation',
+    mechanics,
+    assertions: [
+      {
+        description: 'exactly one company row was created',
+        target: { source: 'jsonPath', path: '$.count', phase },
+        comparison: 'equals',
+        expected: '1',
+      },
+    ],
+  });
+
+  it.each(['before', 'after', 'delta'])(
+    'rejects phase %s on a standalone observation, which has only one snapshot',
+    (phase) => {
+      const document = asDocument(
+        planFor(CONTRACT, {
+          criteria: [
+            automated(
+              'E7-01',
+              observationOn({ commandId: 'company-count', args: [] }, phase) as never,
+            ),
+          ],
+        }),
+      );
+
+      expectRefusedAt(document, 'plan.criteria.0.probes.0.assertions.0.target.phase');
+    },
+  );
+
+  it('rejects phase snapshot on a wrapping observation — which of the two did you mean?', () => {
+    const document = asDocument(
+      planFor(CONTRACT, {
+        criteria: [
+          automated(
+            'E7-01',
+            HTTP_PROBE,
+            observationOn(
+              { commandId: 'company-count', args: [], around: 'health-endpoint' },
+              'snapshot',
+            ) as never,
+          ),
+        ],
+      }),
+    );
+
+    expectRefusedAt(document, 'plan.criteria.0.probes.1.assertions.0.target.phase');
+  });
+
+  it('accepts a wrapping observation using the paired phases', () => {
+    const document = asDocument(
+      planFor(CONTRACT, {
+        criteria: [
+          automated(
+            'E7-01',
+            HTTP_PROBE,
+            observationOn(
+              { commandId: 'company-count', args: [], around: 'health-endpoint' },
+              'delta',
+            ) as never,
+          ),
+        ],
+      }),
+    );
+
+    expect(check(document).success).toBe(true);
+  });
+
+  it('rejects two observations wrapping each other — an unrunnable cycle', () => {
+    const a = observationOn(
+      { commandId: 'company-count', args: [], around: 'b' },
+      'delta',
+    ) as Record<string, unknown>;
+    a.id = 'a';
+    const b = observationOn(
+      { commandId: 'company-count', args: [], around: 'a' },
+      'delta',
+    ) as Record<string, unknown>;
+    b.id = 'b';
+
+    const document = asDocument(
+      planFor(CONTRACT, { criteria: [automated('E7-01', a as never, b as never)] }),
+    );
+
+    expectRefusedAt(document, 'plan.criteria.0.probes.0.mechanics.around');
+  });
+
+  it('rejects wrapping a probe that is itself a wrap', () => {
+    const inner = observationOn(
+      { commandId: 'company-count', args: [], around: 'health-endpoint' },
+      'delta',
+    ) as Record<string, unknown>;
+    inner.id = 'inner';
+    const outer = observationOn(
+      { commandId: 'company-count', args: [], around: 'inner' },
+      'delta',
+    ) as Record<string, unknown>;
+    outer.id = 'outer';
+
+    const document = asDocument(
+      planFor(CONTRACT, {
+        criteria: [automated('E7-01', HTTP_PROBE, inner as never, outer as never)],
+      }),
+    );
+
+    expectRefusedAt(document, 'plan.criteria.0.probes.2.mechanics.around');
+  });
+
+  it('accepts two observations wrapping the SAME action probe', () => {
+    const rows = observationOn(
+      { commandId: 'company-count', args: [], around: 'health-endpoint' },
+      'delta',
+    ) as Record<string, unknown>;
+    rows.id = 'rows';
+    const audit = observationOn(
+      { commandId: 'company-count', args: [], around: 'health-endpoint' },
+      'delta',
+    ) as Record<string, unknown>;
+    audit.id = 'audit';
+
+    const document = asDocument(
+      planFor(CONTRACT, {
+        criteria: [automated('E7-01', HTTP_PROBE, rows as never, audit as never)],
+      }),
+    );
+
+    expect(check(document).success).toBe(true);
+  });
+});
+
 describe('strictness at every nesting depth, naming the path', () => {
   it.each([
     ['root', (d: Record<string, unknown>) => (d.extra = 1), 'extra'],
