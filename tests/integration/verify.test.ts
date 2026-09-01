@@ -351,6 +351,24 @@ describe('verify — the contract guard refuses, exits 3, and says how to fix it
     expect(stdout).toContain('Worktree:    (none)');
   });
 
+  it('spawns NOTHING when it refuses — the guard runs before any command', async () => {
+    const project = await fixture({
+      contract: 'tampered',
+      // This gate writes a marker file the instant it is executed. Its ABSENCE
+      // afterwards is direct evidence that no command ran, which is stronger
+      // than injecting a throwing runner: it observes the real spawn boundary of
+      // the shipped binary rather than a substitute for it.
+      gates: [{ id: 'lint', behaviour: 'spawn-marker' }],
+    });
+
+    const { exitCode } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    expect(exitCode).toBe(3);
+    // A refusal that reaches a gate is a refusal that came too late: a contract
+    // that cannot gate verification must cost no worktree and no subprocess.
+    expect(await project.markers()).toEqual([]);
+  });
+
   it('prints exactly one ERROR/HINT pair for a refusal', async () => {
     const project = await fixture({ contract: 'tampered' });
 
