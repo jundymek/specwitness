@@ -535,6 +535,37 @@ describe('gates stage: AC1/AC2 — evidence', () => {
     });
   });
 
+  it('records the declared command, so a stored run says WHAT produced the output', async () => {
+    // Without this a reader has a gate id and some output, and must reconstruct
+    // the config as it was at that revision to learn what actually ran — worst
+    // for the failing gate, the one anybody opens the record to understand.
+    const gates = declaredGates([{ id: 'lint', run: 'pnpm run lint --max-warnings 0' }]);
+    const runner = recordingRunner(processResult({ stdout: 'ok' }));
+    const context = stageContext();
+
+    await createGatesStage({ gates, runner, writeEvidence: recordingWriter() }).run(context);
+
+    const evidence = context.run.evidence.find((e) => e.kind === 'gate') as GateEvidence;
+    expect(evidence.displayCommand).toBe('pnpm run lint --max-warnings 0');
+  });
+
+  it('redacts a credential inside the declared command it records', async () => {
+    // A declared command can legitimately carry a token — a curl smoke gate is
+    // the case story 3.3 added its own redaction test for — and this field is
+    // persisted to result.json and rendered to a terminal.
+    const gates = declaredGates([
+      { id: 'smoke', run: `curl -H "Authorization: Bearer ${SEEDED_API_KEY}" http://localhost` },
+    ]);
+    const runner = recordingRunner(processResult({ stdout: 'ok' }));
+    const context = stageContext();
+
+    await createGatesStage({ gates, runner, writeEvidence: recordingWriter() }).run(context);
+
+    const evidence = context.run.evidence.find((e) => e.kind === 'gate') as GateEvidence;
+    expect(evidence.displayCommand).not.toContain(SEEDED_API_KEY);
+    expect(JSON.stringify(context.run.evidence)).not.toContain(SEEDED_API_KEY);
+  });
+
   it('stamps capturedAt from the injected clock, in ISO-8601 UTC', async () => {
     const runner = recordingRunner(processResult());
     const context = stageContext();

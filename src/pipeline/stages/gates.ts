@@ -545,6 +545,14 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
           gateEvidence({
             capturedAt: context.clock.now().toISOString(),
             gateId: gate.id,
+            // The command that produced this output, so a stored run is a
+            // self-contained record. Without it a reader six months later has a
+            // gate id and 8 KB of output, and must reconstruct the config AS IT
+            // WAS AT THAT REVISION to learn what actually ran — worst for the
+            // failing gate, which is the one anybody opens the record to
+            // understand. Redacted by the constructor like every other string
+            // here, because a declared command can legitimately carry a token.
+            displayCommand: declared,
             status,
             exitCode: result.exitCode,
             // RAW on purpose: the constructor redacts and bounds it. Handing it
