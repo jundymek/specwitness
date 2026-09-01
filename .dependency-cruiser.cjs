@@ -167,6 +167,64 @@ module.exports = {
       to: { path: '^src/', pathNot: ['^src/(domain|schemas|ingest)/'] },
     },
     {
+      name: 'pipeline-layer',
+      comment:
+        'AD-1: src/pipeline/** is application-layer, and a WIDER one than src/ingest. The ' +
+        'spine graph gives it PIPE -> DOM, PIPE -> SURF, PIPE -> CFG, PIPE -> INFRA and ' +
+        'PIPE -> PROV, so it may import domain, schemas, its own siblings, config, infra, ' +
+        'providers, surfaces and npm. What it may NOT import is another APPLICATION layer ' +
+        '(authoring, ingest, report) or the edge (cli) — and that is the half with teeth. ' +
+        'Two consequences the epic depends on: the pipeline cannot reach a renderer, so no ' +
+        'stage can print (AD-11 keeps one result model and many renderers); and the ' +
+        'integrity stage cannot import `assertVerifiableContract` from src/authoring, so ' +
+        'the CLI edge loads and verifies the contract and passes the result IN, exactly as ' +
+        'config is loaded once, validated and passed down. That seam is deliberate, not a ' +
+        'workaround. Node built-ins are allowed: the pipeline orchestrates adapters that ' +
+        'do I/O, though every stage receives its ports by injection.',
+      severity: 'error',
+      // `cli` is absent from the permit list rather than called out separately, exactly as
+      // `ingest-core-only` leaves it: `nothing-imports-cli` also fires, which is the
+      // established shape here and not worth a second rule.
+      from: { path: '^src/pipeline/' },
+      to: {
+        path: '^src/',
+        pathNot: ['^src/(domain|schemas|pipeline|config|infra|providers|surfaces)/'],
+      },
+    },
+    {
+      name: 'report-layer',
+      comment:
+        'AD-11/AD-1: src/report/** is application-layer and the STRICTEST of them — the ' +
+        "spine's layer graph shows only `REP -> DOM`. It may import src/domain/**, " +
+        'src/schemas/**, its own siblings and npm packages. Nothing else, and — unlike ' +
+        '`ingest-core-only` — no side-effectful Node built-in either. That last part is ' +
+        'the rule\'s real subject: AD-11 says the terminal and JSON renderers derive ' +
+        'everything from one RunResult and compute no facts of their own, and this is ' +
+        'that promise expressed structurally rather than left to review. A renderer that ' +
+        'cannot open a file, read the config or reach the pipeline cannot look up a fact ' +
+        'the model does not carry — so the human report and the machine document cannot ' +
+        'drift apart, which is the failure AD-11 exists to prevent. It is a security ' +
+        'control too: a renderer that cannot import `node:fs` cannot read a credential ' +
+        'off disk in order to print it. `cli` is deliberately not re-listed here — ' +
+        '`nothing-imports-cli` already covers it, and a guard duplicated is a guard with ' +
+        'two places to weaken. The one import this rule was negotiated over: story 3.5 ' +
+        "puts the `result.json` serializer in `src/schemas/result.ts` and NOT in " +
+        '`src/infra/run-store.ts`, because a serializer inside an adapter is one the JSON ' +
+        'renderer could not legally call — and `--json` would then need a second ' +
+        'serializer, which is exactly how two byte sequences appear where the harness ' +
+        'contract requires one. `tests/unit/dependency-rules.test.ts` pins both ' +
+        'directions.',
+      severity: 'error',
+      from: { path: '^src/report/' },
+      to: {
+        // Two matchers, OR-ed: every other `src/` layer, plus the side-effect
+        // built-ins. npm packages match neither and stay permitted, as do pure
+        // built-ins like `node:path` — string work is not I/O.
+        path: ['^src/', builtinPattern],
+        pathNot: ['^src/(domain|schemas|report)/'],
+      },
+    },
+    {
       name: 'no-circular',
       comment:
         'A cycle means the layer boundary is already gone and the modules can no longer ' +

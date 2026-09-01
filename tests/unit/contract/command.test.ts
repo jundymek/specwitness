@@ -358,3 +358,71 @@ describe('runContract — option combinations are checked, not silently resolved
     await expect(runContract('7', { force: true }, clock())).resolves.toBeUndefined();
   });
 });
+
+/**
+ * Story 3.8 — provenance at the command level (AC3).
+ *
+ * The value a real `claude` or `codex` reports cannot be proven here, and is not
+ * proven anywhere in this project: nothing has ever spawned either binary. What
+ * IS proven here is the property that matters most in production — that an
+ * unknown provenance never stops a contract being written. The mapping from each
+ * adapter's probe outcome to each field is established against scripted runners
+ * in `tests/unit/cli/contract-provenance.test.ts`.
+ *
+ * The `fake` adapter is the honest vehicle for this: it is a shipped,
+ * config-selectable adapter with no CLI behind it, so its provenance is
+ * genuinely unknowable rather than merely unknown — the same end state a failed
+ * `--version` probe produces.
+ */
+describe('runContract — provenance is recorded, never fatal (AD-5, story 3.8)', () => {
+  it('writes the draft with explicit nulls when the adapter has no CLI behind it', async () => {
+    chdir(await project());
+
+    await runContract('7', {}, clock());
+
+    const yaml = await contractYaml();
+    // The draft exists. This is the whole of AC3: provenance is a metadata
+    // record, not a gate, so not knowing it must never cost the operator their
+    // contract.
+    expect(yaml).toContain('E7-01');
+    // Written as explicit nulls, not omitted keys — an absent key is
+    // indistinguishable from one an older writer never knew about.
+    expect(yaml).toContain('model: null');
+    expect(yaml).toContain('providerCliVersion: null');
+  });
+
+  it('still names the provider and the generation instant it does know', async () => {
+    // Unknown provenance is per-FIELD, not all-or-nothing. Two fields the edge
+    // can always answer stay answered even when the other two cannot be.
+    chdir(await project());
+
+    await runContract('7', {}, clock());
+
+    const yaml = await contractYaml();
+    expect(yaml).toContain('provider: hermetic');
+    expect(yaml).toContain(`generatedAt: ${INSTANT}`);
+  });
+
+  it('leaves the fresh draft in a clean draft state, provenance and all', async () => {
+    // A draft carrying provenance is still an ordinary draft: unfrozen, no
+    // fingerprint. Provenance lives in `meta`, which is never fingerprinted
+    // (AD-5), so writing it cannot put a contract into a half-frozen state.
+    chdir(await project());
+
+    await runContract('7', {}, clock());
+
+    const yaml = await contractYaml();
+    expect(yaml).toContain('frozen: false');
+    expect(yaml).toContain('fingerprint: null');
+  });
+
+  it('spawns no subprocess to learn provenance on a hermetic path', async () => {
+    // Reading provenance must not introduce a process spawn where the adapter
+    // promises none — `fake` runs entirely in-process, and Epic 6's hermetic
+    // corpus run depends on that staying true.
+    chdir(await project());
+
+    await expect(runContract('7', {}, clock())).resolves.toBeUndefined();
+    expect(stderr.join('')).not.toContain('not found on PATH');
+  });
+});

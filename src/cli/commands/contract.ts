@@ -55,6 +55,7 @@ import {
 } from '../../authoring/contract-file.js';
 import { generateDraft } from '../../authoring/contract.js';
 import { processAmendIo, runAmend } from './contract-amend.js';
+import { readProviderProvenance } from '../contract/provenance.js';
 import { contractStatusState, type LoadedContract } from '../../authoring/verifiable.js';
 import { loadConfig, resolveRoleProvider } from '../../config/index.js';
 import type { Contract } from '../../domain/contract.js';
@@ -73,6 +74,7 @@ import {
   renderStatusJson,
   type ContractStatus,
 } from '../contract/render.js';
+import { printWarning } from '../print-error.js';
 
 interface ContractOptions {
   readonly freeze?: boolean;
@@ -297,7 +299,9 @@ async function freezeContract(projectRoot: string, epic: string, clock: Clock): 
   const frozen = freeze(loaded.contract, clock.now());
 
   if (frozen !== loaded.contract) {
-    await writeContractFileAtomically(projectRoot, epic, serializeContract(frozen));
+    await writeContractFileAtomically(projectRoot, epic, serializeContract(frozen), {
+      onDurabilityWarning: printWarning,
+    });
   }
 
   // UJ-1's climax: the full lowercase-hex fingerprint, never truncated.
@@ -370,8 +374,14 @@ async function generateContract(
     );
   }
 
+  // Hoisted rather than inlined so the SAME runner reaches the provenance read
+  // below. Both adapters cache their capability probe per session keyed partly by
+  // runner identity, so sharing the instance is what makes provenance free: the
+  // probe is paid for once and read twice (story 3.8).
+  const processRunner = createProcessRunner(clock);
+
   const provider = providerForRole(resolved, {
-    processRunner: createProcessRunner(clock),
+    processRunner,
     clock,
     // Adapter warnings (billing risk) are diagnostics, so they go to stderr and
     // never pollute stdout.
@@ -392,6 +402,16 @@ async function generateContract(
     implementationArtifacts: config.planning.implementationArtifacts,
   });
 
+  // AD-5's "model as reported by the CLI, CLI version". Read here, at the edge,
+  // because `src/authoring/**` may not reach into `src/providers/**` (AD-1) — the
+  // values are passed DOWN into `generateDraft`, which has always had the
+  // parameters. This never throws and never spawns a second subprocess: it reads
+  // the capability probe the invocation below uses anyway. Unknown provenance is
+  // recorded as an explicit `null` and the draft is still written, which is the
+  // one place this product deliberately fails open; `contract/provenance.ts`
+  // explains why at length.
+  const provenance = await readProviderProvenance(resolved, processRunner);
+
   // A ProviderError from the gate propagates from here, and NOTHING has been
   // written: the draft is assembled entirely in memory, and the write below is
   // the first and only filesystem mutation.
@@ -400,13 +420,13 @@ async function generateContract(
     provider,
     clock,
     providerName: resolved.name,
-    // The response envelope reports no model today; recording the absence
-    // explicitly beats inventing a value (AD-5).
-    model: null,
-    providerCliVersion: null,
+    model: provenance.model,
+    providerCliVersion: provenance.providerCliVersion,
   });
 
-  await writeContractFileAtomically(projectRoot, epic, serializeContract(contract));
+  await writeContractFileAtomically(projectRoot, epic, serializeContract(contract), {
+    onDurabilityWarning: printWarning,
+  });
 
   report(epic, contract, hints);
 }

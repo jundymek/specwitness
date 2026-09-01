@@ -78,6 +78,7 @@ import {
 import { InfraError, IntegrityError } from '../../domain/errors.js';
 import type { Clock } from '../../domain/ports.js';
 import { parseContract, serializeContract } from '../../schemas/contract.js';
+import { printWarning } from '../print-error.js';
 
 /**
  * The interactive surface, injected so both branches are unit-testable without
@@ -227,7 +228,9 @@ export async function runAmend(options: AmendCommandOptions): Promise<void> {
   // is nothing next to the cost of a caller that forgot.
   const amended = amend({ contract: current, reason, at: clock.now() });
 
-  await writeContractFileAtomically(projectRoot, epicId, serializeContract(amended));
+  await writeContractFileAtomically(projectRoot, epicId, serializeContract(amended), {
+    onDurabilityWarning: printWarning,
+  });
 
   io.write(
     [

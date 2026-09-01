@@ -463,3 +463,172 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     expect(exitCode).not.toBe(0);
   });
 });
+
+/*
+ * Story 3.3 appends this describe; it restructures nothing above. Story 3.6 appends its
+ * own for `report-layer` in wave B. The three of us share this file and share zero
+ * `expect()`, which is a stronger guarantee than "we coordinated".
+ */
+describe('the pipeline-layer rule (story 3.3)', () => {
+  it('blocks src/pipeline from importing another application layer', async () => {
+    // The exact import the integrity stage would most naturally have written:
+    // `assertVerifiableContract` lives in src/authoring, and reaching for it is the
+    // obvious move until this rule says no. The rule is what turns "we decided the CLI
+    // edge passes the verified contract in" into something a later story cannot undo by
+    // accident — and this test is what proves the rule actually matches, since a clean
+    // depcruise run proves only that nobody has violated it yet.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'pipeline/__probe-authoring.ts',
+      "import { assertVerifiableContract } from '../authoring/verifiable.js';\n" +
+        'export const guard = assertVerifiableContract;\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('pipeline-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks src/pipeline from importing a renderer, so no stage can print', async () => {
+    // AD-11's structural half: one result model, many renderers. A pipeline that can
+    // reach src/report is a pipeline that can print, and a stage that prints is a second
+    // renderer nobody registered.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'report/__probe-terminal.ts', 'export const render = () => "x";\n');
+    await writeModule(
+      tree,
+      'pipeline/__probe-printing-stage.ts',
+      "import { render } from '../report/__probe-terminal.js';\nexport const p = render;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('pipeline-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('lets src/pipeline import domain, schemas, config, infra and its own siblings', async () => {
+    // The permit half, and it is not decoration: story 3.4's gates stage imports config
+    // (to read gate declarations) and infra (the process runner), and story 3.5's persist
+    // stage imports the run store. A rule that came out one directory too narrow would
+    // block the first wave-B story to write a line — which is why it is pinned here in
+    // wave A rather than discovered there.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'pipeline/__probe-sibling.ts', 'export const sibling = 1;\n');
+    await writeModule(
+      tree,
+      'pipeline/__probe-stage.ts',
+      "import { InfraError } from '../domain/errors.js';\n" +
+        "import { SCHEMA_VERSIONS } from '../schemas/versions.js';\n" +
+        "import { loadConfig } from '../config/index.js';\n" +
+        "import { SystemClock } from '../infra/clock.js';\n" +
+        "import { sibling } from './__probe-sibling.js';\n" +
+        'export const p = { InfraError, SCHEMA_VERSIONS, loadConfig, SystemClock, sibling };\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('pipeline-layer');
+    expect(exitCode).toBe(0);
+  });
+});
+
+
+/**
+ * Story 3.6 — the `report-layer` rule.
+ *
+ * APPENDED, deliberately. Story 3.3 appended `pipeline-layer` cases to this
+ * same file in wave A and this describe shares **zero `expect()`** with them:
+ * two stories in one file that assert on each other's cases is how a rebase
+ * turns into a merge negotiation (Epic 2's pattern).
+ *
+ * What the rule is for. `src/report/**` renders a `RunResult` and computes
+ * nothing (AD-11). That promise is enforced structurally rather than by
+ * review: a renderer that cannot import `src/infra/`, `src/config/` or
+ * `node:fs` cannot look up a fact the model does not already carry, and cannot
+ * read a secret off disk to print it either. The spine's layer graph shows
+ * `REP -> DOM` and nothing else, which makes this the strictest of the
+ * application layers — stricter than `ingest-core-only`, which permits Node
+ * built-ins because reading planning artifacts off disk is what ingestion is.
+ */
+describe('the report layer may reach the core and nothing else', () => {
+  it('blocks src/report from importing node:fs', async () => {
+    // The AC3 property in its most direct form: a renderer that can open a
+    // file can compute a fact the RunResult does not contain, and the terminal
+    // and JSON views have drifted before anyone notices.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'report/__probe-reads-disk.ts',
+      "import { readFileSync } from 'node:fs';\n" +
+        'export const contractStatus = (p: string) => readFileSync(p, "utf8");\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('report-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks src/report from importing an adapter', async () => {
+    // The specific import this rule was negotiated over: story 3.5's
+    // serializer had to live in `src/schemas/result.ts` rather than in
+    // `src/infra/run-store.ts`, because a serializer inside infra is one the
+    // JSON renderer cannot legally call — and the byte-equality property would
+    // then need a second serializer, which is what guarantees drift.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'report/__probe-imports-infra.ts',
+      "import { SystemClock } from '../infra/clock.js';\nexport const c = SystemClock;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('report-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks src/report from importing another application layer', async () => {
+    // Application layers do not import each other. `report` reading `ingest`
+    // (or `authoring`, or `pipeline`) would let a renderer re-derive a fact
+    // from the planning artifacts instead of rendering the model it was given.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'report/__probe-imports-ingest.ts',
+      "import { normalizeRepoPath } from '../ingest/repo-path.js';\n" +
+        'export const n = normalizeRepoPath;\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('report-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('lets src/report import the core, its own siblings and npm', async () => {
+    // The permit half. A rule that forbids everything is not a guard, it is a
+    // wall: this is the exact shape the two renderers ship as — the domain
+    // model in, the schemas serializer for the persisted bytes, and one
+    // sibling module for the shared vocabulary.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'report/__probe-glyphs.ts', "export const PASS = '\\u2713 pass';\n");
+    await writeModule(
+      tree,
+      'report/__probe-render.ts',
+      "import type { CriterionResult } from '../domain/result.js';\n" +
+        "import { SCHEMA_VERSIONS } from '../schemas/versions.js';\n" +
+        "import { PASS } from './__probe-glyphs.js';\n" +
+        'export const render = (c: CriterionResult): string =>\n' +
+        '  `${c.criterionId} ${PASS} ${SCHEMA_VERSIONS.resultTaxonomy}`;\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('report-layer');
+    expect(exitCode).toBe(0);
+  });
+});

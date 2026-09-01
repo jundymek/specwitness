@@ -1,0 +1,276 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`the persisted result.json shape (AC3, NFR-7) > matches the recorded snapshot exactly, bytes included 1`] = `
+"{
+  "schemaVersion": 1,
+  "runId": "run-20260830T142501Z-a3f9",
+  "epic": "epic-7",
+  "baseSha": "1111111111111111111111111111111111111111",
+  "headSha": "2222222222222222222222222222222222222222",
+  "startedAt": "2026-08-30T14:25:01.000Z",
+  "finishedAt": "2026-08-30T14:26:44.500Z",
+  "outcome": {
+    "verdict": "FAIL",
+    "gateFailed": "lint"
+  },
+  "stages": [
+    {
+      "stage": "resolve",
+      "status": "ok",
+      "durationMs": 100
+    },
+    {
+      "stage": "integrity",
+      "status": "ok",
+      "durationMs": 200
+    },
+    {
+      "stage": "worktree",
+      "status": "ok",
+      "durationMs": 300
+    },
+    {
+      "stage": "setup",
+      "status": "ok",
+      "durationMs": 400
+    },
+    {
+      "stage": "gates",
+      "status": "failed",
+      "durationMs": 500,
+      "detail": "gate 'lint' failed"
+    },
+    {
+      "stage": "services",
+      "status": "error",
+      "durationMs": 600,
+      "detail": "infra: the service never became ready",
+      "hint": "check the readiness url and raise the timeout in .specwitness/config.yaml"
+    },
+    {
+      "stage": "data",
+      "status": "skipped",
+      "durationMs": 0
+    },
+    {
+      "stage": "probes",
+      "status": "skipped",
+      "durationMs": 0
+    },
+    {
+      "stage": "aggregate",
+      "status": "skipped",
+      "durationMs": 0
+    },
+    {
+      "stage": "persist",
+      "status": "skipped",
+      "durationMs": 0
+    },
+    {
+      "stage": "teardown",
+      "status": "skipped",
+      "durationMs": 0
+    }
+  ],
+  "gates": [
+    {
+      "gateId": "install",
+      "status": "pass",
+      "durationMs": 4300
+    },
+    {
+      "gateId": "lint",
+      "status": "fail",
+      "durationMs": 1200
+    },
+    {
+      "gateId": "build",
+      "status": "skipped"
+    }
+  ],
+  "criteria": [
+    {
+      "criterionId": "E7-01",
+      "status": "pass",
+      "statement": "The report lists every failing gate with its command output.",
+      "severity": "critical"
+    },
+    {
+      "criterionId": "E7-02",
+      "status": "pass",
+      "flaky": true,
+      "statement": "The health endpoint responds within the configured timeout.",
+      "severity": "normal"
+    },
+    {
+      "criterionId": "E7-03",
+      "status": "fail",
+      "statement": "An unknown flag exits 64.",
+      "severity": "critical",
+      "expected": "exit code 64",
+      "actual": "exit code 1",
+      "evidence": [
+        {
+          "kind": "command",
+          "path": "evidence/cmd-unknown-flag.txt"
+        }
+      ]
+    },
+    {
+      "criterionId": "E7-04",
+      "status": "needs_human",
+      "statement": "The error message reads clearly to a first-time user.",
+      "severity": "normal"
+    },
+    {
+      "criterionId": "E7-05",
+      "status": "skipped",
+      "statement": "The browser flow completes without a console error.",
+      "severity": "normal"
+    },
+    {
+      "criterionId": "E7-06",
+      "status": "error",
+      "statement": "The migration is reversible.",
+      "severity": "critical",
+      "expected": "a reversible migration",
+      "actual": "the probe could not observe",
+      "evidence": [
+        {
+          "kind": "observation",
+          "path": "evidence/obs-migration.txt"
+        }
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "gate",
+      "capturedAt": "2026-08-30T14:25:01.123Z",
+      "gateId": "lint",
+      "displayCommand": "curl -H \\"Authorization: [REDACTED]\\" http://localhost:3000/health",
+      "status": "fail",
+      "exitCode": 1,
+      "stdout": {
+        "text": "ANTHROPIC_API_KEY=[REDACTED]\\n> Authorization: [REDACTED]\\n",
+        "truncated": false,
+        "totalBytes": 57
+      },
+      "stderr": {
+        "text": "lint found 3 problems\\n",
+        "truncated": false,
+        "totalBytes": 22
+      },
+      "durationMs": 1200
+    },
+    {
+      "kind": "command",
+      "capturedAt": "2026-08-30T14:25:01.123Z",
+      "commandId": "install",
+      "displayCommand": "pnpm install --frozen-lockfile",
+      "exitCode": 0,
+      "stdout": {
+        "text": "Lockfile is up to date\\n",
+        "truncated": false,
+        "totalBytes": 23
+      },
+      "stderr": {
+        "text": "",
+        "truncated": false,
+        "totalBytes": 0
+      },
+      "durationMs": 4300
+    },
+    {
+      "kind": "provider",
+      "capturedAt": "2026-08-30T14:25:01.123Z",
+      "role": "contract-author",
+      "provider": "claude-code",
+      "attempts": 1,
+      "rawResponse": {
+        "text": "{\\"criteria\\":[]}",
+        "truncated": false,
+        "totalBytes": 15
+      },
+      "durationMs": 8800,
+      "explanation": "non-authoritative model prose, read by nothing mechanical"
+    },
+    {
+      "kind": "http",
+      "capturedAt": "2026-08-30T14:25:01.123Z",
+      "request": {
+        "method": "GET",
+        "url": "http://localhost:3000/health",
+        "headers": {
+          "accept": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "text": "{\\"ok\\":true}",
+          "truncated": false,
+          "totalBytes": 11
+        }
+      },
+      "durationMs": 12
+    },
+    {
+      "kind": "observation",
+      "capturedAt": "2026-08-30T14:25:01.123Z",
+      "observationId": "db-rows-after",
+      "snapshot": {
+        "text": "users=3",
+        "truncated": false,
+        "totalBytes": 7
+      },
+      "durationMs": 7
+    },
+    {
+      "kind": "browser",
+      "capturedAt": "2026-08-30T14:25:01.123Z",
+      "url": "http://localhost:3000/login",
+      "trace": {
+        "kind": "browser",
+        "path": "evidence/browser/login-trace.zip"
+      },
+      "screenshot": {
+        "kind": "browser",
+        "path": "evidence/browser/login.png"
+      },
+      "durationMs": 950
+    }
+  ],
+  "providerUsage": [
+    {
+      "role": "contract-author",
+      "provider": "claude-code",
+      "durationMs": 8800,
+      "attempts": 1,
+      "model": null,
+      "providerCliVersion": null
+    }
+  ],
+  "environment": {
+    "nodeVersion": "v22.12.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "specwitnessVersion": "0.1.0",
+    "worktreePath": "/tmp/specwitness-worktree-abc123/head",
+    "runDirectory": ".specwitness/runs/run-20260830T142501Z-a3f9"
+  },
+  "contract": {
+    "epic": "epic-7",
+    "version": 2,
+    "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frozenAt": "2026-08-29T09:00:00.000Z",
+    "amendments": 1,
+    "criterionCount": 6
+  }
+}
+"
+`;
