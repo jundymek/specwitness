@@ -164,6 +164,13 @@ export async function runReport(
  * rather than rendered: a run that was killed before persisting would
  * otherwise show an empty report while a complete one sat beside it.
  *
+ * WALKING NEWEST-FIRST AND RETURNING EARLY IS LOAD-BEARING, not an
+ * optimisation. It is what makes an unreadable manifest fail this command only
+ * when it could actually have changed the answer — see the comment on the
+ * catch below. V0 keeps every run forever (Q51), so a scan that must read
+ * every manifest before answering would let one corrupt run directory poison
+ * `report` permanently.
+ *
  * When nothing matches, the three failures below are deliberately distinct.
  * They are three different operator situations with three different remedies,
  * and collapsing them into "not found" would hide which one happened.
@@ -176,16 +183,44 @@ async function latestRunOfEpic(
   const runIds = await store.listRuns();
 
   const ofEpic: string[] = [];
+  // Deferred rather than thrown at the point of failure — but only just.
+  // Because the walk is newest-first, an unreadable manifest seen BEFORE an
+  // answer might itself have been that answer: returning the next run down
+  // would render an older run while calling it the latest. So it is raised the
+  // moment an answer would otherwise be returned, and again if the walk ends
+  // with nothing (staying silent would report "this epic has no runs" about a
+  // project that may well have one).
+  //
+  // What this buys is the narrower failure: a corrupt manifest OLDER than the
+  // answer is never even read, so it cannot fail the command for a reason that
+  // does not exist. V0 keeps every run forever (Q51), so the alternative lets
+  // one corrupt run directory poison `report` permanently.
+  let unreadable: unknown;
+
   for (const runId of runIds) {
-    // A corrupt manifest PROPAGATES rather than being skipped. Skipping would
-    // be the worse failure: the unreadable manifest may be the newest run of
-    // this epic, so ignoring it renders an older run while calling it the
-    // latest. `parseRunManifest` already refuses to treat a corrupt manifest as
-    // absent, and this must not undo that.
-    const manifest = await store.readManifest(runId);
-    if (manifest.epic !== null && normalizeEpicId(manifest.epic) === epic) {
-      ofEpic.push(runId);
+    let manifest;
+    try {
+      manifest = await store.readManifest(runId);
+    } catch (cause) {
+      unreadable ??= cause;
+      continue;
     }
+
+    if (manifest.epic === null || normalizeEpicId(manifest.epic) !== epic) {
+      continue;
+    }
+
+    ofEpic.push(runId);
+    if (await store.hasResult(runId)) {
+      if (unreadable !== undefined) {
+        throw unreadable;
+      }
+      return runId;
+    }
+  }
+
+  if (unreadable !== undefined) {
+    throw unreadable;
   }
 
   if (ofEpic.length === 0) {
@@ -202,12 +237,6 @@ async function latestRunOfEpic(
       `no contract and no runs found for ${epic} in ${projectRoot}`,
       `check the epic id, or run 'specwitness contract generate ${epic}' to create its verification contract`,
     );
-  }
-
-  for (const runId of ofEpic) {
-    if (await store.hasResult(runId)) {
-      return runId;
-    }
   }
 
   // Situation 3. Naming the count is what tells the operator these runs exist

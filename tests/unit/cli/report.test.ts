@@ -242,6 +242,35 @@ describe('report reads a corrupt manifest honestly (AC2)', () => {
     expect(error).toBeInstanceOf(InfraError);
     expect((error as InfraError).message).toContain(broken.runId);
   });
+
+  it('is not blocked by a corrupt manifest OLDER than the answer', async () => {
+    // The failure must be the minimal honest one. A manifest that cannot be
+    // read but is older than the run being returned could not have changed the
+    // answer, so refusing on account of it would make `report` fail for a
+    // reason that does not exist — and V0 keeps every run forever (Q51), so
+    // one corrupt directory would poison the command permanently.
+    const broken = await seedRun('2026-08-30T08:00:00.000Z', 'zzzz', 'epic-7');
+    await writeFile(join(broken.dir, 'manifest.json'), '{ not json', 'utf8');
+    const answer = await seedRun('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
+    await writeFile(join(answer.dir, 'result.json'), '{}', 'utf8');
+
+    const { stdout } = await runReport(projectRoot, 'epic-7');
+
+    expect(stdout).toContain(answer.runId);
+  });
+
+  it('still refuses when no answer was found and a manifest is unreadable', async () => {
+    // Nothing to return, so the unreadable manifest might have been the answer.
+    // Staying silent here would report "this epic has no runs" about a project
+    // that may well have one.
+    const broken = await seedRun('2026-08-30T08:00:00.000Z', 'zzzz', 'epic-7');
+    await writeFile(join(broken.dir, 'manifest.json'), '{ not json', 'utf8');
+
+    const error = await failureOf(runReport(projectRoot, 'epic-7'));
+
+    expect(error).toBeInstanceOf(InfraError);
+    expect((error as InfraError).message).toContain(broken.runId);
+  });
 });
 
 describe('report is a pure read (AC2, Q52)', () => {
