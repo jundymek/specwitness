@@ -102,6 +102,27 @@ export interface ProcessResult {
   readonly stderr: string;
   /** Integer milliseconds, from the injected `Clock` (AD-9). */
   readonly durationMs: number;
+  /**
+   * The child's process-group id, or `null` when no child ever started
+   * (`not-found`, `spawn-failed`).
+   *
+   * Equal to the child's pid: the implementation spawns detached, which makes
+   * the child the LEADER of a new group, and a group leader's pgid is its own
+   * pid. Reported so a caller can record it durably (see `onProcessGroup`) and
+   * so `specwitness clean` has something to replay after a crash.
+   *
+   * Added by story 3.2. The real runner ALWAYS sets it — every child it spawns
+   * is in its own process group, with no flag for a caller to remember, because
+   * a gate that silently missed one leaks descendants and nothing fails until
+   * somebody finds stray processes weeks later.
+   *
+   * OPTIONAL for one reason only, and it is not stylistic: the merged provider
+   * tests build `ProcessResult` literals by hand, and a REQUIRED field here
+   * would stop them compiling — i.e. it would force edits to exactly the tests
+   * the additive contract exists to protect. `undefined` therefore means "this
+   * result was constructed by a fake", never "the runner forgot".
+   */
+  readonly pgid?: number | null;
 }
 
 /**
@@ -129,8 +150,68 @@ export interface ProcessRunOptions {
    * a child waiting on input fails fast rather than hanging until the timeout.
    */
   readonly input?: string;
+  /**
+   * Called with the child's process-group id as soon as it is known, and
+   * AWAITED before the child's outcome is observed (story 3.2, AD-8).
+   *
+   * This is where AC1's durability ordering lives: `RunStore.recordProcessGroup`
+   * writes and fsyncs the pgid, and only once that has resolved does the run
+   * proceed. Batching the record to the end would leave a `kill -9` window in
+   * which a live process group exists that nothing on disk can find — the one
+   * state `specwitness clean` cannot recover from.
+   *
+   * WHAT THIS DOES AND DOES NOT ORDER, stated precisely because the imprecise
+   * version is tempting: a pgid cannot exist before `fork`, so the child is
+   * ALREADY RUNNING while the record is being fsynced, and it may spawn
+   * children of its own in that window. (Observed, not theorised: a test read
+   * the manifest as soon as the child's grandchild appeared and found the pgid
+   * not yet written.) What is guaranteed is that the record is durable before
+   * the run PROCEEDS — before the outcome is observed, before a worktree is
+   * used, before anything downstream acts on the run. The unrecorded window is
+   * the duration of one spawn plus one fsync, and it is the smallest window any
+   * OS makes available.
+   *
+   * If it REJECTS, the implementation kills the group and then propagates the
+   * error. That is deliberate and is not a violation of "run never rejects":
+   * that contract is about SUBPROCESS outcomes (ENOENT, a timeout, a non-zero
+   * exit), all of which remain values. A failure to record durably is a
+   * SpecWitness infrastructure failure — exit 3 — and swallowing it would leave
+   * behind exactly the untrackable process group the record exists to prevent.
+   *
+   * Optional. A caller that omits it still gets a process group and still gets
+   * group teardown on timeout; it simply keeps no record of the pgid.
+   */
+  readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
+  /**
+   * Milliseconds between SIGTERM and SIGKILL when this port tears a process
+   * group down. Defaults to the implementation's `TEARDOWN_GRACE_MS`.
+   *
+   * Injectable so a test can prove the escalation in milliseconds instead of
+   * waiting out a production-sized grace period — an escalation nobody can
+   * afford to assert is an escalation nobody has asserted.
+   */
+  readonly teardownGraceMs?: number;
 }
 
+/**
+ * EXACTLY ONE METHOD, still — story 3.2 preserved it deliberately.
+ *
+ * The OWNERSHIP block above says every method added is a method 3.2 must
+ * preserve, "so there is exactly one". 3.2 needed a teardown entry point for
+ * long-lived services (Epic 4) and did NOT put it here: a second required
+ * method would break every `ProcessRunner` fake in `tests/`, i.e. it would
+ * force edits to the very tests the additive contract exists to protect.
+ * Teardown is exported as a free function, `terminateProcessGroup`, from
+ * `src/infra/process-runner.ts`. `run` tears its own group down on timeout, so
+ * an ordinary caller needs nothing extra.
+ *
+ * AD-6/AD-7, stated here so no later story misreads it: this port CLASSIFIES,
+ * it never verdicts. `timed-out` is a `ProcessOutcome`, not a product FAIL.
+ * What a timeout MEANS is the caller's decision and differs by context — a
+ * provider adapter's timeout is a `ProviderError`, a gate command's timeout is
+ * story 3.4's call, a service readiness timeout is Epic 4's. The only promise
+ * made here is that the outcome is always classified and never a hang.
+ */
 export interface ProcessRunner {
   run(options: ProcessRunOptions): Promise<ProcessResult>;
 }
