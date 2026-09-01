@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: '2026-08-30'
-last_updated: '2026-08-31'
+last_updated: '2026-09-01'
 project: specwitness
 project_key: NOKEY
 tracking_system: file-system
@@ -67,7 +67,7 @@ development_status:
   3-6-terminal-json-renderers: done
   3-7-end-to-end-gates-only-verify: done
   3-8-provider-provenance-wiring: done
-  epic-3-retrospective: optional
+  epic-3-retrospective: done
 
   epic-4: backlog
   4-1-service-lifecycle-readiness: backlog
@@ -103,3 +103,18 @@ development_status:
   7-2-first-real-epic-verification-repair-loop: backlog
   7-3-hypothesis-verdict-report: backlog
   epic-7-retrospective: optional
+
+# Appended per the workflow note above; established at the Epic 3 retrospective
+# (earlier retros kept their action items in prose - carried open ones folded in).
+action_items:
+  - {id: e3-A, epic: 3, action: 'fix auto-review classifier (content-based; report and log one artefact)', owner: owner-harness, status: open}
+  - {id: e3-B, epic: 3, action: 'run review suite in a throwaway worktree copy (H-8)', owner: owner-harness, status: open}
+  - {id: e3-C, epic: 3, action: 'cohort strategy for subscription limits (3 freezes, ~7.5h)', owner: owner, status: open}
+  - {id: e3-D, epic: 3, action: 'ADR-003 prose to gateFailed?: string (carried A3)', owner: owner, status: open}
+  - {id: e3-E, epic: 3, action: 'CI restore-or-retire decision (carried A1, three epics)', owner: owner, status: open}
+  - {id: e3-F, epic: 3, action: 'SIGINT/Ctrl+C messaging on verify path - ADR or Epic 4 story', owner: owner, status: open}
+  - {id: e3-G, epic: 3, action: 'pre-registration empty-container window - follow-up or Epic 4 rider', owner: owner, status: open}
+  - {id: e3-H, epic: 3, action: 'spec template: PR title becomes squash subject, must be conventional', owner: owner, status: open}
+  - {id: e3-I, epic: 3, action: 'correct supervisor-brief 10 delta: docs/findings exists', owner: owner-harness, status: open}
+  - {id: e2-B3, epic: 2, action: 'addendum B stale line (carried from Epic 2)', owner: owner, status: open}
+  - {id: e2-5a-i, epic: 2, action: 'fenceMask closes on tagged inner fence (named follow-up, no ingest story yet)', owner: unassigned, status: open}
