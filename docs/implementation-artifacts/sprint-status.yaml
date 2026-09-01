@@ -58,7 +58,7 @@ development_status:
   epic-3: in-progress
   3-1-revision-resolution-isolated-worktree: ready-for-dev
   3-2-process-groups-run-manifest-specwitness-clean: ready-for-dev
-  3-3-staged-pipeline-state-machine: ready-for-dev
+  3-3-staged-pipeline-state-machine: review
   3-4-deterministic-gates-execution: ready-for-dev
   3-5-runresult-persistence-specwitness-report: ready-for-dev
   3-6-terminal-json-renderers: ready-for-dev

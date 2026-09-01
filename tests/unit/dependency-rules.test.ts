@@ -463,3 +463,74 @@ describe('AD-1 rules still forbid what they are meant to forbid', () => {
     expect(exitCode).not.toBe(0);
   });
 });
+
+/*
+ * Story 3.3 appends this describe; it restructures nothing above. Story 3.6 appends its
+ * own for `report-layer` in wave B. The three of us share this file and share zero
+ * `expect()`, which is a stronger guarantee than "we coordinated".
+ */
+describe('the pipeline-layer rule (story 3.3)', () => {
+  it('blocks src/pipeline from importing another application layer', async () => {
+    // The exact import the integrity stage would most naturally have written:
+    // `assertVerifiableContract` lives in src/authoring, and reaching for it is the
+    // obvious move until this rule says no. The rule is what turns "we decided the CLI
+    // edge passes the verified contract in" into something a later story cannot undo by
+    // accident — and this test is what proves the rule actually matches, since a clean
+    // depcruise run proves only that nobody has violated it yet.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'pipeline/__probe-authoring.ts',
+      "import { assertVerifiableContract } from '../authoring/verifiable.js';\n" +
+        'export const guard = assertVerifiableContract;\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('pipeline-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks src/pipeline from importing a renderer, so no stage can print', async () => {
+    // AD-11's structural half: one result model, many renderers. A pipeline that can
+    // reach src/report is a pipeline that can print, and a stage that prints is a second
+    // renderer nobody registered.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'report/__probe-terminal.ts', 'export const render = () => "x";\n');
+    await writeModule(
+      tree,
+      'pipeline/__probe-printing-stage.ts',
+      "import { render } from '../report/__probe-terminal.js';\nexport const p = render;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('pipeline-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('lets src/pipeline import domain, schemas, config, infra and its own siblings', async () => {
+    // The permit half, and it is not decoration: story 3.4's gates stage imports config
+    // (to read gate declarations) and infra (the process runner), and story 3.5's persist
+    // stage imports the run store. A rule that came out one directory too narrow would
+    // block the first wave-B story to write a line — which is why it is pinned here in
+    // wave A rather than discovered there.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'pipeline/__probe-sibling.ts', 'export const sibling = 1;\n');
+    await writeModule(
+      tree,
+      'pipeline/__probe-stage.ts',
+      "import { InfraError } from '../domain/errors.js';\n" +
+        "import { SCHEMA_VERSIONS } from '../schemas/versions.js';\n" +
+        "import { loadConfig } from '../config/index.js';\n" +
+        "import { SystemClock } from '../infra/clock.js';\n" +
+        "import { sibling } from './__probe-sibling.js';\n" +
+        'export const p = { InfraError, SCHEMA_VERSIONS, loadConfig, SystemClock, sibling };\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('pipeline-layer');
+    expect(exitCode).toBe(0);
+  });
+});

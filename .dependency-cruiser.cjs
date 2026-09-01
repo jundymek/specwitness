@@ -167,6 +167,31 @@ module.exports = {
       to: { path: '^src/', pathNot: ['^src/(domain|schemas|ingest)/'] },
     },
     {
+      name: 'pipeline-layer',
+      comment:
+        'AD-1: src/pipeline/** is application-layer, and a WIDER one than src/ingest. The ' +
+        'spine graph gives it PIPE -> DOM, PIPE -> SURF, PIPE -> CFG, PIPE -> INFRA and ' +
+        'PIPE -> PROV, so it may import domain, schemas, its own siblings, config, infra, ' +
+        'providers, surfaces and npm. What it may NOT import is another APPLICATION layer ' +
+        '(authoring, ingest, report) or the edge (cli) — and that is the half with teeth. ' +
+        'Two consequences the epic depends on: the pipeline cannot reach a renderer, so no ' +
+        'stage can print (AD-11 keeps one result model and many renderers); and the ' +
+        'integrity stage cannot import `assertVerifiableContract` from src/authoring, so ' +
+        'the CLI edge loads and verifies the contract and passes the result IN, exactly as ' +
+        'config is loaded once, validated and passed down. That seam is deliberate, not a ' +
+        'workaround. Node built-ins are allowed: the pipeline orchestrates adapters that ' +
+        'do I/O, though every stage receives its ports by injection.',
+      severity: 'error',
+      // `cli` is absent from the permit list rather than called out separately, exactly as
+      // `ingest-core-only` leaves it: `nothing-imports-cli` also fires, which is the
+      // established shape here and not worth a second rule.
+      from: { path: '^src/pipeline/' },
+      to: {
+        path: '^src/',
+        pathNot: ['^src/(domain|schemas|pipeline|config|infra|providers|surfaces)/'],
+      },
+    },
+    {
       name: 'no-circular',
       comment:
         'A cycle means the layer boundary is already gone and the modules can no longer ' +
