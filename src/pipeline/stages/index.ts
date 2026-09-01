@@ -24,6 +24,7 @@ import type { PersistDeps } from './persist.js';
 import { createProbesStage } from './probes.js';
 import { createResolveStage } from './resolve.js';
 import { createServicesStage } from './services.js';
+import type { ServicesStageDeps } from './services.js';
 import { createSetupStage } from './setup.js';
 import { createTeardownStage } from './teardown.js';
 import type { TeardownDeps } from './teardown.js';
@@ -63,6 +64,29 @@ export interface StageDependencies {
    * than falling back to the source repo, which would verify the wrong tree.
    */
   readonly gates?: GatesStageDeps;
+  /**
+   * The declared services plus the runner, port probe and process-group registry
+   * they need (story 4.1).
+   *
+   * Optional only because the CLI edge that binds it arrives in story 4.7. A run
+   * assembled without it starts no services and SAYS SO in its timeline. That is
+   * deliberately NOT the fail-closed refusal `gates` uses: an empty gate set
+   * aggregates to PASS, so an unwired gates run would read as a green build,
+   * whereas services adjudicate nothing and cannot manufacture a verdict on
+   * their own. See the header of `services.ts`.
+   *
+   * Note the interaction with `worktree` above, which is the same one gates has:
+   * services run in the worktree, so a run that binds services without binding
+   * the worktree seam raises an `InfraError` rather than starting the operator's
+   * application against the wrong tree.
+   *
+   * `registry` is REQUIRED inside this object on purpose — binding services
+   * without a way to reap them is the one composition that must be
+   * unrepresentable, because a leaked service is silent and makes the NEXT run
+   * fail. The CLI edge must also drain that same registry from
+   * `TeardownDeps.release` below, BEFORE removing the worktree.
+   */
+  readonly services?: ServicesStageDeps;
   /** Releases the worktree and the process group. Stories 3.1 and 3.2 bind it. */
   readonly teardown?: TeardownDeps;
   /**
@@ -84,7 +108,7 @@ export function createStages(deps: StageDependencies): Stage[] {
     createWorktreeStage(deps.worktree),
     createSetupStage(),
     deps.gates === undefined ? createUnwiredGatesStage() : createGatesStage(deps.gates),
-    createServicesStage(),
+    createServicesStage(deps.services),
     createDataStage(),
     createProbesStage(),
     createAggregateStage(),
