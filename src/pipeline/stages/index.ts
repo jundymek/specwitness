@@ -26,6 +26,7 @@ import { createSetupStage } from './setup.js';
 import { createTeardownStage } from './teardown.js';
 import type { TeardownDeps } from './teardown.js';
 import { createWorktreeStage } from './worktree.js';
+import type { WorktreeStageDeps } from './worktree.js';
 
 export interface StageDependencies {
   /**
@@ -37,6 +38,17 @@ export interface StageDependencies {
    * config is loaded once, validated and passed down.
    */
   readonly assertVerifiableContract: VerifiableContractGuard;
+  /**
+   * The git/worktree seam (story 3.1): the `Vcs` port, the manifest recorder and the
+   * repository resolved at the edge.
+   *
+   * Optional so that the many pipeline tests with nothing to isolate — and a future
+   * dry-run mode — keep a real stage list rather than a special-cased one. When it is
+   * absent the stage stays the placeholder and `worktreePath` remains `null`, which is
+   * the honest "no isolation yet" this directory's placeholders are designed to report.
+   * The CLI edge always binds it for a real `verify`.
+   */
+  readonly worktree?: WorktreeStageDeps;
   /** Releases the worktree and the process group. Stories 3.1 and 3.2 bind it. */
   readonly teardown?: TeardownDeps;
 }
@@ -46,7 +58,7 @@ export function createStages(deps: StageDependencies): Stage[] {
   return [
     createResolveStage(),
     createIntegrityStage(deps.assertVerifiableContract),
-    createWorktreeStage(),
+    createWorktreeStage(deps.worktree),
     createSetupStage(),
     createGatesStage(),
     createServicesStage(),
