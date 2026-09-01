@@ -50,6 +50,7 @@ import { FixedClock, SequenceIds } from '../fakes/ports.js';
 import {
   git,
   makeRepo,
+  recordNothing,
   repoStateSnapshot,
   type FixtureRepo,
 } from '../unit/vcs/fixture-repo.js';
@@ -97,7 +98,7 @@ describe('AC2 proof 1 — a clean run leaves the source repository byte-identica
     const { repo, root } = await repoWithRoot('ro-clean');
     const before = await repoStateSnapshot(repo.path);
 
-    const created = await vcs().addWorktree(root, repo.headSha);
+    const created = await vcs().addWorktree(root, repo.headSha, recordNothing);
     // Use it the way a gate would (story 3.4): build output lands in the
     // worktree, and the source repository must not notice.
     await mkdir(join(created.path, 'node_modules'), { recursive: true });
@@ -113,7 +114,7 @@ describe('AC2 proof 2 — a FAILING run leaves the source repository byte-identi
     const { repo, root } = await repoWithRoot('ro-failing');
     const before = await repoStateSnapshot(repo.path);
 
-    const created = await vcs().addWorktree(root, repo.headSha);
+    const created = await vcs().addWorktree(root, repo.headSha, recordNothing);
     let failed = false;
     try {
       await writeFile(join(created.path, 'partial.txt'), 'half a gate\n', 'utf8');
@@ -134,7 +135,7 @@ describe('AC2 proof 2 — a FAILING run leaves the source repository byte-identi
     const { repo, root } = await repoWithRoot('ro-add-fails');
     const before = await repoStateSnapshot(repo.path);
 
-    await expect(vcs().addWorktree(root, '0'.repeat(40))).rejects.toThrow(InfraError);
+    await expect(vcs().addWorktree(root, '0'.repeat(40), recordNothing)).rejects.toThrow(InfraError);
 
     expect(await repoStateSnapshot(repo.path)).toBe(before);
   });
@@ -259,7 +260,7 @@ setInterval(() => {}, 1000);
 describe('AC2 — SpecWitness writes nothing into the project working tree', () => {
   it('keeps every generated file inside the run directory and the temp worktree', async () => {
     const { repo, root } = await repoWithRoot('ro-no-project-files');
-    const created = await vcs().addWorktree(root, repo.headSha);
+    const created = await vcs().addWorktree(root, repo.headSha, recordNothing);
 
     // AD-8: SpecWitness-generated files live only in the run directory, never
     // in the project working tree. `.specwitness/runs/` is ignored via the
@@ -281,9 +282,9 @@ describe('the suite leaves nothing behind', () => {
     // still a leak — and because the previous revision of the unit suite left
     // nine empty containers under os.tmpdir() after a single `pnpm test`.
     const created = [
-      await vcs().addWorktree(root, repo.headSha),
-      await vcs().addWorktree(root, repo.firstSha),
-      await vcs().addWorktree(root, repo.headSha),
+      await vcs().addWorktree(root, repo.headSha, recordNothing),
+      await vcs().addWorktree(root, repo.firstSha, recordNothing),
+      await vcs().addWorktree(root, repo.headSha, recordNothing),
     ];
     for (const worktree of created) {
       await vcs().removeWorktree(root, worktree);
@@ -324,7 +325,7 @@ describe('the no-implicit-fetch guarantee, end to end', () => {
   it('leaves no lock files in the source repository', async () => {
     const { repo, root } = await repoWithRoot('ro-nolocks');
 
-    const created = await vcs().addWorktree(root, repo.headSha);
+    const created = await vcs().addWorktree(root, repo.headSha, recordNothing);
     await vcs().removeWorktree(root, created);
 
     // `GIT_OPTIONAL_LOCKS=0` keeps read-only queries from taking a lock in the

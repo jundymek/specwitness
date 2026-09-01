@@ -25,6 +25,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import type { RecordWorktreePath } from '../../../src/domain/vcs.js';
+
 const run = promisify(execFile);
 
 /**
@@ -50,6 +52,24 @@ export async function git(cwd: string, ...args: string[]): Promise<string> {
   });
   return stdout;
 }
+
+/**
+ * The explicit "nothing to record" argument for `addWorktree`.
+ *
+ * `addWorktree` REQUIRES a `RecordWorktreePath` — AD-8's write-before-use
+ * ordering is part of its signature rather than an optional hook, so a caller
+ * cannot create a registered worktree whose path was never persisted. Tests
+ * that are asserting removal or classification semantics genuinely have no
+ * manifest to write, and they say so with this rather than by omitting an
+ * argument: an omission reads as an oversight, a named no-op reads as the
+ * decision it is.
+ *
+ * The tests that care about the ORDERING pass a real callback instead, and
+ * assert the worktree is not yet registered at the moment it runs.
+ */
+export const recordNothing: RecordWorktreePath = async () => {
+  // Intentionally empty.
+};
 
 /** A scratch directory under the OS temp dir, realpath-resolved. */
 export async function scratchDir(label: string): Promise<string> {

@@ -27,8 +27,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   MIN_GIT_VERSION,
+  worktreeListArgs,
   compareVersions,
   parseGitVersion,
+  parseWorktreeList,
   revParseCommitArgs,
 } from '../../../src/infra/vcs.js';
 import type {
@@ -160,20 +162,24 @@ describe('WorktreeEntry', () => {
 
 describe('the declared minimum git version', () => {
   it('covers every flag the adapter actually passes', () => {
-    // Guards a real slip caught during this story's security pass. The first
-    // draft declared 2.17 — counting only the worktree features — while
-    // `revParseCommitArgs` passes `--end-of-options`, which is git 2.24.
+    // The floor moved TWICE during this story, both times because a guard
+    // outranked it, and this test is what makes the next move visible:
     //
-    // That separator is an argument-injection guard rather than a
-    // convenience: `--head` is operator input and a git refname may begin with
-    // a dash, so without it a ref named `--output=…` would be parsed as an
-    // OPTION to `rev-parse` instead of as a revision. Dropping the guard to
-    // support releases from before 2019 would trade a security property for
-    // compatibility, so the floor moved instead.
+    //   2.17  worktree remove --force        (the first draft's floor)
+    //   2.24  --end-of-options               (argument-injection guard)
+    //   2.36  worktree list --porcelain -z   (current floor)
+    //
+    // `--end-of-options` matters because `--head` is operator input and a git
+    // refname may begin with a dash, so without it a ref named `--output=…`
+    // parses as an OPTION to `rev-parse` rather than a revision. `-z` matters
+    // because a worktree path may legally contain a newline, and the non-`-z`
+    // format writes it verbatim — mis-parsing the FIRST record means resolving
+    // the wrong `mainWorktreeRoot`, i.e. verifying a tree nobody asked about.
     //
     // If a later change adds a newer flag, this is the line that moves with it.
     expect(compareVersions(MIN_GIT_VERSION, '2.36.0')).toBeGreaterThanOrEqual(0);
     expect(revParseCommitArgs('main')).toContain('--end-of-options');
+    expect(worktreeListArgs()).toContain('-z');
   });
 
   it('passes the ref as one argv element, after the separator', () => {
@@ -199,6 +205,79 @@ describe('the declared minimum git version', () => {
     expect(parseGitVersion('git version 2.50.1 (Apple Git-155)')).toBe('2.50.1');
     expect(parseGitVersion('git version 2.39.5')).toBe('2.39.5');
     expect(parseGitVersion('not a version banner')).toBeNull();
+  });
+});
+
+describe('parseWorktreeList', () => {
+  /** One NUL-terminated field, as `git worktree list --porcelain -z` emits it. */
+  const field = (text: string): string => `${text}\0`;
+
+  it('reads a main worktree on a branch and a detached one', () => {
+    const stdout =
+      field('worktree /repo') +
+      field('HEAD ' + 'a'.repeat(40)) +
+      field('branch refs/heads/main') +
+      field('') +
+      field('worktree /tmp/specwitness-x/worktree') +
+      field('HEAD ' + 'b'.repeat(40)) +
+      field('detached') +
+      field('');
+
+    const entries = parseWorktreeList(stdout);
+
+    expect(entries).toHaveLength(2);
+    // Main worktree first is git's documented contract, and it is how
+    // `RepoRoot.mainWorktreeRoot` is found.
+    expect(entries[0]?.path).toBe('/repo');
+    expect(entries[0]?.branch).toBe('refs/heads/main');
+    expect(entries[0]?.detached).toBe(false);
+    expect(entries[1]?.detached).toBe(true);
+    expect(entries[1]?.branch).toBeNull();
+  });
+
+  it('keeps a path containing a newline in one piece', () => {
+    // The whole reason for `-z`. A newline is a legal POSIX filename
+    // character, and the non-`-z` format writes it verbatim — so a line-based
+    // parser would split this into two records and hand back a truncated
+    // `mainWorktreeRoot`, i.e. verify a different tree.
+    const stdout =
+      field('worktree /repo/a\nb') + field('HEAD ' + 'c'.repeat(40)) + field('detached') + field('');
+
+    const entries = parseWorktreeList(stdout);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.path).toBe('/repo/a\nb');
+  });
+
+  it('marks a registration whose directory is gone as prunable', () => {
+    const stdout =
+      field('worktree /tmp/gone') +
+      field('HEAD ' + 'd'.repeat(40)) +
+      field('detached') +
+      field('prunable gitdir file points to non-existent location') +
+      field('');
+
+    expect(parseWorktreeList(stdout)[0]?.prunable).toBe(true);
+  });
+
+  it('returns nothing for empty output rather than a phantom entry', () => {
+    expect(parseWorktreeList('')).toEqual([]);
+  });
+
+  it('ignores an attribute it has never heard of', () => {
+    // git grows attributes over time. An unknown one must not shift the
+    // parse — which is why this reads by prefix rather than by position.
+    const stdout =
+      field('worktree /repo') +
+      field('HEAD ' + 'e'.repeat(40)) +
+      field('something-new-in-a-later-git value') +
+      field('branch refs/heads/main') +
+      field('');
+
+    const entries = parseWorktreeList(stdout);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.branch).toBe('refs/heads/main');
   });
 });
 

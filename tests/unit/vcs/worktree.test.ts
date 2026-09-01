@@ -25,7 +25,7 @@ import { SystemClock } from '../../../src/infra/clock.js';
 import { createProcessRunner } from '../../../src/infra/process-runner.js';
 import { createGitVcs, isInside, removeWorktreeAtPath } from '../../../src/infra/vcs.js';
 import type { RepoRoot } from '../../../src/domain/vcs.js';
-import { git, makeRepo, type FixtureRepo } from './fixture-repo.js';
+import { git, makeRepo, recordNothing, type FixtureRepo } from './fixture-repo.js';
 
 const scratches: string[] = [];
 const containers: string[] = [];
@@ -88,7 +88,7 @@ describe('addWorktree — where and what', () => {
   it('creates the worktree at the requested sha', async () => {
     const { repo, root } = await repoWithRoot('wt-sha');
 
-    const created = trackContainer(await vcs().addWorktree(root, repo.firstSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.firstSha, recordNothing));
 
     expect(created.sha).toBe(repo.firstSha);
     expect((await git(created.path, 'rev-parse', 'HEAD')).trim()).toBe(repo.firstSha);
@@ -99,7 +99,7 @@ describe('addWorktree — where and what', () => {
   it('creates it DETACHED, on no branch at all', async () => {
     const { repo, root } = await repoWithRoot('wt-detached');
 
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     // `symbolic-ref HEAD` succeeds on a branch and fails on a detached HEAD.
     // A worktree on a branch would let a later git write move that branch in
@@ -117,7 +117,7 @@ describe('addWorktree — where and what', () => {
   it('creates it under the OS temp dir and NOT inside the source repository', async () => {
     const { repo, root } = await repoWithRoot('wt-location');
 
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     // Both sides realpath-resolved: on macOS `tmpdir()` is a symlink into
     // `/private/var/…`, so comparing raw strings answers the wrong question.
@@ -133,7 +133,7 @@ describe('addWorktree — where and what', () => {
   it('does not disturb the source repository working tree', async () => {
     const { repo, root } = await repoWithRoot('wt-clean-status');
 
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     expect((await git(repo.path, 'status', '--porcelain')).trim()).toBe('');
 
@@ -143,8 +143,8 @@ describe('addWorktree — where and what', () => {
   it('gives each worktree its own container, so two runs cannot collide', async () => {
     const { repo, root } = await repoWithRoot('wt-unique');
 
-    const first = trackContainer(await vcs().addWorktree(root, repo.headSha));
-    const second = trackContainer(await vcs().addWorktree(root, repo.firstSha));
+    const first = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+    const second = trackContainer(await vcs().addWorktree(root, repo.firstSha, recordNothing));
 
     expect(first.path).not.toBe(second.path);
     expect(first.container).not.toBe(second.container);
@@ -161,12 +161,10 @@ describe('addWorktree — the AD-8 record-before-use ordering', () => {
     let hookPath: string | null = null;
 
     const created = trackContainer(
-      await vcs().addWorktree(root, repo.headSha, {
-        onPathReserved: async (path) => {
-          hookPath = path;
-          const entries = await vcs().listWorktrees(root);
-          registeredWhenHookRan = entries.some((entry) => entry.path === path);
-        },
+      await vcs().addWorktree(root, repo.headSha, async (path) => {
+        hookPath = path;
+        const entries = await vcs().listWorktrees(root);
+        registeredWhenHookRan = entries.some((entry) => entry.path === path);
       }),
     );
 
@@ -184,10 +182,8 @@ describe('addWorktree — the AD-8 record-before-use ordering', () => {
     const before = await vcs().listWorktrees(root);
 
     await expect(
-      vcs().addWorktree(root, repo.headSha, {
-        onPathReserved: async () => {
-          throw new InfraError('could not durably write the manifest', 'check free space');
-        },
+      vcs().addWorktree(root, repo.headSha, async () => {
+        throw new InfraError('could not durably write the manifest', 'check free space');
       }),
     ).rejects.toThrow(InfraError);
 
@@ -201,11 +197,9 @@ describe('addWorktree — the AD-8 record-before-use ordering', () => {
     let reserved: string | null = null;
 
     await expect(
-      vcs().addWorktree(root, repo.headSha, {
-        onPathReserved: async (path) => {
-          reserved = path;
-          throw new InfraError('nope', 'hint');
-        },
+      vcs().addWorktree(root, repo.headSha, async (path) => {
+        reserved = path;
+        throw new InfraError('nope', 'hint');
       }),
     ).rejects.toThrow(InfraError);
 
@@ -218,7 +212,7 @@ describe('addWorktree — failure', () => {
   it('raises a named InfraError when the sha does not exist', async () => {
     const { root } = await repoWithRoot('wt-bad-sha');
 
-    const attempt = vcs().addWorktree(root, '0'.repeat(40));
+    const attempt = vcs().addWorktree(root, '0'.repeat(40), recordNothing);
 
     await expect(attempt).rejects.toThrow(InfraError);
     await expect(attempt).rejects.toThrow(/could not create the verification worktree/);
@@ -234,10 +228,8 @@ describe('addWorktree — failure', () => {
     // sweeping tmpdir and hoping — a concurrent suite (H-8) has containers of
     // its own under the same directory.
     await expect(
-      vcs().addWorktree(root, '0'.repeat(40), {
-        onPathReserved: async (path) => {
-          container = dirname(path);
-        },
+      vcs().addWorktree(root, '0'.repeat(40), async (path) => {
+        container = dirname(path);
       }),
     ).rejects.toThrow(InfraError);
 
@@ -250,7 +242,7 @@ describe('addWorktree — failure', () => {
 describe('removeWorktree — the registration is what matters', () => {
   it('removes the checkout, the registration and the container', async () => {
     const { repo, root } = await repoWithRoot('wt-remove');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     await vcs().removeWorktree(root, created);
 
@@ -262,7 +254,7 @@ describe('removeWorktree — the registration is what matters', () => {
 
   it('leaves no administrative directory under .git/worktrees', async () => {
     const { repo, root } = await repoWithRoot('wt-admin');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
     const adminRoot = join(repo.path, '.git', 'worktrees');
     expect(await exists(adminRoot)).toBe(true);
 
@@ -280,7 +272,7 @@ describe('removeWorktree — the registration is what matters', () => {
     const { repo, root } = await repoWithRoot('wt-roundtrip');
     const before = await git(repo.path, 'worktree', 'list', '--porcelain');
 
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
     await vcs().removeWorktree(root, created);
 
     expect(await git(repo.path, 'worktree', 'list', '--porcelain')).toBe(before);
@@ -290,7 +282,7 @@ describe('removeWorktree — the registration is what matters', () => {
 describe('removeWorktreeAt — the path-only form clean (3.2) uses', () => {
   it('removes a worktree addressed by path alone', async () => {
     const { repo, root } = await repoWithRoot('wt-at-path');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     await vcs().removeWorktreeAt(root, created.path);
 
@@ -312,7 +304,7 @@ describe('removeWorktreeAt — the path-only form clean (3.2) uses', () => {
 
   it('is idempotent — removing twice is not an error', async () => {
     const { repo, root } = await repoWithRoot('wt-at-twice');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     await vcs().removeWorktreeAt(root, created.path);
     await expect(vcs().removeWorktreeAt(root, created.path)).resolves.toBeUndefined();
@@ -320,7 +312,7 @@ describe('removeWorktreeAt — the path-only form clean (3.2) uses', () => {
 
   it('does NOT delete a container it was not told about', async () => {
     const { repo, root } = await repoWithRoot('wt-at-container');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     await vcs().removeWorktreeAt(root, created.path);
 
@@ -334,7 +326,7 @@ describe('removeWorktreeAt — the path-only form clean (3.2) uses', () => {
 describe('removeWorktreeAtPath — the plain-string wrapper for clean (3.2)', () => {
   it('removes a worktree given only the repository path and the worktree path', async () => {
     const { repo, root } = await repoWithRoot('wt-wrapper');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     // bob's shape: `clean` holds a project root and recorded paths, nothing
     // else, and must not have to resolve a root it might be refused.
@@ -357,7 +349,7 @@ describe('removeWorktreeAtPath — the plain-string wrapper for clean (3.2)', ()
 describe('listWorktrees', () => {
   it('lists the main worktree first, then the ones we created', async () => {
     const { repo, root } = await repoWithRoot('wt-list');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     const entries = await vcs().listWorktrees(root);
 
@@ -369,7 +361,7 @@ describe('listWorktrees', () => {
 
   it('reports a registration whose directory has been deleted as prunable', async () => {
     const { repo, root } = await repoWithRoot('wt-prunable');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
 
     // The failure mode `git worktree remove --force` exists to avoid: deleting
     // the checkout directly leaves the registration behind.
@@ -391,7 +383,7 @@ describe('the worktree directory is a real checkout', () => {
   it('contains the tree at that revision', async () => {
     const { repo, root } = await repoWithRoot('wt-content');
 
-    const atFirst = trackContainer(await vcs().addWorktree(root, repo.firstSha));
+    const atFirst = trackContainer(await vcs().addWorktree(root, repo.firstSha, recordNothing));
     // `second.txt` only exists in the second commit, so its absence proves the
     // checkout is at the revision asked for rather than at the repo's HEAD.
     expect(await exists(join(atFirst.path, 'first.txt'))).toBe(true);
@@ -402,7 +394,7 @@ describe('the worktree directory is a real checkout', () => {
 
   it('is writable without touching the source repository', async () => {
     const { repo, root } = await repoWithRoot('wt-writable');
-    const created = trackContainer(await vcs().addWorktree(root, repo.headSha));
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
     await mkdir(join(created.path, 'build'), { recursive: true });
     await writeFile(join(created.path, 'build', 'out.txt'), 'gate output\n', 'utf8');
 

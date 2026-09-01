@@ -52,7 +52,7 @@ import type { ProcessResult, ProcessRunner } from '../domain/process-runner.js';
 import { SystemClock } from './clock.js';
 import { createProcessRunner } from './process-runner.js';
 import type {
-  AddWorktreeHooks,
+  RecordWorktreePath,
   CreatedWorktree,
   RefResolution,
   RefRole,
@@ -858,7 +858,7 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
   const addWorktree = async (
     root: RepoRoot,
     sha: string,
-    hooks?: AddWorktreeHooks,
+    record: RecordWorktreePath,
   ): Promise<CreatedWorktree> => {
     const unusable = await checkGitUsable(root.worktreeRoot);
     if (unusable !== null) {
@@ -902,7 +902,7 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // documents the same one-syscall shape for pgids, for the same reason: a
     // pgid cannot be known before fork.)
     try {
-      await hooks?.onPathReserved?.(worktreePath);
+      await record(worktreePath);
     } catch (cause) {
       await rm(container, { recursive: true, force: true });
       throw cause;

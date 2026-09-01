@@ -27,7 +27,7 @@ import type { RepoRoot } from '../../../src/domain/vcs.js';
 import { SystemClock } from '../../../src/infra/clock.js';
 import { createProcessRunner } from '../../../src/infra/process-runner.js';
 import { createGitVcs } from '../../../src/infra/vcs.js';
-import { git, makeRepo, scratchDir, type FixtureRepo } from './fixture-repo.js';
+import { git, makeRepo, recordNothing, scratchDir, type FixtureRepo } from './fixture-repo.js';
 
 const scratches: string[] = [];
 const containers: string[] = [];
@@ -85,7 +85,7 @@ async function repoWithRoot(label: string): Promise<{ repo: FixtureRepo; root: R
 describe('a failing `worktree list` must never read as "nothing is registered"', () => {
   it('makes removeWorktreeAt throw instead of silently reporting success', async () => {
     const { repo, root } = await repoWithRoot('fail-list-remove');
-    const created = await createGitVcs({ runner: real }).addWorktree(root, repo.headSha);
+    const created = await createGitVcs({ runner: real }).addWorktree(root, repo.headSha, recordNothing);
     containers.push(created.container);
 
     const blind = createGitVcs({
@@ -128,7 +128,7 @@ describe('a `worktree add` that fails AFTER registering must not leave the regis
       runner: runnerFailing((o) => isSubcommand(o, 'worktree', 'add'), 'timed-out'),
     });
 
-    await expect(flaky.addWorktree(root, repo.headSha)).rejects.toThrow(InfraError);
+    await expect(flaky.addWorktree(root, repo.headSha, recordNothing)).rejects.toThrow(InfraError);
 
     const entries = await createGitVcs({ runner: real }).listWorktrees(root);
     // Only the main worktree should remain.

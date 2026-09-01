@@ -190,18 +190,27 @@ export interface RootRequest {
 }
 
 /**
- * Hooks around worktree creation.
+ * Persists a reserved worktree path before the worktree exists.
  *
- * `onPathReserved` is what makes AD-8's "manifest written and fsynced BEFORE
- * the resource exists-in-use" ordering STRUCTURAL rather than a convention
- * somebody has to remember. The adapter reserves the path, awaits this hook,
- * and only then runs `git worktree add`. A hook that rejects aborts creation,
- * so a worktree cannot come into existence unrecorded.
+ * This is AD-8's "manifest written and fsynced BEFORE the resource
+ * exists-in-use" ordering, expressed as a REQUIRED argument to `addWorktree`.
+ * The adapter reserves the path, awaits this callback, and only then runs
+ * `git worktree add`; a callback that rejects aborts creation.
+ *
+ * Required rather than optional, and that distinction is the whole point. An
+ * optional hook makes the invariant opt-in: a caller could create a registered
+ * worktree without persisting its path, and a `kill -9` would then leave a
+ * registration that `clean` has no manifest entry to discover — precisely the
+ * crash-recovery guarantee this story exists to provide. An earlier revision
+ * had it optional while its own comment claimed a worktree "cannot come into
+ * existence unrecorded"; that claim was true only by convention. Now the type
+ * makes it true.
+ *
+ * A caller that genuinely has nothing to record — a test asserting removal
+ * semantics, say — passes an explicit no-op, which reads as the deliberate
+ * choice it is rather than as an omission nobody noticed.
  */
-export interface AddWorktreeHooks {
-  /** Called with the reserved path before any git write. Rejecting aborts. */
-  readonly onPathReserved?: (worktreePath: string) => Promise<void>;
-}
+export type RecordWorktreePath = (worktreePath: string) => Promise<void>;
 
 /**
  * The port.
@@ -234,8 +243,15 @@ export interface Vcs {
   /**
    * Creates a detached worktree at `sha`, under the OS temp dir — never inside
    * the source repository's working tree (AD-8). Throws `InfraError`.
+   *
+   * `record` is REQUIRED and is awaited before any git write, so a worktree
+   * cannot be registered without its path having been persisted first.
    */
-  addWorktree(root: RepoRoot, sha: string, hooks?: AddWorktreeHooks): Promise<CreatedWorktree>;
+  addWorktree(
+    root: RepoRoot,
+    sha: string,
+    record: RecordWorktreePath,
+  ): Promise<CreatedWorktree>;
 
   /**
    * Removes a worktree created by `addWorktree`, and its `mkdtemp` container.
