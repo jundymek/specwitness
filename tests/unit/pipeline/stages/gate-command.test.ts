@@ -64,6 +64,53 @@ describe('splitCommandLine: the ordinary shapes', () => {
     });
   });
 
+  it('keeps a quoted ARGUMENT VALUE as one argv element', () => {
+    // `--label="hello world"` is an ordinary shape and it must reach the child
+    // as ONE argument. Splitting it means the gate does not execute as the
+    // operator declared it — and avoiding a shell never required losing quote
+    // grouping, only quote INTERPRETATION.
+    expect(splitCommandLine('tool --label="hello world"')).toEqual({
+      binary: 'tool',
+      args: ['--label=hello world'],
+    });
+  });
+
+  it('keeps a single-quoted argument value together too', () => {
+    expect(splitCommandLine("jest --testPathPattern='a b'")).toEqual({
+      binary: 'jest',
+      args: ['--testPathPattern=a b'],
+    });
+  });
+
+  it('handles a quoted segment in the middle of an argument', () => {
+    expect(splitCommandLine('tool --x=a"b c"d')).toEqual({
+      binary: 'tool',
+      args: ['--x=ab cd'],
+    });
+  });
+
+  it('still splits on whitespace OUTSIDE a quoted argument value', () => {
+    expect(splitCommandLine('tool --label="a b" --other c')).toEqual({
+      binary: 'tool',
+      args: ['--label=a b', '--other', 'c'],
+    });
+  });
+
+  it('applies quote grouping to arguments but NOT to the executable token', () => {
+    // The asymmetry is deliberate and is what lets both properties hold: doctor
+    // RESOLVES the executable, so that token must be read exactly as doctor
+    // reads it; nothing resolves an argument, so grouping it faithfully costs
+    // no agreement. A single rule cannot do both.
+    // Only the EXECUTABLE is pinned. A first token with an embedded quote is
+    // malformed, no grouping of the remainder is more correct than another, and
+    // asserting one would pin behaviour nobody relies on — the property that
+    // matters is that doctor and the runner still name the same executable, so
+    // both fail on it in the same way.
+    const malformed = 'x"y z" --label="a b"';
+    expect(splitCommandLine(malformed).binary).toBe(firstToken(malformed));
+    expect(splitCommandLine(malformed).binary).toBe('x"y');
+  });
+
   it('treats a quote that does not START a token as a literal character', () => {
     // Matches firstToken, which only strips a quote at position 0. `x"y"z` is
     // one token whose text contains quotes, not an assembled `xyz`.

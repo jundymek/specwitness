@@ -95,21 +95,102 @@ function endOfBareToken(line: string, from: number): number {
  * Two rules, both chosen to match `firstToken` exactly rather than to be
  * independently reasonable:
  *
- *  1. A quote is significant ONLY at the start of a token. So
- *     `"/opt/my tools/runner"` is one token — the reason quote handling exists
- *     at all, since a path containing spaces must resolve — while `x"y"z` is
- *     one token whose text merely contains quote characters.
+ *  1. THE EXECUTABLE TOKEN is read exactly as `firstToken` reads it: a quote is
+ *     significant only at position 0. `"/opt/my tools/runner"` is one token —
+ *     the reason quote handling exists at all, since a path containing spaces
+ *     must resolve — while `x"y"z` is one token whose text merely contains
+ *     quote characters. This is not a stylistic choice: doctor RESOLVES that
+ *     token, so the two must agree about which token it is, or doctor stops
+ *     predicting whether a gate can run.
  *
- *  2. An unclosed quote degrades THAT TOKEN to a bare token; it does not change
- *     how the rest of the line is read. This is the subtle one, and it was found
- *     by the property test rather than reasoned out: an earlier version checked
- *     balance across the WHOLE line and fell back to a plain whitespace split
- *     when it failed. `firstToken` looks only at the first token, so the two
- *     disagreed on input like `'''` — where `firstToken` yields the empty string
- *     (a closed empty quote) and a whole-line fallback yields `'''`. A
- *     disagreement about which token is the executable is precisely what makes
- *     doctor's verdict stop predicting whether a gate can run.
+ *  2. ARGUMENT TOKENS are grouped with full quote awareness, so
+ *     `tool --label="hello world"` is ONE argv element rather than two.
+ *     Nothing resolves an argument, so there is no agreement to preserve — and
+ *     losing the grouping means the gate does not execute as declared, which
+ *     avoiding a shell never required. (Found in review; the earlier version
+ *     applied rule 1 to every token and silently split such arguments.)
+ *
+ *     Keeping the two rules distinct is what lets both properties hold at once:
+ *     exact agreement with doctor on the executable, faithful grouping on the
+ *     arguments. A single rule cannot do both, because full quote awareness on
+ *     the first token would make `x"y z"` resolve to `xy z` while doctor still
+ *     reports `x"y`.
+ *
+ *  3. An unclosed quote degrades THAT TOKEN to a bare token, quote included; it
+ *     does not change how the rest of the line is read. Found by the property
+ *     test rather than reasoned out: an earlier version checked balance across
+ *     the WHOLE line and fell back to a plain whitespace split, so it disagreed
+ *     with `firstToken` on input like `'''` — where `firstToken` yields the
+ *     empty string (a closed empty quote) and a whole-line fallback yields the
+ *     literal three characters.
  */
+function readExecutable(line: string, from: number): { token: string; next: number } {
+  const char = line[from];
+
+  if (char !== undefined && QUOTES.has(char)) {
+    const closing = line.indexOf(char, from + 1);
+    if (closing !== -1) {
+      return { token: line.slice(from + 1, closing), next: closing + 1 };
+    }
+    // Unclosed: fall through and read it bare, quote included — exactly what
+    // doctor reports as the token it could not resolve.
+  }
+
+  const end = endOfBareToken(line, from);
+  return { token: line.slice(from, end), next: end };
+}
+
+/**
+ * Read one ARGUMENT, honouring quotes wherever they appear inside it.
+ *
+ * An unterminated quote makes the whole token bare from its start, so
+ * `node "ok" "dangling` keeps its final token as the literal `"dangling`
+ * rather than swallowing the rest of the line — the same honest degradation
+ * rule 3 applies to the executable.
+ */
+function readArgument(line: string, from: number): { token: string; next: number } {
+  let buffer = '';
+  let quote: string | undefined;
+  let index = from;
+
+  while (index < line.length) {
+    const char = line[index];
+    if (char === undefined) {
+      break;
+    }
+
+    if (quote !== undefined) {
+      if (char === quote) {
+        quote = undefined;
+      } else {
+        buffer += char;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (SEPARATOR.test(char)) {
+      break;
+    }
+
+    if (QUOTES.has(char)) {
+      quote = char;
+      index += 1;
+      continue;
+    }
+
+    buffer += char;
+    index += 1;
+  }
+
+  if (quote !== undefined) {
+    const end = endOfBareToken(line, from);
+    return { token: line.slice(from, end), next: end };
+  }
+
+  return { token: buffer, next: index };
+}
+
 function tokenize(line: string): string[] {
   const tokens: string[] = [];
   let index = 0;
@@ -124,22 +205,11 @@ function tokenize(line: string): string[] {
       continue;
     }
 
-    if (QUOTES.has(char)) {
-      const closing = line.indexOf(char, index + 1);
-      if (closing !== -1) {
-        // An empty quoted token is a REAL argument (`cmd '' x`); dropping it
-        // would silently change the command the operator declared.
-        tokens.push(line.slice(index + 1, closing));
-        index = closing + 1;
-        continue;
-      }
-      // Unclosed: this token is the literal text, quote included — exactly what
-      // doctor reports as the token it could not resolve.
-    }
-
-    const start = index;
-    index = endOfBareToken(line, index);
-    tokens.push(line.slice(start, index));
+    const read = tokens.length === 0 ? readExecutable(line, index) : readArgument(line, index);
+    // An empty quoted token is a REAL argument (`cmd '' x`); dropping it would
+    // silently change the command the operator declared.
+    tokens.push(read.token);
+    index = read.next;
   }
 
   return tokens;
