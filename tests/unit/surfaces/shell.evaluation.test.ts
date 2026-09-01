@@ -402,9 +402,18 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     );
   });
 
-  it('observes NOTHING when the binary was missing and produced no output', async () => {
-    // "No OBSERVATION, no ref" — the cohort's conformance sentence. Nothing
-    // ran, so there is nothing honest to record.
+  it('records the member even when the binary was missing and produced no output', async () => {
+    // FR-28: a `not-found` becomes `execError`, which derives to a persisted
+    // criterion `error` — a NON-PASS result, which must carry at least one
+    // evidence reference. The gates stage may skip an empty attempt because an
+    // unstartable gate THROWS and produces no GateResult at all; a probe
+    // produces a result, so the same shortcut leaves it bare.
+    //
+    // Nothing is invented: `exitCode: null` is documented as "killed or never
+    // started", both streams are genuinely empty, and `displayCommand`
+    // preserves WHAT WAS ATTEMPTED — the thing a reader of a failed run most
+    // needs. (Caught by the Codex review pass; this test replaces one that
+    // asserted the opposite.)
     const { attempt, writer, sink } = await run({
       outcome: 'not-found',
       exitCode: null,
@@ -412,9 +421,28 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
       stderr: '',
     });
 
-    expect(attempt.evidence).toEqual([]);
-    expect(writer.writes).toEqual([]);
-    expect(sink.members).toEqual([]);
+    expect(sink.members).toHaveLength(1);
+    expect((sink.members[0] as CommandEvidence).displayCommand).toBe('node scripts/check.js');
+    expect((sink.members[0] as CommandEvidence).exitCode).toBeNull();
+    // Exactly one ref: the member. No stream files — an empty file is an
+    // artifact implying output that never existed.
+    expect(attempt.evidence).toHaveLength(1);
+    expect(writer.writes.map((w) => w.name)).toEqual([
+      'evidence/shell-E4-01-migrations-check-1.json',
+    ]);
+  });
+
+  it('gives an error-derived criterion at least one evidence reference (FR-28)', async () => {
+    const { attempt } = await run({
+      outcome: 'not-found',
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+    });
+    const derived = deriveCriterionResult(AUTOMATED, [attempt]);
+
+    expect(derived.status).toBe('error');
+    expect(derived.evidence?.length ?? 0).toBeGreaterThanOrEqual(1);
   });
 
   it('DOES record evidence for a timeout that printed something first', async () => {
@@ -670,6 +698,66 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     const second = await run({ stdout: 'two\n' }, { probeId: `${shared}beta` });
 
     expect(first.writer.writes.map((w) => w.name)).not.toEqual(
+      second.writer.writes.map((w) => w.name),
+    );
+  });
+
+  it('keeps two criteria that reuse one probe id apart', async () => {
+    // 4.2 enforces probe-id uniqueness only WITHIN a criterion — its comment
+    // says "Probe ids identify a probe within its criterion" — so two criteria
+    // may each hold a probe called `health`. A filename carrying the probe id
+    // but NOT the criterion id would give both the same file, and the first
+    // criterion's evidence ref would point at the second criterion's content:
+    // evidence attributed to the wrong criterion, which is worse than none.
+    //
+    // The stem is built from `${criterionId}-${probeId}`, so this holds by
+    // construction. Pinned rather than assumed. (Raised by 4.4, who hit it in
+    // this worse cross-criterion form after the Codex collision finding.)
+    const writer1 = recordingWriter();
+    const writer2 = recordingWriter();
+    const probe = {
+      probeId: 'health',
+      commandId: 'migrations-applied',
+      args: [],
+      argumentAllowlist: [],
+      assertions: [
+        {
+          description: 'exits cleanly',
+          target: { source: 'exitCode' },
+          comparison: 'equals',
+          expected: '0',
+        },
+      ],
+    };
+
+    for (const [criterionId, writer] of [
+      ['E4-01', writer1],
+      ['E4-02', writer2],
+    ] as const) {
+      await new ShellSurfaceExecutor({
+        runner: recordingRunner(processResult({ stdout: 'ok\n' })),
+        clock: new FixedClock(CAPTURED_AT),
+        cwd: WORKTREE,
+        command: resolvedCommand(),
+        writeEvidence: writer,
+        recordEvidence: recordingSink(),
+      }).execute({
+        criterionId,
+        surface: 'shell',
+        params: probe as unknown as Readonly<Record<string, unknown>>,
+      });
+    }
+
+    expect(writer1.writes.map((w) => w.name)).not.toEqual(writer2.writes.map((w) => w.name));
+  });
+
+  it('names the same probe identically across runs, so a re-run does not diff against itself', async () => {
+    // The fingerprint must be deterministic: a re-run has to produce identical
+    // paths, or a stored run directory diffs against its own repeat.
+    const first = await run({ stdout: 'ok\n' }, { probeId: 'a..b' });
+    const second = await run({ stdout: 'ok\n' }, { probeId: 'a..b' });
+
+    expect(first.writer.writes.map((w) => w.name)).toEqual(
       second.writer.writes.map((w) => w.name),
     );
   });

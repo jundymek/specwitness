@@ -828,22 +828,37 @@ export class ShellSurfaceExecutor implements SurfaceExecutor {
   /**
    * Captures `command` evidence for this attempt, and returns its references.
    *
-   * THE RULE (settled across all three Epic 4 surfaces at cohort intent-sync,
-   * 2026-09-01, so 4.7's conformance test sees one shape three times):
+   * THE RULE:
    *
-   *   Observed something -> `recordEvidence(member)`; write the serialized
-   *     member and ref it; and for EACH stream non-empty after redaction, write
-   *     the full redacted copy, ref it, and pass its path as that stream's
-   *     `fullPath`.
-   *   Observed nothing   -> no member, no file, no ref, no sink call.
+   *   EVERY attempt -> `recordEvidence(member)`; write the serialized member
+   *     and ref it.
+   *   Each stream non-empty after redaction -> also write the full redacted
+   *     copy, ref it, and pass its path as that stream's `fullPath`.
    *
-   * "No OBSERVATION, no ref" — not "no output", and not "execError". On THIS
-   * surface the primary observable is a NUMBER: a probe asserting
-   * `exitCode == 1` against a silent command observed something real, and would
-   * carry no evidence at all under a stream-shaped reading. So a `completed`
-   * spawn always counts; a timeout or a spawn failure counts when it printed
-   * something (story 3.2's runner returns captured output on a timeout rather
-   * than an empty string); a `not-found` never does, because nothing ran.
+   * EVERY attempt, with no "observed something" exception — and the exception
+   * is described because it was here and was wrong. This file first carried the
+   * cohort's "no OBSERVATION, no ref" rule, under which a `not-found` recorded
+   * nothing at all on the grounds that nothing ran. The Codex review pass
+   * caught it, and what settles it is a structural asymmetry with the gates
+   * stage rather than a matter of taste:
+   *
+   *   - `gates.ts`'s `recordAttempt` DOES return early on two empty streams.
+   *     It can: a gate that cannot start THROWS, produces no `GateResult` at
+   *     all, and its diagnosis lives in the `InfraError`. There is no persisted
+   *     non-pass result for FR-28 to govern.
+   *   - A probe is the opposite. A `not-found` becomes `execError`, which
+   *     `deriveCriterionResult` turns into a persisted criterion `error` — a
+   *     NON-PASS RESULT, and FR-28 requires at least one evidence reference on
+   *     every one of those. Recording nothing left exactly those results bare.
+   *
+   * Nothing on that path is invented: `commandId` and `displayCommand` are what
+   * was attempted, `exitCode` is `null` — which the port documents as meaning
+   * "killed or never started" — and both streams are genuinely empty. It
+   * preserves WHAT WAS ATTEMPTED, the one thing a reader of a failed run most
+   * needs and the one thing the old rule discarded.
+   *
+   * The stream files keep their own rule, because that reasoning does survive:
+   * an empty file is an artifact implying output that never existed.
    *
    * WHY THE FULL COPIES GO THROUGH `redactText` FIRST. A file in the run
    * directory IS persistence, and `boundedText` inside the constructor redacts
@@ -860,11 +875,6 @@ export class ShellSurfaceExecutor implements SurfaceExecutor {
     result: ProcessResult,
   ): Promise<EvidenceRef[]> {
     const { redaction } = this.#deps;
-    const observed = result.outcome === 'completed' || result.stdout !== '' || result.stderr !== '';
-    if (!observed) {
-      return [];
-    }
-
     const stem = evidenceStem(criterionId, params, attempt);
     const refs: EvidenceRef[] = [];
     const paths: { stdoutFullPath?: string; stderrFullPath?: string } = {};
