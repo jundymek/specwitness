@@ -74,6 +74,7 @@ import {
   renderStatusJson,
   type ContractStatus,
 } from '../contract/render.js';
+import { printWarning } from '../print-error.js';
 
 interface ContractOptions {
   readonly freeze?: boolean;
@@ -298,7 +299,9 @@ async function freezeContract(projectRoot: string, epic: string, clock: Clock): 
   const frozen = freeze(loaded.contract, clock.now());
 
   if (frozen !== loaded.contract) {
-    await writeContractFileAtomically(projectRoot, epic, serializeContract(frozen));
+    await writeContractFileAtomically(projectRoot, epic, serializeContract(frozen), {
+      onDurabilityWarning: printWarning,
+    });
   }
 
   // UJ-1's climax: the full lowercase-hex fingerprint, never truncated.
@@ -421,7 +424,9 @@ async function generateContract(
     providerCliVersion: provenance.providerCliVersion,
   });
 
-  await writeContractFileAtomically(projectRoot, epic, serializeContract(contract));
+  await writeContractFileAtomically(projectRoot, epic, serializeContract(contract), {
+    onDurabilityWarning: printWarning,
+  });
 
   report(epic, contract, hints);
 }

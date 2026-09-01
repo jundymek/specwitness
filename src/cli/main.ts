@@ -6,7 +6,14 @@ import { register as registerContract } from './commands/contract.js';
 import { register as registerDoctor } from './commands/doctor.js';
 import { register as registerInit } from './commands/init.js';
 import { register as registerReport } from './commands/report.js';
-import { EXIT, applyExitCode, exitCodeForError, type ExitCode } from './exit.js';
+import { register as registerVerify } from './commands/verify.js';
+import {
+  EXIT,
+  applyExitCode,
+  exitCodeForError,
+  takeRecordedExitCode,
+  type ExitCode,
+} from './exit.js';
 import { printError } from './print-error.js';
 
 /** Injected at build time by tsup, and by vitest for source-level runs. */
@@ -55,6 +62,7 @@ export function buildProgram(): Command {
   registerContract(program);
   registerReport(program);
   registerClean(program);
+  registerVerify(program);
 
   return program;
 }
@@ -74,7 +82,10 @@ export async function run(argv: readonly string[]): Promise<ExitCode> {
     }
 
     await buildProgram().parseAsync([...argv], { from: 'user' });
-    return EXIT.PASS;
+    // A command that COMPLETED may still have a non-zero answer: `verify` maps
+    // its run outcome through `exitCodeForOutcome` and records it. Nothing
+    // recorded means nothing to report, which is PASS.
+    return takeRecordedExitCode() ?? EXIT.PASS;
   } catch (err) {
     return handle(err);
   }
