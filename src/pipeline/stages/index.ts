@@ -15,7 +15,8 @@
 import type { Stage } from '../stage.js';
 import { createAggregateStage } from './aggregate.js';
 import { createDataStage } from './data.js';
-import { createGatesStage } from './gates.js';
+import { createGatesStage, createUnwiredGatesStage } from './gates.js';
+import type { GatesStageDeps } from './gates.js';
 import { createIntegrityStage } from './integrity.js';
 import type { VerifiableContractGuard } from './integrity.js';
 import { createPersistStage } from './persist.js';
@@ -50,6 +51,18 @@ export interface StageDependencies {
    * The CLI edge always binds it for a real `verify`.
    */
   readonly worktree?: WorktreeStageDeps;
+  /**
+   * The declared gates plus the runner and evidence writer they need (story 3.4).
+   *
+   * Optional only because the CLI edge that binds it arrives in story 3.7. A run
+   * assembled without it executes no gates and SAYS SO in its timeline — it must
+   * never read as a green build (see `createUnwiredGatesStage`).
+   *
+   * Note the interaction with `worktree` above: gates run in the worktree, so a run
+   * that binds gates without binding the worktree seam raises an `InfraError` rather
+   * than falling back to the source repo, which would verify the wrong tree.
+   */
+  readonly gates?: GatesStageDeps;
   /** Releases the worktree and the process group. Stories 3.1 and 3.2 bind it. */
   readonly teardown?: TeardownDeps;
   /**
@@ -70,7 +83,7 @@ export function createStages(deps: StageDependencies): Stage[] {
     createIntegrityStage(deps.assertVerifiableContract),
     createWorktreeStage(deps.worktree),
     createSetupStage(),
-    createGatesStage(),
+    deps.gates === undefined ? createUnwiredGatesStage() : createGatesStage(deps.gates),
     createServicesStage(),
     createDataStage(),
     createProbesStage(),
