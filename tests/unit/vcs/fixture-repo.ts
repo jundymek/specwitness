@@ -110,7 +110,14 @@ export async function makeRepo(label = 'repo'): Promise<FixtureRepo> {
   await git(path, 'config', 'user.name', 'SpecWitness Fixture');
   await git(path, 'config', 'user.email', 'fixture@specwitness.invalid');
 
-  await writeFile(join(path, 'first.txt'), 'first\n', 'utf8');
+  // The label goes into the CONTENT, so two fixture repos never share a commit
+  // sha. Measured, because it was surprising: identical content committed by
+  // the identity pinned above, within the same second, produces the SAME sha in
+  // two unrelated repositories. Any test comparing shas ACROSS repos — "this
+  // resolved my repo's head, not that one's" — would then pass vacuously, which
+  // is worse than failing. Making histories distinct is what gives those
+  // assertions teeth.
+  await writeFile(join(path, 'first.txt'), `first in ${label}\n`, 'utf8');
   await git(path, 'add', 'first.txt');
   await git(path, 'commit', '--quiet', '-m', 'first');
   const firstSha = (await git(path, 'rev-parse', 'HEAD')).trim();
@@ -119,7 +126,7 @@ export async function makeRepo(label = 'repo'): Promise<FixtureRepo> {
   await git(path, 'tag', '--annotate', tagName, '-m', 'annotated release');
   const tagObjectSha = (await git(path, 'rev-parse', tagName)).trim();
 
-  await writeFile(join(path, 'second.txt'), 'second\n', 'utf8');
+  await writeFile(join(path, 'second.txt'), `second in ${label}\n`, 'utf8');
   await git(path, 'add', 'second.txt');
   await git(path, 'commit', '--quiet', '-m', 'second');
   const headSha = (await git(path, 'rev-parse', 'HEAD')).trim();

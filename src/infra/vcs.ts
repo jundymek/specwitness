@@ -113,6 +113,43 @@ export const GIT_WORKTREE_TIMEOUT_MS = 300_000;
  */
 export const MIN_GIT_VERSION = '2.36.0';
 
+/**
+ * Environment variables that tell git WHICH REPOSITORY to operate on, withheld
+ * from every child this module spawns.
+ *
+ * `GIT_DIR` and `GIT_WORK_TREE` override repository discovery outright: with
+ * either set, git ignores the `cwd` it was given and works on the repository
+ * they name. SpecWitness is launched by harnesses, wrappers and hooks — this
+ * project's own agents run inside one — and any of them may legitimately have
+ * these exported. Inheriting them would let `resolveRoot` report a repository
+ * nobody asked about and, far worse, let `worktree add` WRITE into it. That is
+ * the same "verify the wrong tree" failure the linked-worktree handling exists
+ * to prevent, arriving through the environment instead of through the path.
+ *
+ * The rest of the list is the same hazard in smaller forms: an inherited index
+ * file, object directory, namespace or ceiling directory all change what a git
+ * command sees. Withheld rather than overridden, so git falls back to ordinary
+ * discovery from the `cwd` this module passes — which is the only thing it
+ * should ever obey.
+ *
+ * Deliberately NOT withheld: `GIT_TERMINAL_PROMPT` and `GIT_OPTIONAL_LOCKS`,
+ * which this module sets explicitly, and everything unrelated to repository
+ * selection (`PATH`, proxy settings, `HOME`) — a git that cannot find its own
+ * configuration is a different bug.
+ */
+const GIT_REPOSITORY_SELECTION_ENV = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_PREFIX',
+] as const;
+
 /** Prefix of the `mkdtemp` container each worktree is created inside. */
 const CONTAINER_PREFIX = 'specwitness-worktree-';
 
@@ -387,6 +424,10 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
       timeoutMs,
       env: {
         inherit: true,
+        // Repository selection comes from `cwd` and nothing else — see
+        // GIT_REPOSITORY_SELECTION_ENV. `withhold` is applied before `set` by
+        // the merged runner, which is exactly the order wanted here.
+        withhold: GIT_REPOSITORY_SELECTION_ENV,
         set: { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
       },
       input: '',

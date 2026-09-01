@@ -286,6 +286,46 @@ describe('worktree paths containing a newline', () => {
   });
 });
 
+describe('inherited git environment variables cannot redirect the repository', () => {
+  it('ignores a GIT_DIR pointing at a different repository', async () => {
+    const mine = await makeRepo('env-mine');
+    const other = await makeRepo('env-other');
+    scratches.push(mine.scratch, other.scratch);
+
+    // `GIT_DIR` overrides discovery entirely: with it set, git ignores `cwd`
+    // and operates on THAT repository. SpecWitness is launched by harnesses and
+    // scripts that may well have it exported — and the consequence here is the
+    // worst one this story has: resolving against, or worse WRITING a worktree
+    // into, a repository nobody asked about.
+    const previousDir = process.env.GIT_DIR;
+    const previousTree = process.env.GIT_WORK_TREE;
+    process.env.GIT_DIR = join(other.path, '.git');
+    process.env.GIT_WORK_TREE = other.path;
+    try {
+      const resolved = await createGitVcs({ runner: real }).resolveRoot({
+        explicitRoot: mine.path,
+        cwd: mine.path,
+      });
+
+      expect(resolved.outcome).toBe('resolved');
+      if (resolved.outcome !== 'resolved') return;
+      // The repository we asked for, not the one the environment named.
+      expect(resolved.root.mainWorktreeRoot).toBe(mine.path);
+
+      const ref = await createGitVcs({ runner: real }).resolveRef(resolved.root, 'head', 'main');
+      expect(ref.outcome).toBe('resolved');
+      if (ref.outcome !== 'resolved') return;
+      expect(ref.sha).toBe(mine.headSha);
+      expect(ref.sha).not.toBe(other.headSha);
+    } finally {
+      if (previousDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previousDir;
+      if (previousTree === undefined) delete process.env.GIT_WORK_TREE;
+      else process.env.GIT_WORK_TREE = previousTree;
+    }
+  });
+});
+
 describe('removal only ever touches worktrees SpecWitness created', () => {
   it('refuses to remove a linked worktree it did not create', async () => {
     const { repo, root } = await repoWithRoot('own-foreign');
