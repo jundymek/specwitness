@@ -772,6 +772,7 @@ async function awaitReadiness(
   const deadline = context.clock.now().getTime() + timeoutMs;
 
   let lastDetail = 'it was never probed';
+  let probed = false;
 
   for (;;) {
     // A spawn that FAILED — the runner rejected, which happens only when the
@@ -800,16 +801,34 @@ async function awaitReadiness(
       );
     }
 
+    const remaining = deadline - context.clock.now().getTime();
+
+    // THE DEADLINE IS CHECKED BEFORE EVERY PROBE BUT THE FIRST (Codex review,
+    // P1). Checking it only AFTER a probe let the sleep carry execution past the
+    // deadline, and the next probe was then accepted on its merits — so a
+    // service that became healthy LATE was reported ready and `ready.timeoutSec`
+    // was not a bound on acceptance at all. It has to be one: a service that
+    // takes longer to start than the project declared it may has not met its
+    // contract, and every probe after it would run against a system nobody
+    // agreed to wait for.
+    //
+    // "But the first" is what keeps the guarantee that every service is probed
+    // at least once, however small its `timeoutSec` — a config error should not
+    // silently become "never even looked".
+    if (probed && remaining <= 0) {
+      await failReadinessTimeout(deps, context, serviceId, service, spawn, timeoutMs, lastDetail);
+    }
+
     // Clamped to whatever is left of the readiness window, and floored at 1ms so
     // a budget can never be zero or negative (which `AbortSignal.timeout` would
     // treat as "abort immediately", turning every probe into a false negative).
-    const remainingMs = Math.max(1, deadline - context.clock.now().getTime());
     const requestBudgetMs = Math.min(
-      remainingMs,
+      Math.max(1, remaining),
       deps.requestTimeoutMs ?? READINESS_REQUEST_TIMEOUT_MS,
     );
 
     const poll = await pollReadiness(deps, serviceId, service, cwd, requestBudgetMs);
+    probed = true;
     if (poll.ready) {
       return;
     }
@@ -819,7 +838,10 @@ async function awaitReadiness(
       await failReadinessTimeout(deps, context, serviceId, service, spawn, timeoutMs, lastDetail);
     }
 
-    await sleep(pollIntervalMs);
+    // CLAMPED to the time left, so a poll interval longer than the remaining
+    // window cannot stretch the deadline it is being measured against — a 200ms
+    // `timeoutSec` must not become 250ms because that is the poll interval.
+    await sleep(Math.min(pollIntervalMs, Math.max(1, deadline - context.clock.now().getTime())));
   }
 }
 

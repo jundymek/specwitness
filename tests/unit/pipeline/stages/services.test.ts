@@ -329,6 +329,66 @@ describe('AC2 — a service that never becomes ready is INFRASTRUCTURE, never FA
     expect(context.run.criteria).toEqual([]);
   });
 
+  it('does NOT accept a service that becomes ready AFTER its deadline', async () => {
+    // Codex review, P1. The loop probed, checked the deadline, slept, and then
+    // probed again WITHOUT re-checking — so a poll that lands after the deadline
+    // was accepted anyway. `ready.timeoutSec` is a bound on ACCEPTANCE, not a
+    // suggestion: a service that comes up late has not met its contract, and
+    // reporting it healthy means every probe after it runs against a system that
+    // took longer to start than the project declared it may.
+    //
+    // Driven entirely by the injected clock and sleep, so this asserts the
+    // ordering in milliseconds rather than waiting anything out.
+    const services = declaredServices([
+      {
+        id: 'backend',
+        run: 'node server.js',
+        // 500ms deadline with a clock stepping 400ms: the second probe lands
+        // after it.
+        ready: { url: 'http://127.0.0.1:4501/health', timeoutSec: 1 },
+      },
+    ]);
+
+    const error = await infraErrorFrom(
+      createServicesStage(
+        deps({
+          services,
+          runner: recordingRunner('pending'),
+          // 503, then READY — but with this clock the second poll lands PAST the
+          // deadline, and a late 200 must not rescue the service.
+          httpProbe: httpProbe(503, 200),
+          sleep: instantSleep(),
+        }),
+      ).run(stageContext({ clock: fastClock() })),
+    );
+
+    expect(error.message).toContain('did not become ready');
+  });
+
+  it('clamps the poll sleep to the time remaining', async () => {
+    // A poll interval longer than what is left would sleep straight past the
+    // deadline and turn a 200ms timeout into a 250ms one.
+    const services = declaredServices([
+      { id: 'backend', run: 'node server.js', ready: { url: 'http://x/health', timeoutSec: 1 } },
+    ]);
+    const sleep = instantSleep();
+
+    await infraErrorFrom(
+      createServicesStage(
+        deps({
+          services,
+          runner: recordingRunner('pending'),
+          httpProbe: httpProbe(503),
+          sleep,
+          pollIntervalMs: 10_000,
+        }),
+      ).run(stageContext({ clock: fastClock() })),
+    );
+
+    // Never asked to sleep longer than the readiness window itself.
+    expect(Math.max(...sleep.waits)).toBeLessThanOrEqual(1_000);
+  });
+
   it("attaches the service's captured output as `command` evidence before throwing", async () => {
     // Q29. The accumulator survives a thrown stage, so this is what reaches the
     // report — an operator told "backend never became ready" with no output from

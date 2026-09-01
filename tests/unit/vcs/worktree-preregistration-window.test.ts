@@ -145,7 +145,17 @@ describe('a TMPDIR inside the repository is refused BEFORE anything is created t
       );
     });
 
-    expect(await readdir(inside)).toEqual([]);
+    // Asserted on `specwitness-worktree-*` SPECIFICALLY rather than on the
+    // directory being empty (Codex review, P2). `inside` is this test's TMPDIR
+    // for the duration of the call, and macOS system tooling legitimately writes
+    // bookkeeping files such as `xcrun_db` into whatever TMPDIR points at — so
+    // an emptiness assertion is red on some machines and green on others while
+    // saying nothing about SpecWitness either way. The claim being made is that
+    // SpecWitness created no worktree container, and that is what is checked.
+    const leftovers = (await readdir(inside)).filter((entry) =>
+      entry.startsWith('specwitness-worktree-'),
+    );
+    expect(leftovers).toEqual([]);
   });
 });
 
