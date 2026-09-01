@@ -56,13 +56,16 @@ development_status:
   epic-2-retrospective: done
 
   epic-3: in-progress
-  3-1-revision-resolution-isolated-worktree: review
+  3-1-revision-resolution-isolated-worktree: done
+  # follow-up PR keys of story 3.1 (distinct branch names; added at closure so the measurement can see them):
+  3-1-fix-isregistered-canonicalisation: done
+  3-1-fix-container-error: done
   3-2-process-groups-run-manifest-specwitness-clean: done
-  3-3-staged-pipeline-state-machine: review
+  3-3-staged-pipeline-state-machine: done
   3-4-deterministic-gates-execution: done
-  3-5-runresult-persistence-specwitness-report: review
-  3-6-terminal-json-renderers: review
-  3-7-end-to-end-gates-only-verify: review
+  3-5-runresult-persistence-specwitness-report: done
+  3-6-terminal-json-renderers: done
+  3-7-end-to-end-gates-only-verify: done
   3-8-provider-provenance-wiring: done
   epic-3-retrospective: optional
 
