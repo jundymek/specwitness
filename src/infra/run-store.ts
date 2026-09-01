@@ -689,8 +689,6 @@ export class RunStore {
       // SAME directory is what keeps it so — a cross-filesystem rename is a
       // copy, which would reintroduce the window this exists to close.
       await rename(staging, path);
-
-      await this.#syncDirectory(dir, 'directory');
     } catch (cause) {
       // Leave no half-written staging file behind for `clean` or an operator to
       // puzzle over. Best-effort: the original error is what matters.
@@ -702,6 +700,24 @@ export class RunStore {
         'check free space and permissions on the run directory',
       );
     }
+
+    // PAST THE POINT OF NO RETURN, and deliberately OUTSIDE the catch above.
+    //
+    // The rename has published the file. If the directory fsync then fails,
+    // saying "could not durably write <path>" would be false: the write did
+    // happen, and a caller told otherwise might retry or abandon a run whose
+    // record is already on disk. That is Epic 2 retro §5a defect (ii) — the
+    // same mistake `src/authoring/contract-file.ts` makes today, which the
+    // owner assigned to story 3.7 — and adding the rename above is what would
+    // have imported it into this shared helper. Caught by rambo (3.5) reading
+    // the branch before building on it.
+    //
+    // `#syncDirectory` raises its own accurate message ("could not make <dir>
+    // durable"), and it stays an ERROR rather than a warning: AC1's guarantee is
+    // that the record is durable before the resource is used, and an unflushed
+    // directory entry means it is not. Failing closed is right; describing the
+    // failure wrongly is not.
+    await this.#syncDirectory(dir, 'directory');
   }
 
   /**

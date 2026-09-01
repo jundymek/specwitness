@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -302,6 +302,69 @@ describe('RunStore lifecycle appends: the manifest is REPLACED, never truncated'
     await expect(
       store.writeEvidenceFile(runId, '.manifest.json.writing', 'x'),
     ).rejects.toBeInstanceOf(InfraError);
+  });
+});
+
+describe('RunStore: a post-rename failure is never reported as a failed write', () => {
+  it('says the directory could not be made durable, NOT that the write failed', async () => {
+    // Epic 2 retro §5a defect (ii), which adding stage-and-rename would have
+    // imported into this shared helper: with the directory fsync inside the
+    // same `try`, a post-rename failure reported "could not durably write
+    // <path>" although the rename had already published the file. A caller told
+    // that would retry or abandon a run whose record is already on disk.
+    // Caught by rambo (3.5) reading the branch before building on it.
+    //
+    // Simulated through the `onFsync` seam: a throwing hook is exactly what a
+    // failing `handle.sync()` looks like from `#syncDirectory`'s perspective.
+    let failDirectorySync = false;
+    const store = new RunStore(root, new FixedClock(CLOCK), new SequenceIds('a3f9'), {
+      onFsync: (target) => {
+        if (target === 'directory' && failDirectorySync) {
+          throw new Error('simulated directory fsync failure');
+        }
+      },
+    });
+
+    const { runId } = await store.createRun();
+    failDirectorySync = true;
+
+    const error = await store.recordProcessGroup(runId, 4242).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(InfraError);
+    // The accurate message: the barrier failed, not the write.
+    expect((error as InfraError).message).toMatch(/could not make .* durable/);
+    expect((error as InfraError).message).not.toMatch(/could not durably write/);
+
+    failDirectorySync = false;
+    // And the write really had happened — which is the whole reason the old
+    // message was a lie. The published file is the reaping evidence: it is
+    // written FIRST, so it is the one already renamed into place when the
+    // barrier failed. (The manifest append never ran, which is correct: the
+    // serialized operation aborted, and a manifest with no pgid is safe.)
+    const evidence = JSON.parse(
+      await readFile(join(store.runDir(runId), PROCESS_GROUPS_FILENAME), 'utf8'),
+    ) as Record<string, string>;
+    expect(evidence['4242']).toBe(CLOCK);
+  });
+
+  it('still reports a genuine write failure as a write failure', async () => {
+    // The other half: moving the sync out must not blunt the real case. A
+    // read-only run directory lets every READ succeed and every WRITE fail,
+    // which isolates `#writeDurably` rather than tripping over the manifest
+    // read first.
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+    const dir = store.runDir(runId);
+    await chmod(dir, 0o500);
+
+    try {
+      const error = await store.recordProcessGroup(runId, 1).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(InfraError);
+      expect((error as InfraError).message).toMatch(/could not durably write/);
+    } finally {
+      await chmod(dir, 0o700);
+    }
   });
 });
 
