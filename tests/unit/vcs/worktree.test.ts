@@ -310,16 +310,50 @@ describe('removeWorktreeAt — the path-only form clean (3.2) uses', () => {
     await expect(vcs().removeWorktreeAt(root, created.path)).resolves.toBeUndefined();
   });
 
-  it('does NOT delete a container it was not told about', async () => {
-    const { repo, root } = await repoWithRoot('wt-at-container');
+  it('removes the container too, since a path proves which one it is', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-container-owned');
     const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+
+    // Teardown only ever has the PATH: the stage publishes
+    // `environment.worktreePath` and the `CreatedWorktree` (with its container)
+    // does not survive the stage. So if the path-only form left the container,
+    // every single verification run would leak an empty temp directory — and so
+    // would every crashed run `clean` reaps.
+    //
+    // It is safe to remove because the ownership guard has already proved the
+    // shape: the path is `<specwitness-worktree-*>/worktree`, so its parent is
+    // OUR container by construction rather than by guess.
+    await vcs().removeWorktreeAt(root, created.path);
+
+    expect(await exists(created.path)).toBe(false);
+    expect(await exists(created.container)).toBe(false);
+  });
+
+  it('leaves a container alone if anything else is in it', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-container-occupied');
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+    await writeFile(join(created.container, 'someone-elses-file.txt'), 'not ours\n', 'utf8');
 
     await vcs().removeWorktreeAt(root, created.path);
 
-    // A path alone does not identify a container, and guessing at deleting a
-    // temp directory nobody claimed is not something a reaper should do.
+    // The emptiness check is what keeps this a removal of our own leftover
+    // rather than a recursive delete of whatever happens to be nearby.
+    expect(await exists(created.path)).toBe(false);
     expect(await exists(created.container)).toBe(true);
-    await rm(created.container, { recursive: true, force: true });
+  });
+
+  it('never removes a directory that is not one of our containers', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-foreign-parent');
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+
+    // The container cleanup keys on the `specwitness-worktree-*` name that the
+    // ownership guard has already proved, so a worktree living somewhere else
+    // could never drag its parent down with it. Asserted from the other side:
+    // the repository's own directory is untouched by a removal next door.
+    await vcs().removeWorktreeAt(root, created.path);
+
+    expect(await exists(repo.path)).toBe(true);
+    expect(await exists(repo.scratch)).toBe(true);
   });
 });
 

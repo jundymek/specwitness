@@ -43,9 +43,9 @@
  * and nothing reads `process.env` by name.
  */
 
-import { mkdtemp, realpath, rm, stat } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, rmdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 import { InfraError } from '../domain/errors.js';
 import type { ProcessResult, ProcessRunner } from '../domain/process-runner.js';
@@ -369,6 +369,24 @@ export function isSpecWitnessWorktreePath(worktreePath: string): boolean {
  */
 export function isObjectId(value: string): boolean {
   return /^[0-9a-f]{40}$/.test(value) || /^[0-9a-f]{64}$/.test(value);
+}
+
+/**
+ * Removes the `mkdtemp` container holding `worktreePath`, if it is now empty.
+ *
+ * Only ever called after `isSpecWitnessWorktreePath` has proved the shape, so the
+ * parent is a container this module minted. `rmdir` rather than a recursive
+ * remove is the safety property: it refuses a non-empty directory, so anything
+ * unexpected sitting alongside the worktree keeps both itself and the directory.
+ * Best-effort — a container that cannot be removed is a stray empty temp
+ * directory, which is not worth failing a teardown over.
+ */
+async function removeEmptyContainer(worktreePath: string): Promise<void> {
+  try {
+    await rmdir(dirname(worktreePath));
+  } catch {
+    // Not empty, already gone, or not ours to remove. All fine.
+  }
 }
 
 /** True when the path exists and is a directory. */
@@ -1087,6 +1105,27 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
         `run 'git worktree prune' in ${root.mainWorktreeRoot}`,
       );
     }
+
+    // And the container, which by now is provably ours and provably empty.
+    //
+    // This is a REVERSAL of the earlier contract, and the reason is worth
+    // recording. It originally left the container alone, agreed with story 3.2
+    // on the grounds that a reaper holding only a path "does not know the
+    // container and should not guess at deleting a temp directory". That
+    // reasoning was sound when it was made — and the ownership guard above
+    // retired it. A path that reaches this line has been proved to be
+    // `<specwitness-worktree-*>/worktree`, so its parent is the container this
+    // module minted, by construction rather than by inference.
+    //
+    // Leaving it was not a tidiness question either: teardown only ever has the
+    // PATH (the stage publishes `environment.worktreePath`; the
+    // `CreatedWorktree` does not survive it), so the container would leak on
+    // EVERY successful run as well as every crashed one it reaps.
+    //
+    // Removed non-recursively and only when empty, so this can never become a
+    // recursive delete of whatever happens to sit nearby — if anything else is
+    // in there, it stays, and so does the directory.
+    await removeEmptyContainer(worktreePath);
   };
 
   const removeWorktree = async (root: RepoRoot, worktree: CreatedWorktree): Promise<void> => {
