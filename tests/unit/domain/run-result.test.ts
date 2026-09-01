@@ -97,6 +97,7 @@ describe('RunResult — AD-11, one model many renderers', () => {
         gateEvidence({
           capturedAt: '2026-08-31T20:00:05.000Z',
           gateId: 'lint',
+          displayCommand: 'pnpm lint',
           status: 'pass',
           exitCode: 0,
           stdout: 'all good',

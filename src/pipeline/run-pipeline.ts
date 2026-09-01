@@ -47,6 +47,7 @@ import {
   IntegrityError,
   ProviderError,
   UsageError,
+  isSpecWitnessError,
 } from '../domain/errors.js';
 import type { Clock } from '../domain/ports.js';
 import type { InfraErrorClassification, RunOutcome } from '../domain/run-outcome.js';
@@ -129,6 +130,18 @@ function reasonOf(error: unknown): string {
 }
 
 /**
+ * The AD-7 remedy attached to a thrown error, if it carried one.
+ *
+ * The `HINT:` half of the house style. It has to travel on the timeline entry because the
+ * pipeline converts a stage's throw into an OUTCOME — so nothing is thrown out of the
+ * command, and the CLI edge's ERROR/HINT printer never runs. Before this the diagnosis
+ * survived a run and the remedy did not.
+ */
+function hintOf(error: unknown): string | undefined {
+  return isSpecWitnessError(error) ? error.hint : undefined;
+}
+
+/**
  * Refuses a stage list that is not the eleven names in the frozen order.
  *
  * A silently reordered pipeline would still produce a plausible-looking run whose skip
@@ -171,6 +184,7 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     status: StageStatus,
     durationMs: number,
     detail?: string,
+    hint?: string,
   ): void => {
     // Timeline details are PERSISTED to result.json and RENDERED to a terminal, which
     // makes them capture in AD-10's sense. A stage that fails while running a project
@@ -179,11 +193,17 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     // would be bypassed by the error path beside it. Redacting here rather than trusting
     // every present and future stage to remember is the difference between a guarantee
     // and a convention.
-    const safe = detail === undefined ? undefined : redactText(detail);
-    timeline.set(
+    // The hint is redacted for the same reason the detail is: both are persisted and
+    // rendered, and a hint can quote a path or a command.
+    const safeDetail = detail === undefined ? undefined : redactText(detail);
+    const safeHint = hint === undefined ? undefined : redactText(hint);
+    timeline.set(stage, {
       stage,
-      safe === undefined ? { stage, status, durationMs } : { stage, status, durationMs, detail: safe },
-    );
+      status,
+      durationMs,
+      ...(safeDetail === undefined ? {} : { detail: safeDetail }),
+      ...(safeHint === undefined ? {} : { hint: safeHint }),
+    });
   };
 
   const skip = (from: number, to: number, detail: string): void => {
@@ -255,7 +275,13 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
 
       if (error instanceof UsageError) {
         escaped = error;
-        record(stage.name, 'error', durationMs, `usage error escaped into the pipeline: ${reasonOf(error)}`);
+        record(
+          stage.name,
+          'error',
+          durationMs,
+          `usage error escaped into the pipeline: ${reasonOf(error)}`,
+          hintOf(error),
+        );
         skip(index + 1, TEARDOWN_INDEX, `skipped: the run stopped at '${stage.name}'`);
         break;
       }
@@ -274,13 +300,14 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
           'error',
           durationMs,
           `${classification}: ${stage.name} failed after the outcome was decided: ${reasonOf(error)}`,
+          hintOf(error),
         );
         skip(index + 1, TEARDOWN_INDEX, `skipped: the run stopped at '${stage.name}'`);
         break;
       }
 
       infraError = classification;
-      record(stage.name, 'error', durationMs, `${infraError}: ${reasonOf(error)}`);
+      record(stage.name, 'error', durationMs, `${infraError}: ${reasonOf(error)}`, hintOf(error));
       skip(index + 1, TEARDOWN_INDEX, `skipped: the run stopped at '${stage.name}'`);
       break;
     }
@@ -318,6 +345,7 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
       'error',
       durationMs,
       `${classifyInfraError(error)}: teardown failed after the outcome was decided: ${reasonOf(error)}`,
+      hintOf(error),
     );
   }
 
@@ -363,6 +391,7 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
         'error',
         existing?.durationMs ?? 0,
         `${classifyInfraError(error)}: the run result could not be written after teardown: ${reasonOf(error)}`,
+        hintOf(error),
       );
       // Rebuilt so the amended persist entry is visible, with the SAME outcome — the
       // write failed, the conclusion did not change.

@@ -85,6 +85,9 @@ export function shortGateEvidence(gateId: string, status: GateResult['status']):
   return gateEvidence({
     capturedAt: '2026-08-31T14:25:30Z',
     gateId,
+    // Required since the story 3.3 follow-up: a stored run must name the command that
+    // produced the output, not only the gate that failed.
+    displayCommand: `pnpm ${gateId}`,
     status,
     exitCode: status === 'pass' ? 0 : 1,
     stdout: `running ${gateId}\n`,
@@ -106,6 +109,9 @@ export function truncatedGateEvidence(gateId: string): Evidence {
   return gateEvidence({
     capturedAt: '2026-08-31T14:25:30Z',
     gateId,
+    // Required since the story 3.3 follow-up: a stored run must name the command that
+    // produced the output, not only the gate that failed.
+    displayCommand: `pnpm ${gateId}`,
     status: 'fail',
     exitCode: 1,
     stdout: 'x'.repeat(20_000),
@@ -157,6 +163,9 @@ export function hugeGateEvidence(gateId: string, bytes: number): Evidence {
   return gateEvidence({
     capturedAt: '2026-08-31T14:25:30Z',
     gateId,
+    // Required since the story 3.3 follow-up: a stored run must name the command that
+    // produced the output, not only the gate that failed.
+    displayCommand: `pnpm ${gateId}`,
     status: 'fail',
     exitCode: 1,
     stdout: line.repeat(Math.ceil(bytes / line.length)),

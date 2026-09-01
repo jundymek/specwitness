@@ -128,6 +128,29 @@ export interface RedactionOptions {
    * is applied globally whether or not the caller remembered the `g` flag.
    */
   readonly extraPatterns?: readonly RegExp[];
+  /**
+   * The text is a single shell COMMAND (a `DeclaredCommand` rendered for display), not
+   * captured output. Defaults to `false`.
+   *
+   * It changes exactly one thing: how far a sensitive header's value extends. In a
+   * command, `curl -H "Authorization: ..." http://host/health` has its header value
+   * inside a quoted argument, so redaction stops at that argument's closing quote and the
+   * URL survives - which is the whole point of `GateEvidence.displayCommand`. In captured
+   * output, redaction always runs to end of line.
+   *
+   * WHY THIS IS A FLAG RATHER THAN SOMETHING INFERRED, which cost several rounds to
+   * learn: the extent cannot be recovered from the text. An earlier version decided it by
+   * looking for an unmatched quote before the header, which is a PROXY - and ordinary
+   * English prose breaks it. `User's Authorization: prefix'Bearer SECRET` opens a "quote"
+   * at `User's`, closes it at the next apostrophe, and leaks the credential. No pattern
+   * can tell an apostrophe in prose from a shell delimiter, because nothing in the text
+   * distinguishes them.
+   *
+   * Only the CALLER knows which it is holding, so the caller says. The default is
+   * `false`, so anything that forgets to declare itself is treated as output and redacted
+   * to end of line - the failing-closed direction.
+   */
+  readonly shellCommand?: boolean;
 }
 
 /** Header names whose ENTIRE value is a credential. Compared case-insensitively. */
@@ -141,42 +164,204 @@ const SENSITIVE_HEADERS = new Set([
 ]);
 
 /**
- * Header lines in free text: `Authorization: Bearer …`, `Set-Cookie: …`.
+ * Header lines in free text: `Authorization: Bearer ...`, `Set-Cookie: ...`.
  *
  * Handled separately from the assignment rule below because a header value legitimately
- * contains spaces (`Bearer abc`), while an env-style value does not — one regex covering
+ * contains spaces (`Bearer abc`), while an env-style value does not - one regex covering
  * both would either stop at the first space and leak the rest, or swallow the whole line.
  *
- * DELIBERATELY NOT ANCHORED TO THE START OF A LINE. Captured gate and probe output is
- * full of wire logs whose header lines carry a prefix: curl's verbose mode writes
- * `> Authorization: Bearer …` and `< Set-Cookie: …`, and loggers prepend timestamps. An
- * anchored pattern misses every one of those, and the assignment rule below does not
- * catch them either (a header value has spaces in it), so the credential would reach
- * persisted evidence. Found by review, not by a test — which is why the test beside it
- * now covers the prefixed forms.
+ * DELIBERATELY NOT ANCHORED TO THE START OF A LINE. Captured gate and probe output is full
+ * of wire logs whose header lines carry a prefix: curl's verbose mode writes
+ * `> Authorization: Bearer ...` and `< Set-Cookie: ...`, and loggers prepend timestamps.
+ * An anchored pattern misses every one of those, and the assignment rule does not catch
+ * them either (a header value has spaces in it), so the credential would reach persisted
+ * evidence.
  *
- * The lookbehind is what keeps it from over-matching: the header name must not be
- * preceded by another name character, so `X-Custom-Authorization-Policy` is not treated
- * as an `authorization` header by accident. Redaction runs to end of line, because that
- * is exactly the extent of a header value.
+ * The lookbehind keeps it from over-matching: the header name must not be preceded by
+ * another name character, so `X-Custom-Authorization-Policy` is not treated as an
+ * `authorization` header by accident.
+ *
+ * HOW FAR THE VALUE EXTENDS IS DECIDED IN CODE, NOT IN THE PATTERN, and that is the
+ * point of `redactHeaderValue` below. Three attempts to express it as a regex each closed
+ * one case and opened another - stopping at the next quote leaked
+ * `Cookie: session="secret"; HttpOnly`, requiring a quoted unit leaked a truncated
+ * `Authorization: "Bearer secret`, and so on - because the pattern was approximating the
+ * question rather than asking it. The real question is not "is there a quote in the
+ * value"; it is "was this header written INSIDE a quoted shell argument", and the line
+ * prefix answers that exactly.
  */
 const SENSITIVE_HEADER_LINE =
-  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^\r\n]*/gi;
+  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)[^\S\r\n]*:/gi;
 
 /**
- * `NAME=value`, `NAME: value`, `"name": "value"`, `name='value'`.
+ * Index of the first unescaped `quote` in `text`, or -1.
  *
- * The value stops at whitespace or a structural character unless it is quoted, which is
- * what keeps `FOO=1 BAR=2` from collapsing into one redaction.
+ * A backslash escapes the character after it. Without this,
+ * `curl -H "Authorization: prefix\\"Bearer SECRET" ...` ends the value at the ESCAPED
+ * quote, and everything after it - the credential - survives into the persisted command.
  *
- * `[REDACTED]` is listed FIRST among the value alternatives so that redacting an already
- * redacted string is a no-op. Without it the unquoted alternative stops at the closing
- * `]` (excluded so JSON arrays terminate a value), the replacement appends its own, and
- * a second pass yields `[REDACTED]]` — the kind of drift that shows up as a diff in a
- * snapshot test long after anyone remembers why.
+ * Backslash escaping is applied inside single quotes too, which POSIX `sh` does not do.
+ * The divergence is deliberate and one-directional: in the only case where the two
+ * readings differ (an escaped delimiter of the same kind), treating it as escaped means
+ * scanning FURTHER and redacting MORE. This is a redactor, not a shell parser; where the
+ * two disagree it takes the reading that cannot leak.
  */
-const ASSIGNMENT =
-  /(["']?)([A-Za-z_][A-Za-z0-9_.-]*)\1([^\S\r\n]*[:=][^\S\r\n]*)(\[REDACTED\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;)\]}]*)/g;
+function indexOfUnescaped(text: string, quote: string): number {
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '\\') {
+      i += 1;
+      continue;
+    }
+    if (text[i] === quote) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Redacts every sensitive header value in `raw`.
+ *
+ * A hand-written scan rather than `String.replace`, for one reason: the extent of a value
+ * cannot be expressed in the pattern (see above), so the pattern matches only `name:` and
+ * this loop decides how much of what follows to consume. `replace` cannot do that -
+ * whatever the pattern matched is what it skips - and an earlier version that captured to
+ * end of line therefore examined only the FIRST sensitive header on each line. A wire log
+ * has one header per line and hid that completely; a shell command routinely has several,
+ * and `curl -H "Authorization: ..." -H "X-Api-Key: ..."` is exactly the shape
+ * `displayCommand` was added for. Found by re-reading this code, not by a review.
+ *
+ * Line ends and quote state are both tracked INCREMENTALLY as the scan advances - never by
+ * searching backwards from a match, and never by re-scanning a line that has already been
+ * measured. Every character of the input is examined at most a constant number of times,
+ * so k headers on a line of length L cost O(L) rather than O(k*L) - the same quadratic
+ * trap this file has already paid for once.
+ *
+ * The extent rules, restated where they are implemented:
+ *
+ *  - No quote open at the header: the value IS the rest of the line, so all of it goes. A
+ *    quote INSIDE an ordinary header value (`Cookie: session="secret"; HttpOnly`) is an
+ *    ordinary character, not a terminator.
+ *  - A quote open before the name: the value ends at that argument's closing quote, so
+ *    `curl -H "Authorization: ..." http://host/health` keeps its URL.
+ *  - Opened and never closed - a truncated capture: the whole line. Fail closed.
+ *
+ * Quote state comes from the ORIGINAL text, including across a region that was redacted,
+ * because it is the shell's quoting that decides where an argument ends.
+ */
+function redactSensitiveHeaders(raw: string, shellCommand: boolean): string {
+  const pattern = new RegExp(SENSITIVE_HEADER_LINE.source, SENSITIVE_HEADER_LINE.flags);
+  let out = '';
+  /** How much of `raw` is already copied (or replaced) into `out`. */
+  let emitted = 0;
+  /** How far the line/quote tracker has consumed. Only ever moves forwards. */
+  let scanned = 0;
+  let openQuote: string | undefined;
+  /**
+   * End of the line the scan is currently in (index of its `\n`, or the length).
+   *
+   * Cached rather than recomputed per match: `indexOf('\n', ...)` from each match would
+   * re-scan to the end of the line every time, which is O(k*L) for k headers on a line of
+   * length L. V8's character scan is fast enough that it does not show up at realistic
+   * sizes - 4000 headers on a 135 KB line measured 8 ms - but "fast enough today" is
+   * exactly what the quadratic this file already fixed looked like from the outside.
+   * With the cache each line is scanned once, so the total is genuinely linear.
+   */
+  let lineEnd = -1;
+
+  /** True when the previous character was a backslash, so the next one is escaped. */
+  let escaped = false;
+
+  const trackTo = (index: number): void => {
+    for (let i = scanned; i < index; i += 1) {
+      const character = raw[i];
+      if (escaped) {
+        // Carried across calls deliberately: `trackTo` is invoked at arbitrary offsets,
+        // and a backslash landing on the boundary must still escape what follows it.
+        escaped = false;
+        continue;
+      }
+      if (character === '\\') {
+        escaped = true;
+      } else if (character === '\n') {
+        openQuote = undefined;
+        escaped = false;
+      } else if (character === '"' || character === "'") {
+        if (openQuote === character) {
+          openQuote = undefined;
+        } else if (openQuote === undefined) {
+          openQuote = character;
+        }
+      }
+    }
+    scanned = index;
+  };
+
+  let match = pattern.exec(raw);
+  while (match !== null) {
+    const start = match.index;
+    trackTo(start);
+
+    const name = match[1] as string;
+    const valueStart = start + match[0].length;
+    if (valueStart > lineEnd) {
+      const newline = raw.indexOf('\n', valueStart);
+      lineEnd = newline === -1 ? raw.length : newline;
+    }
+    const value = raw.slice(valueStart, lineEnd);
+
+    // Captured output: the value IS the rest of the line, always. Only a declared command
+    // has shell quoting to respect, and only its caller can say that it is one.
+    let consumed = value.length;
+    if (shellCommand && openQuote !== undefined) {
+      const closing = indexOfUnescaped(value, openQuote);
+      if (closing !== -1) {
+        consumed = closing;
+      }
+    }
+
+    // The header NAME is kept: "an Authorization header was present" is diagnostic, and
+    // dropping it would cost information without buying any safety.
+    out += `${raw.slice(emitted, start)}${name}: ${REDACTED}`;
+    emitted = valueStart + consumed;
+    trackTo(emitted);
+    pattern.lastIndex = emitted;
+    match = pattern.exec(raw);
+  }
+
+  return out + raw.slice(emitted);
+}
+
+const ASSIGNMENT_VALUE = String.raw`(\[REDACTED\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;)\]}]*)`;
+
+/**
+ * A QUOTED name: `"apiKey": "..."`, `'password' = '...'`.
+ *
+ * Deliberately UNBOUNDED, and safe: `[^"'\r\n]+` cannot match the quote that terminates
+ * it, so the engine never backtracks into it - there is exactly one way to match. The
+ * bound on the bare form below would be actively harmful here. A JSON key longer than 256
+ * characters is unusual but perfectly legal, and with a bound the name could not reach its
+ * closing quote, the backreference would fail, and matching could not restart inside the
+ * name because a quote is required at the start - so `"<300 chars>_API_KEY":"secret"` would
+ * have gone through unredacted. Found by review, after the bound was added.
+ */
+const QUOTED_ASSIGNMENT = new RegExp(
+  String.raw`(["'])([^"'\r\n]+)\1([^\S\r\n]*[:=][^\S\r\n]*)` + ASSIGNMENT_VALUE,
+  'g',
+);
+
+/**
+ * A BARE name: `ANTHROPIC_API_KEY=...`, `password: ...`.
+ *
+ * This is the one that needs the length bound, because its character class CAN keep
+ * consuming past where the match must fail. Quoted names are handled above and never
+ * reach here: a bare match starting inside `"foo"` runs into the closing quote where a
+ * `[:=]` is required, and fails.
+ */
+const BARE_ASSIGNMENT = new RegExp(
+  String.raw`([A-Za-z_][A-Za-z0-9_.-]{0,255})([^\S\r\n]*[:=][^\S\r\n]*)` + ASSIGNMENT_VALUE,
+  'g',
+);
 
 /**
  * The trailing name segment that makes an assignment sensitive.
@@ -231,33 +416,41 @@ function isSensitiveName(name: string): boolean {
  * same as redacting once — which matters because evidence gets copied between fields.
  */
 export function redactText(raw: string, options?: RedactionOptions): string {
-  let text = raw.replace(SENSITIVE_HEADER_LINE, (_match, name: string) => {
-    // The header name is kept: "an Authorization header was present" is diagnostic, and
-    // dropping it would cost information without buying any safety. Whatever prefix the
-    // line carried is outside the match and survives untouched.
-    return `${name}: ${REDACTED}`;
-  });
+  let text = redactSensitiveHeaders(raw, options?.shellCommand === true);
+
+  const rewrite = (quote: string, name: string, separator: string, value: string): string => {
+    const quoted = value.startsWith('"') || value.startsWith("'");
+    const wrapper = quoted ? (value[0] as string) : '';
+
+    if (!isSensitiveName(name)) {
+      if (!quoted) {
+        return `${quote}${name}${quote}${separator}${value}`;
+      }
+      // A QUOTED value is consumed whole by the match, so a sensitive assignment nested
+      // inside an innocent one — `{"note":"ANTHROPIC_API_KEY=…"}` — would never be
+      // examined at all: the scan resumes past the closing quote. Recursing into the
+      // inner text closes that hole. It terminates because the inner string is strictly
+      // shorter than the value it came from.
+      return `${quote}${name}${quote}${separator}${wrapper}${redactText(value.slice(1, -1), options)}${wrapper}`;
+    }
+
+    return `${quote}${name}${quote}${separator}${wrapper}${REDACTED}${wrapper}`;
+  };
+
+  // Quoted names first, then bare ones. Two passes rather than one alternation because
+  // the two forms need different safety properties: the quoted name must be unbounded
+  // (a long JSON key is legal) and is safe unbounded, while the bare name must be bounded
+  // and cannot be safe otherwise.
+  text = text.replace(
+    QUOTED_ASSIGNMENT,
+    (_match, quote: string, name: string, separator: string, value: string) =>
+      rewrite(quote, name, separator, value),
+  );
 
   text = text.replace(
-    ASSIGNMENT,
-    (match, quote: string, name: string, separator: string, value: string) => {
-      const quoted = value.startsWith('"') || value.startsWith("'");
-      const wrapper = quoted ? (value[0] as string) : '';
-
-      if (!isSensitiveName(name)) {
-        if (!quoted) {
-          return match;
-        }
-        // A QUOTED value is consumed whole by the match, so a sensitive assignment
-        // nested inside an innocent one — `{"note":"ANTHROPIC_API_KEY=…"}` — would never
-        // be examined at all: the scan resumes past the closing quote. Recursing into
-        // the inner text closes that hole. It terminates because the inner string is
-        // strictly shorter than the value it came from.
-        return `${quote}${name}${quote}${separator}${wrapper}${redactText(value.slice(1, -1), options)}${wrapper}`;
-      }
-
-      return `${quote}${name}${quote}${separator}${wrapper}${REDACTED}${wrapper}`;
-    },
+    BARE_ASSIGNMENT,
+    (_match, name: string, separator: string, value: string) =>
+      rewrite('', name, separator, value),
   );
 
   for (const pattern of options?.extraPatterns ?? []) {
@@ -459,6 +652,25 @@ export interface CommandEvidence extends EvidenceCommon {
 export interface GateEvidence extends EvidenceCommon {
   readonly kind: 'gate';
   readonly gateId: string;
+  /**
+   * The gate's command as the Project Config declared it, for display only.
+   *
+   * REQUIRED, not optional, and that is the point of it: the only producer is the gates
+   * stage, every executed gate has a command, and an optional field is one a caller can
+   * skip on the run where it mattered.
+   *
+   * Without it a run directory is not a self-contained record. A reader six months later
+   * has `gateId: 'lint'` and 8 KB of output, and to learn what actually ran must recover
+   * the config as it was AT THAT REVISION - worst for the failing gate, which is the one
+   * anybody opens the record to understand. `CommandEvidence` already carried this, so
+   * its absence here was an asymmetry rather than a decision.
+   *
+   * A `DeclaredCommand` rendered through `commandText()` - the permitted direction. It is
+   * never parsed back and never executed from here, and it is redacted like any other
+   * string: a declared command can legitimately carry a credential, e.g.
+   * `curl -H "Authorization: Bearer ..."` used as a smoke gate.
+   */
+  readonly displayCommand: string;
   readonly status: GateStatus;
   readonly exitCode: number | null;
   readonly stdout: BoundedText;
@@ -541,6 +753,8 @@ function redactedExplanation(
 export interface GateEvidenceInput {
   readonly capturedAt: string;
   readonly gateId: string;
+  /** RAW command text from `commandText()`. It is redacted here. */
+  readonly displayCommand: string;
   readonly status: GateStatus;
   readonly exitCode: number | null;
   /** RAW output. It is redacted and bounded here. */
@@ -561,6 +775,7 @@ export function gateEvidence(input: GateEvidenceInput, options?: BoundedTextOpti
     kind: 'gate',
     capturedAt: input.capturedAt,
     gateId: input.gateId,
+    displayCommand: redactText(input.displayCommand, { ...options, shellCommand: true }),
     status: input.status,
     exitCode: input.exitCode,
     stdout: boundedText(input.stdout, streamOptions(options, input.stdoutFullPath)),
@@ -594,7 +809,7 @@ export function commandEvidence(
     kind: 'command',
     capturedAt: input.capturedAt,
     commandId: input.commandId,
-    displayCommand: redactText(input.displayCommand, options),
+    displayCommand: redactText(input.displayCommand, { ...options, shellCommand: true }),
     exitCode: input.exitCode,
     stdout: boundedText(input.stdout, streamOptions(options, input.stdoutFullPath)),
     stderr: boundedText(input.stderr, streamOptions(options, input.stderrFullPath)),

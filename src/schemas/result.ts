@@ -218,6 +218,13 @@ const GateEvidenceSchema = z
     ...evidenceCommon,
     kind: z.literal('gate'),
     gateId: z.string().min(1),
+    // Mirrors GateEvidence.displayCommand, added to the domain type in the story 3.3
+    // follow-up (owner-approved, requested by story 3.4). Required, like the domain
+    // field: without it a stored run names the gate that failed but not the command that
+    // produced the output, and a reader must recover the config as it was at that
+    // revision. This schema is `.strict()`, so every gate evidence record would fail to
+    // parse until the field was mirrored here.
+    displayCommand: z.string(),
     status: GateStatusSchema,
     exitCode: z.number().int().nullable(),
     stdout: BoundedTextSchema,
@@ -285,6 +292,11 @@ const StageTimelineEntrySchema = z
     status: z.enum(STAGE_STATUSES),
     durationMs: z.number().int().nonnegative(),
     detail: z.string().optional(),
+    // Mirrors StageTimelineEntry.hint (story 3.3 follow-up): the AD-7 remedy from the
+    // error that ended the stage. This schema is `.strict()`, so without the mirror a run
+    // that recorded a hint SERIALIZES but cannot be parsed back - meaning exactly the
+    // error runs whose remedy was just preserved would be unreadable from storage.
+    hint: z.string().optional(),
   })
   .strict();
 

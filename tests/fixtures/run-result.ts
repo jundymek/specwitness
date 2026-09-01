@@ -56,6 +56,17 @@ function everyEvidenceKind(): Evidence[] {
     gateEvidence({
       capturedAt: AT,
       gateId: 'lint',
+      // Added when `displayCommand` became required (story 3.3 follow-up): without it a
+      // stored run says which gate failed but not what actually ran.
+      //
+      // It carries a credential DELIBERATELY. The document now proves redaction on two
+      // paths rather than one, and this is the likelier of the two in practice: a gate is
+      // far more likely to be a `curl -H "Authorization: Bearer ..."` smoke check than to
+      // print a key to stdout. Since this fixture is the document everyone reads to learn
+      // the shape, carrying a secret in both places also teaches which fields are
+      // dangerous. (Story 3.5's agent asked for this; taken here because the field lands
+      // in the same PR, so the weaker fixture never exists on the epic branch.)
+      displayCommand: `curl -H "Authorization: Bearer ${SEEDED_SECRET}" http://localhost:3000/health`,
       status: 'fail',
       exitCode: 1,
       stdout: `ANTHROPIC_API_KEY=${SEEDED_SECRET}\n> Authorization: Bearer ${SEEDED_SECRET}\n`,
@@ -138,6 +149,16 @@ export function fullyPopulatedRunResult(): RunResult {
               : ('skipped' as const),
       durationMs: index < 5 || stage === 'services' ? (index + 1) * 100 : 0,
       ...(stage === 'gates' ? { detail: "gate 'lint' failed" } : {}),
+      // The `services` stage carries BOTH halves of the house style, so the persisted
+      // document proves a stored run can round-trip an ERROR/HINT pair. Without the hint
+      // mirrored into the strict schema, such a run serialized but could not be parsed
+      // back - i.e. exactly the error runs whose remedy had just been preserved.
+      ...(stage === 'services'
+        ? {
+            detail: 'infra: the service never became ready',
+            hint: 'check the readiness url and raise the timeout in .specwitness/config.yaml',
+          }
+        : {}),
     })),
     // One gate of each GateStatus.
     gates: [

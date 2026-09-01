@@ -24,7 +24,7 @@
  * AD-1: pure. Imports only sibling domain modules.
  */
 
-import type { Severity } from './contract.js';
+import type { Severity, Verifiability } from './contract.js';
 import { redactText } from './evidence.js';
 import type { EvidenceRef, RedactionOptions } from './evidence.js';
 import type { CriterionResult, CriterionStatus } from './result.js';
@@ -114,6 +114,17 @@ export interface ContractCriterionRef {
   readonly criterionId: string;
   readonly statement: string;
   readonly severity: Severity;
+  /**
+   * `automated` or `human`, from the contract.
+   *
+   * Load-bearing, not decorative: a `human` criterion may never auto-PASS (Q39), and this
+   * is the field that makes that enforceable. It was missing from this type at first, so
+   * `verifiability` was dropped at the integrity stage and a contract that correctly used
+   * the feature verified PASS at exit 0 - the machine answering the one question its
+   * author had written down that no machine may answer. Found by story 3.7's agent, whose
+   * exit-2 acceptance criterion it made unsatisfiable.
+   */
+  readonly verifiability: Verifiability;
 }
 
 /**
@@ -182,9 +193,28 @@ export function deriveCriterionResult(
     severity: criterion.severity,
   };
 
+  // HUMAN VERIFIABILITY DECIDES FIRST, before attempts are even looked at.
+  //
+  // `domain/contract.ts` is unconditional about this: human criteria "always resolve to
+  // NEEDS_HUMAN and never auto-PASS - that is one of only two NEEDS_HUMAN triggers in the
+  // whole product (Q39), which is why this is a PROPERTY OF THE CONTRACT rather than a
+  // judgement made later at run time". Attempts are a run-time judgement, so they cannot
+  // override it; that last clause is the whole point of the sentence.
+  //
+  // Dropping `verifiability` at the integrity stage is what made a contract whose author
+  // had written "no machine may answer this" verify PASS at exit 0. A first fix carried
+  // the field but applied it only when there were no attempts, reasoning that a future
+  // human-input surface should be able to report a recorded judgement. That was a silent
+  // redesign of a recorded decision, and review caught it: if Epic 4/5 wants a probe to
+  // adjudicate a human criterion, the way to get that is an ADR, not a branch here.
+  if (criterion.verifiability === 'human') {
+    return { ...base, status: 'needs_human' };
+  }
+
   const final = attempts.at(-1);
   if (final === undefined) {
-    // Nothing ran. Inert by definition, and the only case a gates-only run reaches.
+    // Nothing ran. Inert by definition, and the case every automated criterion of a
+    // gates-only run reaches.
     return { ...base, status: 'skipped' };
   }
 

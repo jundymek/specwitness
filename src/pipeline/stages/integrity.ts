@@ -86,6 +86,9 @@ export function createIntegrityStage(guard: VerifiableContractGuard): Stage {
         criterionId: criterion.id,
         statement: criterion.statement,
         severity: criterion.severity,
+        // Carried through because a `human` criterion may never auto-PASS (Q39). Dropping
+        // it here was how a contract that used the feature correctly verified PASS.
+        verifiability: criterion.verifiability,
       }));
 
       return stageOk(

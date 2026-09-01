@@ -11,6 +11,15 @@ const CRITERION: ContractCriterionRef = {
   criterionId: 'E3-01',
   statement: 'the health endpoint answers 200 within one second',
   severity: 'critical',
+  verifiability: 'automated',
+};
+
+/** The same criterion, but one only a person may adjudicate (Q39). */
+const HUMAN_CRITERION: ContractCriterionRef = {
+  criterionId: 'E3-09',
+  statement: 'the error copy reads as a human wrote it',
+  severity: 'normal',
+  verifiability: 'human',
 };
 
 function attempt(overrides: Partial<ProbeAttempt> = {}): ProbeAttempt {
@@ -242,5 +251,75 @@ describe('redaction of criterion diagnostics (Codex review, P1)', () => {
     const result = deriveCriterionResult(CRITERION, []);
 
     expect(result.statement).toBe(CRITERION.statement);
+  });
+});
+
+describe('a human-verifiability criterion never auto-passes (Q39)', () => {
+  // Q39 fixes human verifiability as one of exactly two NEEDS_HUMAN triggers, and
+  // `domain/contract.ts` says human criteria "always resolve to NEEDS_HUMAN and never
+  // auto-PASS — that is why this is a property of the contract rather than a judgement
+  // made later at run time".
+  //
+  // Before this, `verifiability` was dropped at the integrity stage, so a human criterion
+  // derived from zero attempts as `skipped`; `skipped` is inert in aggregation; and a
+  // frozen contract whose author had written "no machine may answer this" verified PASS
+  // at exit 0. Found by story 3.7's agent, whose exit-2 acceptance criterion it made
+  // unsatisfiable.
+
+  it('is needs_human with zero attempts, where an automated criterion is skipped', () => {
+    expect(deriveCriterionResult(HUMAN_CRITERION, []).status).toBe('needs_human');
+    expect(deriveCriterionResult(CRITERION, []).status).toBe('skipped');
+  });
+
+  it('carries the contract statement, so a report can say what a person must judge', () => {
+    const result = deriveCriterionResult(HUMAN_CRITERION, []);
+
+    expect(result.statement).toBe('the error copy reads as a human wrote it');
+    expect(result.criterionId).toBe('E3-09');
+  });
+
+  it('does not depend on probes existing — a gates-only run has still not had a person look', () => {
+    // The property must hold in Epic 3, before any probe exists. That is the whole point:
+    // it is a fact about the contract, not about what ran.
+    const result = deriveCriterionResult(HUMAN_CRITERION, []);
+
+    expect(result.status).not.toBe('pass');
+    expect(result.status).not.toBe('skipped');
+  });
+
+  it('stays needs_human even when a probe ran and its assertions held', () => {
+    // My first fix applied the rule only when there were NO attempts, reasoning that a
+    // future human-input surface should be able to report a recorded judgement. Review
+    // caught that as a silent redesign: `domain/contract.ts` says human criteria "always
+    // resolve to NEEDS_HUMAN", and that it is "a property of the contract rather than a
+    // judgement made later at run time" — attempts ARE a run-time judgement, so they
+    // cannot override it. Changing that is an ADR, not a branch in this function.
+    const result = deriveCriterionResult(HUMAN_CRITERION, [
+      {
+        attempt: 1,
+        observations: [],
+        assertionEvaluations: [{ description: 'a reviewer approved the copy', satisfied: true }],
+        evidence: [],
+        durationMs: 1,
+      },
+    ]);
+
+    expect(result.status).toBe('needs_human');
+  });
+
+  it('stays needs_human even when a probe ran and its assertions FAILED', () => {
+    // The other direction, and the more tempting one to allow: a mechanical `fail` on a
+    // criterion nobody may adjudicate mechanically is still not an answer.
+    const result = deriveCriterionResult(HUMAN_CRITERION, [
+      {
+        attempt: 1,
+        observations: [],
+        assertionEvaluations: [{ description: 'copy matches the spec text', satisfied: false }],
+        evidence: [],
+        durationMs: 1,
+      },
+    ]);
+
+    expect(result.status).toBe('needs_human');
   });
 });
