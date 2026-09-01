@@ -14,10 +14,9 @@
  *     worktree or a process group. That is implemented here, now, because
  *     story 3.2's `specwitness clean` depends on it.
  *
- *  2. **Atomic finalize (stage-and-rename)** for `result.json`. Deliberately
- *     NOT implemented here: its consumer arrives in story 3.5, and building a
- *     write discipline ahead of any caller means guessing at requirements
- *     nobody has stated yet. `RunStore` grows it in 3.2/3.5.
+ *  2. **Atomic finalize (stage-and-rename)** for `result.json` — `writeResult`
+ *     below, added by story 3.5. A half-written result is worse than none:
+ *     `report` would render a partial verdict as though it were complete.
  *
  * Layering: this is `src/infra`, so `node:fs` is legal here and nowhere in
  * `src/domain` or `src/schemas` (dependency-cruiser enforces it). Time and
@@ -27,10 +26,17 @@
  * `recordWorktree`, `recordProcessGroup`, `markReaped`, `readProcessGroupRecords`
  * and `writeEvidenceFile`, plus one private mutation queue and one private
  * manifest-update helper that reuses `#writeDurably`. Nothing existing moved:
- * `createRun`, `readManifest`, `listRuns`, `hasResult`, `runDir`,
- * `#writeDurably` and `#syncDirectory` are byte-for-byte what story 1.6 wrote.
- * Discipline 2 — atomic stage-and-rename for `result.json` — is STILL not
- * implemented here and is still story 3.5's, by name.
+ * `createRun`, `readManifest`, `listRuns`, `hasResult`, `runDir` and
+ * `#syncDirectory` are byte-for-byte what story 1.6 wrote. `#writeDurably` is
+ * NOT — story 3.2 rewrote it from truncate-in-place into stage-and-rename,
+ * because truncating was harmless while 1.6 only created files with it and
+ * destructive once appends made it rewrite the manifest on every record.
+ *
+ * WHAT STORY 3.5 ADDED: `writeResult` and `readResult`, i.e. discipline 2
+ * above. It reuses 3.2's `#writeDurably` rather than opening a second write
+ * path — once that helper renames, it IS the atomic finalize AD-8 names, and a
+ * parallel implementation is how two versions of "publish a file" end up
+ * disagreeing about atomicity.
  */
 
 import { existsSync } from 'node:fs';
@@ -39,6 +45,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import { InfraError } from '../domain/errors.js';
 import type { Clock, Ids } from '../domain/ports.js';
+import type { RunResult } from '../domain/run-result.js';
 import { isRunId, makeRunId, parseRunId } from '../domain/run-id.js';
 import {
   MANIFEST_FILENAME,
@@ -46,6 +53,11 @@ import {
   parseRunManifest,
   type RunManifest,
 } from '../schemas/manifest.js';
+import {
+  parseRunResult,
+  serializeRunResult,
+  type RunResultDocument,
+} from '../schemas/result.js';
 
 /** The project-local SpecWitness directory. Committed except for `runs/`. */
 const SPECWITNESS_DIR = '.specwitness';
@@ -84,15 +96,18 @@ const RESULT_FILENAME = 'result.json';
 export const PROCESS_GROUPS_FILENAME = 'process-groups.json';
 
 /**
- * Story 3.5's stage-and-rename staging name, reserved here by agreement.
+ * A staging name reserved by agreement — and NOTHING WRITES IT ANY MORE.
  *
- * `RunStore` does not write this file — story 3.5 does — but it must be
- * unwritable through `writeEvidenceFile`, and rambo (3.5) is right that this is
- * the sharper half of the guard. Clobbering `result.json` directly is bad;
- * landing on the STAGING name is worse, because the next finalize renames it
- * over `result.json`, so the substitution happens later and looks like a normal
- * successful write. The check belongs where the path is constructed, not in
- * each caller remembering not to be unlucky.
+ * Story 3.2 reserved this when story 3.5 expected to stage under its own name.
+ * 3.5 then reused `#writeDurably` instead, so the real staging name is
+ * `.result.json.writing`, which the `.<name>.writing` pattern check below
+ * already rejects. Kept as belt-and-braces, and labelled so nobody removes that
+ * pattern check believing this constant covers `result.json`. It does not.
+ *
+ * The reasoning it was added for still stands and is worth keeping: clobbering
+ * `result.json` directly is bad; landing on a STAGING name is worse, because
+ * the next finalize renames it over `result.json`, so the substitution happens
+ * later and looks like a normal successful write.
  */
 const RESULT_STAGING_FILENAME = '.result.json.tmp';
 
@@ -109,6 +124,21 @@ const RESERVED_FILENAMES: ReadonlySet<string> = new Set([
   RESULT_STAGING_FILENAME,
   PROCESS_GROUPS_FILENAME,
 ]);
+
+/**
+ * A stored `result.json`, as both the validated document and the file's own bytes.
+ *
+ * `report --json` writes `text` verbatim; a renderer consumes `document`. Keeping the raw
+ * text is what makes byte-equality with `--json` a property of construction rather than of
+ * two key orderings agreeing — see `readResult`.
+ */
+export interface StoredResult {
+  readonly document: RunResultDocument;
+  /** Exactly the bytes on disk. Never a re-serialization of `document`. */
+  readonly text: string;
+  /** Absolute path, for error messages that name what was read. */
+  readonly path: string;
+}
 
 /** A newly created run. */
 export interface CreatedRun {
@@ -326,6 +356,80 @@ export class RunStore {
         `check that ${path} and its directory are readable`,
       );
     }
+  }
+
+  /**
+   * AD-8 discipline 2 — the ATOMIC FINALIZE for `result.json` (story 3.5).
+   *
+   * A half-written result is worse than none: `report` would render a partial verdict
+   * as though it were complete. `#writeDurably` stages into the same directory, fsyncs,
+   * renames and then fsyncs the directory, so a reader sees either the previous complete
+   * document or the new complete one — never a mix. That is the whole mechanism, and it
+   * is reused rather than reimplemented: a second write path is how two implementations
+   * of "publish a file" end up disagreeing about atomicity.
+   *
+   * CALLED TWICE PER RUN, deliberately. The `persist` stage (position 10 of 11) writes
+   * the crash-durable snapshot that survives a kill during teardown; `onComplete` writes
+   * the finished document afterwards, with teardown's timeline entry and the real
+   * `finishedAt`. One writer, one serializer, two moments — and the second overwrite is
+   * atomic for the same reason the first is.
+   *
+   * ON A POST-RENAME FAILURE. `#writeDurably` publishes the file, then fsyncs the
+   * directory OUTSIDE its catch, so a barrier failure raises `#syncDirectory`'s own
+   * accurate message rather than claiming the write did not happen. That distinction is
+   * Epic 2 retro §5a defect (ii) — the shape this story was told not to repeat — and it
+   * is settled the same way in all three of this epic's stage-and-rename sites. The
+   * failure stays an ERROR here rather than a warning, because the entire point of
+   * persisting is that the run survives the crash it was written for; it is recorded on
+   * the `persist` timeline entry and NEVER rewrites the verdict.
+   *
+   * The bytes come from `serializeRunResult`, the one `RunResult` → bytes function in the
+   * repository (`src/schemas/result.ts`). `--json` renders through that same function, so
+   * stdout and this file are byte-identical by construction (Q53) rather than by two code
+   * paths agreeing.
+   */
+  async writeResult(runId: string, result: RunResult): Promise<void> {
+    // `runDir` validates the id before joining, so a traversal cannot reach the
+    // filesystem through this method any more than through the others.
+    const dir = this.runDir(runId);
+    await this.#writeDurably(dir, RESULT_FILENAME, serializeRunResult(result));
+  }
+
+  /**
+   * Reads a stored result, validated, WITH the file's own bytes.
+   *
+   * Both halves are returned on purpose. The document is what a renderer needs; the raw
+   * text is what `specwitness report --json` writes to stdout, verbatim.
+   *
+   * IT MUST BE THE FILE'S BYTES AND NOT A RE-SERIALIZATION. zod rebuilds a validated
+   * object in schema declaration order, which is not the order the domain's evidence
+   * constructors build their members in — so `serializeRunResult(parsed)` carries the same
+   * VALUES as the file and a different byte sequence. Echoing the stored text is what
+   * makes `report --json` byte-equal to `result.json` by construction, rather than only
+   * while two independent key orderings happen to agree.
+   *
+   * Pure read: creates nothing, even in a project that has never been initialised.
+   */
+  async readResult(runId: string): Promise<StoredResult> {
+    const path = join(this.runDir(runId), RESULT_FILENAME);
+
+    let text: string;
+    try {
+      text = await readFile(path, 'utf8');
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new InfraError(
+          `run ${runId} has no stored result (looked for ${path})`,
+          "the run ended before persisting; 'specwitness report <run-id>' shows its metadata, and 'specwitness clean' reaps anything it left behind",
+        );
+      }
+      throw new InfraError(
+        `could not read the stored result of ${runId}: ${describe(cause)}`,
+        `check that ${path} is readable`,
+      );
+    }
+
+    return { document: parseRunResult(text, path), text, path };
   }
 
 
