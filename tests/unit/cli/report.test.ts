@@ -34,6 +34,7 @@ import {
 import { InfraError, UsageError } from '../../../src/domain/errors.js';
 import { RunStore } from '../../../src/infra/run-store.js';
 import { FixedClock, SequenceIds } from '../../fakes/ports.js';
+import { fullyPopulatedRunResult } from '../../fixtures/run-result.js';
 
 let projectRoot: string;
 
@@ -270,6 +271,88 @@ describe('report reads a corrupt manifest honestly (AC2)', () => {
 
     expect(error).toBeInstanceOf(InfraError);
     expect((error as InfraError).message).toContain(broken.runId);
+  });
+});
+
+describe('report --json emits the stored document (AC2, Q53/Q55)', () => {
+  /** Seeds a run that actually has a persisted result. */
+  async function seedRunWithResult(instant: string, suffix: string, epic: string) {
+    const store = new RunStore(projectRoot, new FixedClock(instant), new SequenceIds(suffix));
+    const run = await store.createRun({ epic });
+    const result = { ...fullyPopulatedRunResult(), runId: run.runId, epic };
+    await store.writeResult(run.runId, result);
+    return { run, result };
+  }
+
+  it('writes the file BYTES verbatim, not a re-serialization', async () => {
+    // The harness contract (Q53): `--json` stdout and the stored file are the same bytes.
+    // A re-serialization of the parsed document would carry the same values in a
+    // different key order, so this asserts the file, not the model.
+    const { run } = await seedRunWithResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+    const onDisk = await readFile(join(run.dir, 'result.json'), 'utf8');
+
+    const { stdout } = await runReport(projectRoot, run.runId, { json: true });
+
+    expect(stdout).toBe(onDisk);
+  });
+
+  it('puts the document and nothing else on stdout', async () => {
+    const { run } = await seedRunWithResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+
+    const { stdout } = await runReport(projectRoot, run.runId, { json: true });
+
+    // `JSON.parse` of the WHOLE stream: a stray human line anywhere would break it.
+    expect(() => JSON.parse(stdout)).not.toThrow();
+    expect((JSON.parse(stdout) as { runId: string }).runId).toBe(run.runId);
+  });
+
+  it('keeps human output on stderr, where it cannot corrupt the document', async () => {
+    const { run } = await seedRunWithResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+
+    const { stderr } = await runReport(projectRoot, run.runId, { json: true });
+
+    expect(stderr).toContain(run.runId);
+  });
+
+  it('resolves an epic argument to that epic latest stored run', async () => {
+    await seedRunWithResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+    const { run: newer } = await seedRunWithResult('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
+
+    const { stdout } = await runReport(projectRoot, 'epic-7', { json: true });
+
+    expect((JSON.parse(stdout) as { runId: string }).runId).toBe(newer.runId);
+  });
+
+  it('refuses rather than emitting a partial document when the run stored none', async () => {
+    // Exit 3 with nothing on stdout. Printing `{}` or a half-document would hand a
+    // harness something parseable that is not a run result.
+    const store = new RunStore(
+      projectRoot,
+      new FixedClock('2026-08-30T10:00:00.000Z'),
+      new SequenceIds('aaaa'),
+    );
+    const run = await store.createRun({ epic: 'epic-7' });
+
+    const error = await failureOf(runReport(projectRoot, run.runId, { json: true }));
+
+    expect(error).toBeInstanceOf(InfraError);
+    expect((error as InfraError).message).toContain(run.runId);
+  });
+
+  it('refuses a corrupt document rather than passing it through', async () => {
+    // Echoing the bytes must not mean echoing anything. The document is validated first,
+    // so a harness never receives something that does not match the published schema.
+    const store = new RunStore(
+      projectRoot,
+      new FixedClock('2026-08-30T10:00:00.000Z'),
+      new SequenceIds('aaaa'),
+    );
+    const run = await store.createRun({ epic: 'epic-7' });
+    await writeFile(join(run.dir, 'result.json'), '{"schemaVersion": 1}', 'utf8');
+
+    const error = await failureOf(runReport(projectRoot, run.runId, { json: true }));
+
+    expect(error).toBeInstanceOf(InfraError);
   });
 });
 

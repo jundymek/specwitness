@@ -10,7 +10,7 @@
  * argument parsing, the real exit table and the real stderr formatting.
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { RunStore } from '../../src/infra/run-store.js';
 import { FixedClock, SequenceIds } from '../fakes/ports.js';
+import { fullyPopulatedRunResult } from '../fixtures/run-result.js';
 
 const CLI = fileURLToPath(new URL('../../dist/cli.js', import.meta.url));
 
@@ -310,5 +311,111 @@ describe('report argument rule at the binary boundary (3.5 AC2)', () => {
 
     expect(stdout).toMatch(/epic/i);
     expect(stdout).toMatch(/run id/i);
+  });
+});
+
+/**
+ * Story 3.5 AC2 — `report --json` through the built binary.
+ *
+ * The harness contract (Q53/Q55) is a property of the SHIPPED command, not of a function:
+ * exit code for gating, `--json` stdout for detail. These assert it where a consumer would
+ * meet it — a real process, real streams, real pipe behaviour.
+ */
+
+/** Seeds a run that actually has a persisted result. */
+async function seedRunWithStoredResult(instant: string, suffix: string, epic: string) {
+  const store = new RunStore(projectRoot, new FixedClock(instant), new SequenceIds(suffix));
+  const run = await store.createRun({ epic });
+  await store.writeResult(run.runId, {
+    ...fullyPopulatedRunResult(),
+    runId: run.runId,
+    epic,
+  });
+  return run;
+}
+
+describe('report --json is the harness contract (3.5 AC2)', () => {
+  it('stdout is byte-identical to the stored result.json', async () => {
+    const run = await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+    const onDisk = await readFile(join(run.dir, 'result.json'), 'utf8');
+
+    const { exitCode, stdout } = await runReport(['report', run.runId, '--json']);
+
+    expect(exitCode).toBe(0);
+    // execa strips one trailing newline from `stdout`, so compare against the file with
+    // the same treatment rather than loosening the assertion to `toContain`.
+    expect(stdout).toBe(onDisk.replace(/\n$/, ''));
+  });
+
+  it('puts nothing but the document on stdout, so `| jq` needs no filtering', async () => {
+    const run = await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+
+    const { stdout } = await runReport(['report', run.runId, '--json']);
+
+    expect(() => JSON.parse(stdout)).not.toThrow();
+    expect((JSON.parse(stdout) as { runId: string }).runId).toBe(run.runId);
+  });
+
+  it('sends the human line to stderr, never to stdout', async () => {
+    const run = await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+
+    const { stderr, stdout } = await runReport(['report', run.runId, '--json']);
+
+    expect(stderr).toContain(run.runId);
+    expect(() => JSON.parse(stdout)).not.toThrow();
+  });
+
+  it('accepts an epic argument and renders its latest stored run', async () => {
+    await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+    const newer = await seedRunWithStoredResult('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
+
+    const { exitCode, stdout } = await runReport(['report', 'epic-7', '--json']);
+
+    expect(exitCode).toBe(0);
+    expect((JSON.parse(stdout) as { runId: string }).runId).toBe(newer.runId);
+  });
+
+  it('exits 3 with an empty stdout when the run stored no result', async () => {
+    // A harness must never receive a parseable non-result. Nothing on stdout at all is
+    // the only safe answer.
+    const store = new RunStore(
+      projectRoot,
+      new FixedClock('2026-08-30T10:00:00.000Z'),
+      new SequenceIds('aaaa'),
+    );
+    const run = await store.createRun({ epic: 'epic-7' });
+
+    const { exitCode, stdout, stderr } = await runReport(['report', run.runId, '--json']);
+
+    expect(exitCode).toBe(3);
+    expect(stdout).toBe('');
+    expect(stderr).toContain('ERROR: ');
+    expect(stderr).toContain('HINT: ');
+  });
+
+  it('re-renders without re-executing or creating anything (Q52)', async () => {
+    // The strongest available form of "never re-executes": capture the run directory's
+    // full listing and mtimes, render, and assert nothing moved. That catches a write
+    // nobody intended, which a throwing ProcessRunner would not.
+    const run = await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+
+    const before = await Promise.all(
+      (await readdir(run.dir)).sort().map(async (name) => {
+        const info = await stat(join(run.dir, name));
+        return `${name}:${info.mtimeMs}:${info.size}`;
+      }),
+    );
+
+    await runReport(['report', run.runId, '--json']);
+    await runReport(['report', run.runId]);
+
+    const after = await Promise.all(
+      (await readdir(run.dir)).sort().map(async (name) => {
+        const info = await stat(join(run.dir, name));
+        return `${name}:${info.mtimeMs}:${info.size}`;
+      }),
+    );
+
+    expect(after).toEqual(before);
   });
 });

@@ -108,8 +108,9 @@ export function register(program: Command): void {
     .command('report')
     .description('render a stored run without re-executing anything')
     .argument('<run-id|epic>', `a run id, or an epic id — ${REPORT_ARGUMENT_RULE}`)
-    .action(async (target: string) => {
-      const output = await runReport(process.cwd(), target);
+    .option('--json', 'emit the stored result document on stdout (stable schema)')
+    .action(async (target: string, options: { json?: boolean }) => {
+      const output = await runReport(process.cwd(), target, options);
       process.stdout.write(output.stdout);
       if (output.stderr !== '') {
         process.stderr.write(output.stderr);
@@ -130,7 +131,7 @@ export function register(program: Command): void {
 export async function runReport(
   projectRoot: string,
   target: string,
-  _options: ReportOptions = {},
+  options: ReportOptions = {},
 ): Promise<ReportOutput> {
   // Classify FIRST, before touching the filesystem. A typo is a usage error
   // (exit 64); reporting it as exit 3 would tell a harness the environment is
@@ -152,6 +153,26 @@ export async function runReport(
     classified.kind === 'run'
       ? classified.runId
       : await latestRunOfEpic(store, projectRoot, classified.epic);
+
+  if (options.json === true) {
+    // Validate, then emit THE FILE'S OWN BYTES.
+    //
+    // Validating first means a harness never receives something that does not match the
+    // published schema — echoing bytes must not mean echoing anything. Emitting the raw
+    // text rather than re-serializing the parsed document is what makes stdout
+    // byte-identical to `result.json` (Q53) by construction: zod rebuilds a validated
+    // object in schema declaration order, which is not the order the evidence
+    // constructors use, so a re-serialization would carry the same values in a different
+    // byte sequence. `readResult` returns both halves for exactly this reason.
+    const stored = await store.readResult(runId);
+    return {
+      stdout: stored.text,
+      // Bounded and human, on stderr where it cannot corrupt the document (Q55). Story
+      // 3.6's terminal renderer replaces this line once it lands; the stream discipline
+      // does not change when it does.
+      stderr: `Rendered ${runId} from ${stored.path}\n`,
+    };
+  }
 
   return { stdout: await renderRun(store, runId), stderr: '' };
 }
