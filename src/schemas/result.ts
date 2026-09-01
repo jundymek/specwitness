@@ -218,6 +218,13 @@ const GateEvidenceSchema = z
     ...evidenceCommon,
     kind: z.literal('gate'),
     gateId: z.string().min(1),
+    // Mirrors GateEvidence.displayCommand, added to the domain type in the story 3.3
+    // follow-up (owner-approved, requested by story 3.4). Required, like the domain
+    // field: without it a stored run names the gate that failed but not the command that
+    // produced the output, and a reader must recover the config as it was at that
+    // revision. This schema is `.strict()`, so every gate evidence record would fail to
+    // parse until the field was mirrored here.
+    displayCommand: z.string(),
     status: GateStatusSchema,
     exitCode: z.number().int().nullable(),
     stdout: BoundedTextSchema,

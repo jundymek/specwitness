@@ -682,3 +682,80 @@ describe('leaks that LOOKED redacted (Codex review, second follow-up pass)', () 
     expect(elapsed).toBeLessThan(2000);
   });
 });
+
+describe('a quote INSIDE a header value is not a terminator (Codex review, third pass)', () => {
+  const SECRET = `${['sk', 'ant'].join('-')}-internalquote`;
+
+  // The third leak of this shape, and the one that made me stop patching the pattern and
+  // decide the question in code instead. Each regex attempt approximated "is this header
+  // inside a quoted shell argument" with "is there a quote nearby", and every
+  // approximation closed one case while opening another.
+
+  it('redacts the whole value when a quoted component sits inside it', () => {
+    // `[^"'\r\n]+` stopped at the internal quote and produced
+    // `Cookie: [REDACTED]"secret"; HttpOnly` — marker present, credential intact.
+    const redacted = redactText(`Cookie: session="${SECRET}"; HttpOnly`);
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toBe('Cookie: [REDACTED]');
+  });
+
+  it('redacts the whole value when a single-quoted component sits inside it', () => {
+    expect(redactText(`Set-Cookie: session='${SECRET}'; Path=/`)).not.toContain(SECRET);
+  });
+
+  it('still keeps the tail of a genuinely quoted shell argument', () => {
+    // The distinguishing fact is the line PREFIX: here a quote is open before the header
+    // name, so the value really does end at that argument's closing quote.
+    const redacted = redactText(
+      `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('handles a quoted argument nested after other quoted arguments', () => {
+    const redacted = redactText(
+      `curl -X "POST" -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('treats the other quote character inside an open quote as literal text', () => {
+    // `'` inside a double-quoted argument is not a delimiter, so the argument still ends
+    // at its own `"`.
+    const redacted = redactText(
+      `curl -H "Authorization: Bearer ${SECRET}'x" http://localhost:3000/health`,
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+  });
+
+  it('falls back to the whole line when the quoted argument is never closed', () => {
+    // A truncated capture. Fail closed: an unterminated quote is exactly where guessing
+    // less costs a credential.
+    const redacted = redactText(`curl -H "Authorization: Bearer ${SECRET}`);
+
+    expect(redacted).not.toContain(SECRET);
+  });
+
+  it('redacts each line of a multi-line wire log independently', () => {
+    // The line prefix is computed per match from the start of ITS line, so one line's
+    // quotes cannot change another line's extent.
+    const redacted = redactText(
+      [
+        `curl -H "Authorization: Bearer ${SECRET}" http://localhost:3000/health`,
+        `Cookie: session="${SECRET}"; HttpOnly`,
+        'Accept: application/json',
+      ].join('\n'),
+    );
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('http://localhost:3000/health');
+    expect(redacted).toContain('Accept: application/json');
+  });
+});

@@ -141,102 +141,80 @@ const SENSITIVE_HEADERS = new Set([
 ]);
 
 /**
- * Header lines in free text: `Authorization: Bearer …`, `Set-Cookie: …`.
+ * Header lines in free text: `Authorization: Bearer ...`, `Set-Cookie: ...`.
  *
  * Handled separately from the assignment rule below because a header value legitimately
- * contains spaces (`Bearer abc`), while an env-style value does not — one regex covering
+ * contains spaces (`Bearer abc`), while an env-style value does not - one regex covering
  * both would either stop at the first space and leak the rest, or swallow the whole line.
  *
- * DELIBERATELY NOT ANCHORED TO THE START OF A LINE. Captured gate and probe output is
- * full of wire logs whose header lines carry a prefix: curl's verbose mode writes
- * `> Authorization: Bearer …` and `< Set-Cookie: …`, and loggers prepend timestamps. An
- * anchored pattern misses every one of those, and the assignment rule below does not
- * catch them either (a header value has spaces in it), so the credential would reach
- * persisted evidence. Found by review, not by a test — which is why the test beside it
- * now covers the prefixed forms.
+ * DELIBERATELY NOT ANCHORED TO THE START OF A LINE. Captured gate and probe output is full
+ * of wire logs whose header lines carry a prefix: curl's verbose mode writes
+ * `> Authorization: Bearer ...` and `< Set-Cookie: ...`, and loggers prepend timestamps.
+ * An anchored pattern misses every one of those, and the assignment rule does not catch
+ * them either (a header value has spaces in it), so the credential would reach persisted
+ * evidence.
  *
- * THE VALUE'S EXTENT handles three shapes. Two of them cost a review round each, so they
- * are spelled out rather than left to the pattern:
+ * The lookbehind keeps it from over-matching: the header name must not be preceded by
+ * another name character, so `X-Custom-Authorization-Policy` is not treated as an
+ * `authorization` header by accident.
  *
- *  - A value that OPENS with a quote is consumed as a whole quoted unit, so
- *    `Cookie: "session=secret"` redacts the string, quotes included. An earlier version
- *    treated that opening quote as a TERMINATOR and produced
- *    `Cookie: [REDACTED]"session=secret"` - the marker present and the secret still
- *    sitting there, which is worse than not matching at all, because it looks handled.
- *  - Otherwise the value runs to end of line. That is the right extent for a wire log,
- *    where the header value IS the rest of the line.
- *  - ...except that it stops at a quote it did not open, because a declared COMMAND is a
- *    single line: in `curl -H "Authorization: Bearer ..." http://localhost:3000/health`
- *    a bare end-of-line rule swallows the URL too. `displayCommand` exists precisely so a
- *    reader can see what ran, and redacting the whole command defeats the field while
- *    protecting nothing extra.
- *
- * Both quote characters are handled, because `-H 'Authorization: ...'` is as common in a
- * shell command as the double-quoted form. The residual risk is a credential containing a
- * literal quote, which base64 and hex tokens cannot.
- *
- * THE ORDER OF THE LAST TWO ALTERNATIVES IS LOAD-BEARING. `[^"'\r\n]+` uses `+`, not `*`,
- * so it cannot match empty, and an end-of-line fallback follows it. Without both, a
- * TRUNCATED header - `Authorization: "Bearer secret` with no closing quote, which is what
- * a killed process or a capped capture leaves behind - failed both quoted alternatives,
- * matched an EMPTY value before the opening quote, and produced
- * `Authorization: [REDACTED]"Bearer secret`. A leak that looks redacted is worse than a
- * raw one: it survives review, because the marker is right there.
- *
- * The lookbehind is what keeps it from over-matching: the header name must not be
- * preceded by another name character, so `X-Custom-Authorization-Policy` is not treated
- * as an `authorization` header by accident. Redaction runs to end of line, because that
- * is exactly the extent of a header value.
+ * HOW FAR THE VALUE EXTENDS IS DECIDED IN CODE, NOT IN THE PATTERN, and that is the
+ * point of `redactHeaderValue` below. Three attempts to express it as a regex each closed
+ * one case and opened another - stopping at the next quote leaked
+ * `Cookie: session="secret"; HttpOnly`, requiring a quoted unit leaked a truncated
+ * `Authorization: "Bearer secret`, and so on - because the pattern was approximating the
+ * question rather than asking it. The real question is not "is there a quote in the
+ * value"; it is "was this header written INSIDE a quoted shell argument", and the line
+ * prefix answers that exactly.
  */
 const SENSITIVE_HEADER_LINE =
-  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^"'\r\n]+|[^\r\n]*)/gi;
+  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)([^\r\n]*)/gi;
 
 /**
- * `NAME=value`, `NAME: value`, `"name": "value"`, `name='value'`.
+ * The quote that is still open at the end of `prefix`, if any.
  *
- * The value stops at whitespace or a structural character unless it is quoted, which is
- * what keeps `FOO=1 BAR=2` from collapsing into one redaction.
- *
- * THE `{0,255}` BOUND ON THE NAME IS A PERFORMANCE GUARD, not a stylistic limit.
- *
- * Unbounded, this pattern was QUADRATIC in the length of an unbroken run of identifier
- * characters: at every position in the run the name quantifier consumed to the end of it,
- * failed to find the required `[:=]`, and gave back one character at a time - O(n)
- * backtracks at each of O(n) start positions. Measured on the shipped code, 4/8/16/32 KB
- * took 24/87/345/1472 ms, quadrupling per doubling, which extrapolates to roughly half an
- * hour for 1 MB. Two other agents reproduced the same curve to within a few percent on
- * different fixture generators, so it was the code and not anyone's test data. With the
- * bound, work at each start position is capped at 256 steps, so the whole scan is linear.
- *
- * That this is not a fixture-only problem is the part worth understanding. Ordinary
- * multi-line logs stay fast (1 MB in ~13 ms) because whitespace terminates the
- * backtracking. But a gate is `pnpm build` or `npm test`, and its output plausibly carries
- * a base64 `data:` URI, an inline source map, a minified bundle echoed inside an error, or
- * a long JWT from a failing auth test. Any one of those is a six-figure character run on a
- * single line - and `verify` would appear to HANG inside capture, in the stage whose whole
- * purpose is failing fast before any AI spend, producing no output at all, because the
- * hang is inside the code that produces output. The gates path pays this cost TWICE per
- * stream by design (the full file and the inline copy are redacted separately, since
- * pre-redacted input to the constructors is deliberately impossible), so the saving is
- * doubled on the hot path.
- *
- * A LOOKBEHIND WAS TRIED FIRST AND REJECTED, and the reason is worth keeping. Requiring
- * the name not to follow another name character makes only the first character of a run a
- * valid start, which is asymptotically better - but `-` is a name character, so it also
- * stopped `psql --password=hunter2` from matching at all. A seeded-secret test caught it
- * immediately. Speed bought by scanning less is not a fix, and the bound gets linear time
- * without touching what is matched.
- *
- * `SENSITIVE_HEADER_LINE` above was measured on the same input and is unaffected (0 ms on
- * a 32 KB header value): its `[^\r\n]*` is not followed by a required literal, so there
- * is nothing to backtrack into.
- *
- * `[REDACTED]` is listed FIRST among the value alternatives so that redacting an already
- * redacted string is a no-op. Without it the unquoted alternative stops at the closing
- * `]` (excluded so JSON arrays terminate a value), the replacement appends its own, and
- * a second pass yields `[REDACTED]]` — the kind of drift that shows up as a diff in a
- * snapshot test long after anyone remembers why.
+ * A quote of the other kind inside an open quoted region is literal text, not a delimiter,
+ * which is why this tracks WHICH quote opened rather than counting both.
  */
+function openQuoteAt(prefix: string): string | undefined {
+  let open: string | undefined;
+  for (const character of prefix) {
+    if (character !== '"' && character !== "'") {
+      continue;
+    }
+    if (open === character) {
+      open = undefined;
+    } else if (open === undefined) {
+      open = character;
+    }
+  }
+  return open;
+}
+
+/**
+ * How much of a sensitive header's value to redact.
+ *
+ * - Not inside a quoted region: the value IS the rest of the line, so all of it goes.
+ *   This is a wire log, and `Cookie: session="secret"; HttpOnly` must lose the lot -
+ *   quotes appearing INSIDE a header value are ordinary characters, not terminators.
+ * - Inside a quoted shell argument: the value ends at that argument's closing quote, so
+ *   `curl -H "Authorization: Bearer ..." http://host/health` keeps its URL. That matters
+ *   because `GateEvidence.displayCommand` exists so a reader can see what ran, and
+ *   redacting the whole command defeats the field while protecting nothing extra.
+ * - Inside a quoted argument that is never closed - a truncated capture - falls back to
+ *   the whole line. Fail closed: an unterminated quote is exactly the case where guessing
+ *   less costs a credential.
+ */
+function redactHeaderValue(value: string, linePrefix: string): string {
+  const openQuote = openQuoteAt(linePrefix);
+  if (openQuote === undefined) {
+    return REDACTED;
+  }
+
+  const closing = value.indexOf(openQuote);
+  return closing === -1 ? REDACTED : `${REDACTED}${value.slice(closing)}`;
+}
+
 const ASSIGNMENT_VALUE = String.raw`(\[REDACTED\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;)\]}]*)`;
 
 /**
@@ -321,12 +299,16 @@ function isSensitiveName(name: string): boolean {
  * same as redacting once — which matters because evidence gets copied between fields.
  */
 export function redactText(raw: string, options?: RedactionOptions): string {
-  let text = raw.replace(SENSITIVE_HEADER_LINE, (_match, name: string) => {
-    // The header name is kept: "an Authorization header was present" is diagnostic, and
-    // dropping it would cost information without buying any safety. Whatever prefix the
-    // line carried is outside the match and survives untouched.
-    return `${name}: ${REDACTED}`;
-  });
+  let text = raw.replace(
+    SENSITIVE_HEADER_LINE,
+    (_match, name: string, _colon: string, value: string, offset: number, whole: string) => {
+      // The header name is kept: "an Authorization header was present" is diagnostic, and
+      // dropping it would cost information without buying any safety. Whatever prefix the
+      // line carried is outside the match and survives untouched.
+      const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
+      return `${name}: ${redactHeaderValue(value, whole.slice(lineStart, offset))}`;
+    },
+  );
 
   const rewrite = (quote: string, name: string, separator: string, value: string): string => {
     const quoted = value.startsWith('"') || value.startsWith("'");

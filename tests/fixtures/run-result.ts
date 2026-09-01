@@ -56,6 +56,9 @@ function everyEvidenceKind(): Evidence[] {
     gateEvidence({
       capturedAt: AT,
       gateId: 'lint',
+      // Added when `displayCommand` became required (story 3.3 follow-up): without it a
+      // stored run says which gate failed but not what actually ran.
+      displayCommand: 'pnpm eslint . --max-warnings 0',
       status: 'fail',
       exitCode: 1,
       stdout: `ANTHROPIC_API_KEY=${SEEDED_SECRET}\n> Authorization: Bearer ${SEEDED_SECRET}\n`,
