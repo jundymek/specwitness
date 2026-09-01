@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import { CRITERION_STATUSES, GATE_STATUSES } from '../../../src/domain/result.js';
+import { STAGE_STATUSES } from '../../../src/domain/stage.js';
 import {
   INFRA_ERROR_CLASSIFICATIONS,
   VERDICTS,
   type RunOutcome,
 } from '../../../src/domain/run-outcome.js';
-import { MARK_WIDTH, criterionMark, gateMark, verdictLine } from '../../../src/report/format.js';
+import {
+  MARK_WIDTH,
+  criterionMark,
+  gateMark,
+  stageMark,
+  verdictLine,
+} from '../../../src/report/format.js';
 
 /**
  * Any ANSI escape sequence (CSI). The report must carry no colour on any path,
@@ -33,6 +40,26 @@ describe('status marks', () => {
 
   it('renders every GateStatus, exhaustively', () => {
     expect(GATE_STATUSES.map(gateMark)).toEqual(['✓ pass', '✗ fail', '– skipped']);
+  });
+
+  it('renders every StageStatus, exhaustively', () => {
+    expect(STAGE_STATUSES.map(stageMark)).toEqual(['✓ ok', '✗ failed', '! error', '– skipped']);
+  });
+
+  it('keeps a stage that threw distinct from a stage that failed', () => {
+    // A third vocabulary rather than a reuse of the other two, because
+    // `StageStatus` answers a different question. `failed` means the stage
+    // produced a product-relevant negative outcome and the run still reached a
+    // verdict; `error` means it threw and the run could not reach one. That is
+    // the distinction story 3.3's two-armed stage result exists to make
+    // unrepresentable, and collapsing the two words here would put it back.
+    expect(stageMark('failed')).not.toBe(stageMark('error'));
+    expect(stageMark('error')).not.toContain('✗');
+    for (const status of STAGE_STATUSES) {
+      expect(stageMark(status)).toContain(status);
+      expect(stageMark(status)).not.toMatch(ANSI);
+      expect(stageMark(status).length).toBeLessThanOrEqual(MARK_WIDTH);
+    }
   });
 
   it('distinguishes error from fail — the classification this epic exists to preserve', () => {
