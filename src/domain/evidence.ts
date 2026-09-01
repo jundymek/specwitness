@@ -155,19 +155,62 @@ const SENSITIVE_HEADERS = new Set([
  * persisted evidence. Found by review, not by a test — which is why the test beside it
  * now covers the prefixed forms.
  *
+ * The value runs to end of line OR to the next double quote, whichever comes first. End
+ * of line is the right extent for a wire log, where the header value IS the rest of the
+ * line. The quote matters for a declared COMMAND, which is a single line: in
+ * `curl -H "Authorization: Bearer ..." http://localhost:3000/health` a bare end-of-line
+ * rule swallows the URL too, and `displayCommand` exists precisely so a reader can see
+ * what ran - redacting the whole command defeats the field while protecting nothing extra.
+ * A quote is also where a quoted header value genuinely ends. The residual risk is a
+ * credential containing a literal `"`, which base64 and hex tokens cannot.
+ *
  * The lookbehind is what keeps it from over-matching: the header name must not be
  * preceded by another name character, so `X-Custom-Authorization-Policy` is not treated
  * as an `authorization` header by accident. Redaction runs to end of line, because that
  * is exactly the extent of a header value.
  */
 const SENSITIVE_HEADER_LINE =
-  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^\r\n]*/gi;
+  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^"\r\n]*/gi;
 
 /**
  * `NAME=value`, `NAME: value`, `"name": "value"`, `name='value'`.
  *
  * The value stops at whitespace or a structural character unless it is quoted, which is
  * what keeps `FOO=1 BAR=2` from collapsing into one redaction.
+ *
+ * THE `{0,255}` BOUND ON THE NAME IS A PERFORMANCE GUARD, not a stylistic limit.
+ *
+ * Unbounded, this pattern was QUADRATIC in the length of an unbroken run of identifier
+ * characters: at every position in the run the name quantifier consumed to the end of it,
+ * failed to find the required `[:=]`, and gave back one character at a time - O(n)
+ * backtracks at each of O(n) start positions. Measured on the shipped code, 4/8/16/32 KB
+ * took 24/87/345/1472 ms, quadrupling per doubling, which extrapolates to roughly half an
+ * hour for 1 MB. Two other agents reproduced the same curve to within a few percent on
+ * different fixture generators, so it was the code and not anyone's test data. With the
+ * bound, work at each start position is capped at 256 steps, so the whole scan is linear.
+ *
+ * That this is not a fixture-only problem is the part worth understanding. Ordinary
+ * multi-line logs stay fast (1 MB in ~13 ms) because whitespace terminates the
+ * backtracking. But a gate is `pnpm build` or `npm test`, and its output plausibly carries
+ * a base64 `data:` URI, an inline source map, a minified bundle echoed inside an error, or
+ * a long JWT from a failing auth test. Any one of those is a six-figure character run on a
+ * single line - and `verify` would appear to HANG inside capture, in the stage whose whole
+ * purpose is failing fast before any AI spend, producing no output at all, because the
+ * hang is inside the code that produces output. The gates path pays this cost TWICE per
+ * stream by design (the full file and the inline copy are redacted separately, since
+ * pre-redacted input to the constructors is deliberately impossible), so the saving is
+ * doubled on the hot path.
+ *
+ * A LOOKBEHIND WAS TRIED FIRST AND REJECTED, and the reason is worth keeping. Requiring
+ * the name not to follow another name character makes only the first character of a run a
+ * valid start, which is asymptotically better - but `-` is a name character, so it also
+ * stopped `psql --password=hunter2` from matching at all. A seeded-secret test caught it
+ * immediately. Speed bought by scanning less is not a fix, and the bound gets linear time
+ * without touching what is matched.
+ *
+ * `SENSITIVE_HEADER_LINE` above was measured on the same input and is unaffected (0 ms on
+ * a 32 KB header value): its `[^\r\n]*` is not followed by a required literal, so there
+ * is nothing to backtrack into.
  *
  * `[REDACTED]` is listed FIRST among the value alternatives so that redacting an already
  * redacted string is a no-op. Without it the unquoted alternative stops at the closing
@@ -176,7 +219,7 @@ const SENSITIVE_HEADER_LINE =
  * snapshot test long after anyone remembers why.
  */
 const ASSIGNMENT =
-  /(["']?)([A-Za-z_][A-Za-z0-9_.-]*)\1([^\S\r\n]*[:=][^\S\r\n]*)(\[REDACTED\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;)\]}]*)/g;
+  /(["']?)([A-Za-z_][A-Za-z0-9_.-]{0,255})\1([^\S\r\n]*[:=][^\S\r\n]*)(\[REDACTED\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;)\]}]*)/g;
 
 /**
  * The trailing name segment that makes an assignment sensitive.
@@ -459,6 +502,25 @@ export interface CommandEvidence extends EvidenceCommon {
 export interface GateEvidence extends EvidenceCommon {
   readonly kind: 'gate';
   readonly gateId: string;
+  /**
+   * The gate's command as the Project Config declared it, for display only.
+   *
+   * REQUIRED, not optional, and that is the point of it: the only producer is the gates
+   * stage, every executed gate has a command, and an optional field is one a caller can
+   * skip on the run where it mattered.
+   *
+   * Without it a run directory is not a self-contained record. A reader six months later
+   * has `gateId: 'lint'` and 8 KB of output, and to learn what actually ran must recover
+   * the config as it was AT THAT REVISION - worst for the failing gate, which is the one
+   * anybody opens the record to understand. `CommandEvidence` already carried this, so
+   * its absence here was an asymmetry rather than a decision.
+   *
+   * A `DeclaredCommand` rendered through `commandText()` - the permitted direction. It is
+   * never parsed back and never executed from here, and it is redacted like any other
+   * string: a declared command can legitimately carry a credential, e.g.
+   * `curl -H "Authorization: Bearer ..."` used as a smoke gate.
+   */
+  readonly displayCommand: string;
   readonly status: GateStatus;
   readonly exitCode: number | null;
   readonly stdout: BoundedText;
@@ -541,6 +603,8 @@ function redactedExplanation(
 export interface GateEvidenceInput {
   readonly capturedAt: string;
   readonly gateId: string;
+  /** RAW command text from `commandText()`. It is redacted here. */
+  readonly displayCommand: string;
   readonly status: GateStatus;
   readonly exitCode: number | null;
   /** RAW output. It is redacted and bounded here. */
@@ -561,6 +625,7 @@ export function gateEvidence(input: GateEvidenceInput, options?: BoundedTextOpti
     kind: 'gate',
     capturedAt: input.capturedAt,
     gateId: input.gateId,
+    displayCommand: redactText(input.displayCommand, options),
     status: input.status,
     exitCode: input.exitCode,
     stdout: boundedText(input.stdout, streamOptions(options, input.stdoutFullPath)),

@@ -278,6 +278,7 @@ describe('the evidence union', () => {
         gateEvidence({
           capturedAt: AT,
           gateId: 'lint',
+          displayCommand: 'pnpm lint',
           status: 'pass',
           exitCode: 0,
           stdout: 'ok',
@@ -294,6 +295,7 @@ describe('the redacting constructors — FR-28 with a seeded secret', () => {
     const evidence = gateEvidence({
       capturedAt: AT,
       gateId: 'test',
+      displayCommand: 'pnpm test',
       status: 'fail',
       exitCode: 1,
       stdout: `running…\n${SEEDED}\n`,
@@ -386,6 +388,7 @@ describe('the redacting constructors — FR-28 with a seeded secret', () => {
     const evidence = gateEvidence({
       capturedAt: AT,
       gateId: 'build',
+      displayCommand: 'pnpm build',
       status: 'fail',
       exitCode: 2,
       stdout: '',
@@ -440,6 +443,7 @@ describe('two-stream evidence needs two full paths (Codex review, P2)', () => {
       {
         capturedAt: AT,
         gateId: 'test',
+        displayCommand: 'pnpm test',
         status: 'fail',
         exitCode: 1,
         stdout: 'o'.repeat(50),
@@ -465,6 +469,7 @@ describe('two-stream evidence needs two full paths (Codex review, P2)', () => {
         {
           capturedAt: AT,
           gateId: 'test',
+          displayCommand: 'pnpm test',
           status: 'pass',
           exitCode: 0,
           stdout: 'o'.repeat(50),
@@ -481,6 +486,7 @@ describe('two-stream evidence needs two full paths (Codex review, P2)', () => {
       {
         capturedAt: AT,
         gateId: 'test',
+        displayCommand: 'pnpm test',
         status: 'fail',
         exitCode: 1,
         stdout: 'internal-id=ACME-1234',
@@ -492,5 +498,64 @@ describe('two-stream evidence needs two full paths (Codex review, P2)', () => {
 
     expect(evidence.stdout.text).not.toContain('ACME-1234');
     expect(evidence.stderr.text).not.toContain('ACME-9999');
+  });
+});
+
+describe('gate evidence carries the command that produced it (owner-approved addition)', () => {
+  // Without this field a run directory is not a self-contained record: a reader has
+  // `gateId: 'lint'` and 8 KB of output, and to learn what actually ran must recover the
+  // config as it was at that revision — worst for the failing gate, which is the one
+  // anybody opens the record to understand. Requested by story 3.4's agent, whose spec
+  // requires producing it; approved by the owner.
+  it('records the declared command text', () => {
+    const evidence = gateEvidence({
+      capturedAt: AT,
+      gateId: 'lint',
+      displayCommand: 'pnpm eslint . --max-warnings 0',
+      status: 'pass',
+      exitCode: 0,
+      stdout: '',
+      stderr: '',
+      durationMs: 10,
+    });
+
+    expect(evidence.displayCommand).toBe('pnpm eslint . --max-warnings 0');
+  });
+
+  it('redacts a credential carried by the command itself', () => {
+    // A declared command can legitimately carry one — a curl smoke gate is the obvious
+    // case — and displayCommand is persisted and rendered like every other string here.
+    const evidence = gateEvidence({
+      capturedAt: AT,
+      gateId: 'smoke',
+      displayCommand: `curl -H "Authorization: Bearer ${SEEDED_SECRET}" http://localhost:3000/health`,
+      status: 'pass',
+      exitCode: 0,
+      stdout: '',
+      stderr: '',
+      durationMs: 10,
+    });
+
+    expect(JSON.stringify(evidence)).not.toContain(SEEDED_SECRET);
+    expect(evidence.displayCommand).toContain('[REDACTED]');
+    // The shape of the command survives, so the reader still learns what ran.
+    expect(evidence.displayCommand).toContain('curl');
+    expect(evidence.displayCommand).toContain('http://localhost:3000/health');
+  });
+
+  it('redacts a token passed as a flag value', () => {
+    const evidence = gateEvidence({
+      capturedAt: AT,
+      gateId: 'deploy-check',
+      displayCommand: `deploy --api-token=${SEEDED_SECRET} --dry-run`,
+      status: 'pass',
+      exitCode: 0,
+      stdout: '',
+      stderr: '',
+      durationMs: 10,
+    });
+
+    expect(JSON.stringify(evidence)).not.toContain(SEEDED_SECRET);
+    expect(evidence.displayCommand).toContain('--dry-run');
   });
 });
