@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { RunStore } from '../../src/infra/run-store.js';
 import { FixedClock, SequenceIds } from '../fakes/ports.js';
-import { fullyPopulatedRunResult } from '../fixtures/run-result.js';
+import { SEEDED_SECRET, fullyPopulatedRunResult } from '../fixtures/run-result.js';
 
 const CLI = fileURLToPath(new URL('../../dist/cli.js', import.meta.url));
 
@@ -67,15 +67,21 @@ describe('report <run-id> renders a stored run (AC3)', () => {
     expect(stdout).toContain('epic-7');
   });
 
-  it('says the run has no result yet, naming Epic 3', async () => {
-    // The honest statement of what this stub is: metadata located, rendering
-    // still to come. A user must not read "no failures" into an empty report.
+  it('says the run stored no result, and names the remedy', async () => {
+    // Story 1.6 wrote this as "no result yet — run verification arrives in Epic 3", which
+    // was honest then and is false now: verification has arrived, and telling an operator
+    // otherwise sends them looking for a feature they just ran. The GUARANTEE the test
+    // pins is unchanged — a user must never read "no failures" into an empty report — so
+    // only the stale half of the wording moved, and the replacement names `clean`, which
+    // is what actually helps.
     const run = await seedRun('epic-7');
 
-    const { stdout } = await runReport(['report', run.runId]);
+    const { exitCode, stdout } = await runReport(['report', run.runId]);
 
-    expect(stdout).toMatch(/no result yet/i);
-    expect(stdout).toMatch(/Epic 3/i);
+    expect(exitCode).toBe(0);
+    expect(stdout).toMatch(/no result/i);
+    expect(stdout).toMatch(/clean/i);
+    expect(stdout).not.toMatch(/arrives in Epic 3/i);
   });
 
   it('reports a run that has no epic without printing "null"', async () => {
@@ -88,15 +94,19 @@ describe('report <run-id> renders a stored run (AC3)', () => {
     expect(stdout).toMatch(/none/i);
   });
 
-  it('reflects a stored result.json once one exists', async () => {
-    // Story 3.5 writes this file; the stub only reports whether it is there.
-    const run = await seedRun('epic-7');
-    await writeFile(join(run.dir, 'result.json'), '{}', 'utf8');
+  it('renders the stored run once a result exists, not just its metadata', async () => {
+    // Story 1.6 could only report WHETHER result.json was there. Now the document is
+    // parsed and rendered through the shared terminal renderer, so the assertion moves
+    // from "mentions the filename" to "shows what the run concluded" — which is the whole
+    // point of persisting it.
+    const run = await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'eeee', 'epic-7');
 
-    const { stdout } = await runReport(['report', run.runId]);
+    const { exitCode, stdout } = await runReport(['report', run.runId]);
 
-    expect(stdout).not.toMatch(/no result yet/i);
-    expect(stdout).toContain('result.json');
+    expect(exitCode).toBe(0);
+    expect(stdout).not.toMatch(/no result/i);
+    expect(stdout).toContain('VERDICT');
+    expect(stdout).toContain(run.runId);
   });
 
   it('reports the reaped flag', async () => {
@@ -214,10 +224,8 @@ async function seedContractFile(epic: string): Promise<void> {
 
 describe('report <epic> renders the latest run of that epic (3.5 AC2)', () => {
   it('picks the epic latest run, exit 0, nothing on stderr', async () => {
-    const older = await seedRunAt('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
-    const newer = await seedRunAt('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
-    await writeFile(join(older.dir, 'result.json'), '{}', 'utf8');
-    await writeFile(join(newer.dir, 'result.json'), '{}', 'utf8');
+    const older = await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+    const newer = await seedRunWithStoredResult('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
 
     const { exitCode, stdout, stderr } = await runReport(['report', 'epic-7']);
 
@@ -228,8 +236,7 @@ describe('report <epic> renders the latest run of that epic (3.5 AC2)', () => {
   });
 
   it('accepts a bare epic number and a zero-padded id', async () => {
-    const run = await seedRunAt('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
-    await writeFile(join(run.dir, 'result.json'), '{}', 'utf8');
+    const run = await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
 
     for (const spelling of ['7', 'epic-07']) {
       const { exitCode, stdout } = await runReport(['report', spelling]);
@@ -239,8 +246,7 @@ describe('report <epic> renders the latest run of that epic (3.5 AC2)', () => {
   });
 
   it('stays prompt-free and bounded for an epic argument too', async () => {
-    const run = await seedRunAt('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
-    await writeFile(join(run.dir, 'result.json'), '{}', 'utf8');
+    await seedRunWithStoredResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
 
     const result = await execa(process.execPath, [CLI, 'report', 'epic-7'], {
       reject: false,
@@ -250,7 +256,20 @@ describe('report <epic> renders the latest run of that epic (3.5 AC2)', () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout.split('\n').length).toBeLessThan(20);
+    // BOUNDED, not tiny. The 20-line bound this assertion carried was written when the
+    // command printed five lines of manifest metadata; the sectioned report is larger by
+    // design and grows with the contract — more gates and more criteria mean more rows,
+    // which is the report doing its job.
+    //
+    // What AD-11 actually requires bounded is CONTENT: a log or body over the cap
+    // truncates with a pointer to the full file, so a single gate printing a megabyte
+    // cannot flood an agent's context. That property lives in the renderer and is tested
+    // there. What this asserts is the weaker but still useful thing — the output is
+    // proportional to the fixture rather than unbounded — against a fixture deliberately
+    // built as the maximal case: all eleven stages, three gates, six criteria and all six
+    // evidence kinds. A real gates-only run is a fraction of it.
+    expect(result.stdout.split('\n').length).toBeLessThan(150);
+    expect(result.stdout).not.toContain(SEEDED_SECRET);
   });
 });
 

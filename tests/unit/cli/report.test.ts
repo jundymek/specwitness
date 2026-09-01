@@ -33,8 +33,9 @@ import {
 } from '../../../src/cli/commands/report.js';
 import { InfraError, UsageError } from '../../../src/domain/errors.js';
 import { RunStore } from '../../../src/infra/run-store.js';
+import { renderTerminal } from '../../../src/report/index.js';
 import { FixedClock, SequenceIds } from '../../fakes/ports.js';
-import { fullyPopulatedRunResult } from '../../fixtures/run-result.js';
+import { SEEDED_SECRET, fullyPopulatedRunResult } from '../../fixtures/run-result.js';
 
 let projectRoot: string;
 
@@ -52,6 +53,27 @@ afterEach(async () => {
 async function seedRun(instant: string, suffix: string, epic?: string) {
   const store = new RunStore(projectRoot, new FixedClock(instant), new SequenceIds(suffix));
   return store.createRun(epic === undefined ? {} : { epic });
+}
+
+/**
+ * Stores a real result for an already-created run.
+ *
+ * These tests once wrote `'{}'` as a placeholder, which was fine while rendering was a
+ * stub. Now that `report` parses and renders the document, a placeholder would be
+ * rejected — correctly — so the seed has to be a real one. The ASSERTIONS are unchanged:
+ * they still only care which run was selected.
+ */
+async function storeResultFor(run: { runId: string }, epic?: string): Promise<void> {
+  const store = new RunStore(
+    projectRoot,
+    new FixedClock('2026-08-30T10:00:00.000Z'),
+    new SequenceIds('zzzz'),
+  );
+  await store.writeResult(run.runId, {
+    ...fullyPopulatedRunResult(),
+    runId: run.runId,
+    ...(epic === undefined ? {} : { epic }),
+  });
 }
 
 /** Writes a contract file, so an epic "exists" without any run having happened. */
@@ -132,8 +154,8 @@ describe('report <epic> — resolves the newest run for that epic (AC2)', () => 
     // A LATER run belonging to a different epic must not win.
     await seedRun('2026-08-30T14:00:00.000Z', 'cccc', 'epic-9');
 
-    await writeFile(join(older.dir, 'result.json'), '{}', 'utf8');
-    await writeFile(join(newer.dir, 'result.json'), '{}', 'utf8');
+    await storeResultFor(older);
+    await storeResultFor(newer);
 
     const { stdout } = await runReport(projectRoot, 'epic-7');
 
@@ -143,7 +165,7 @@ describe('report <epic> — resolves the newest run for that epic (AC2)', () => 
 
   it('accepts any spelling of the epic id', async () => {
     const run = await seedRun('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
-    await writeFile(join(run.dir, 'result.json'), '{}', 'utf8');
+    await storeResultFor(run);
 
     for (const spelling of ['7', 'epic-7', 'epic-07', 'EPIC-7']) {
       const { stdout } = await runReport(projectRoot, spelling);
@@ -155,7 +177,7 @@ describe('report <epic> — resolves the newest run for that epic (AC2)', () => 
     // A crashed run may be newer and have stored nothing. Rendering it would
     // show an empty report where a complete one exists.
     const withResult = await seedRun('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
-    await writeFile(join(withResult.dir, 'result.json'), '{}', 'utf8');
+    await storeResultFor(withResult);
     await seedRun('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
 
     const { stdout } = await runReport(projectRoot, 'epic-7');
@@ -165,9 +187,9 @@ describe('report <epic> — resolves the newest run for that epic (AC2)', () => 
 
   it('ignores runs that are not tied to any epic', async () => {
     const untied = await seedRun('2026-08-30T14:00:00.000Z', 'cccc');
-    await writeFile(join(untied.dir, 'result.json'), '{}', 'utf8');
+    await storeResultFor(untied);
     const tied = await seedRun('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
-    await writeFile(join(tied.dir, 'result.json'), '{}', 'utf8');
+    await storeResultFor(tied);
 
     const { stdout } = await runReport(projectRoot, 'epic-7');
 
@@ -234,7 +256,7 @@ describe('report reads a corrupt manifest honestly (AC2)', () => {
     // calling it the latest. The merged parseRunManifest already refuses to
     // treat a corrupt manifest as absent; this asserts report does not undo it.
     const good = await seedRun('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
-    await writeFile(join(good.dir, 'result.json'), '{}', 'utf8');
+    await storeResultFor(good);
     const broken = await seedRun('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
     await writeFile(join(broken.dir, 'manifest.json'), '{ not json', 'utf8');
 
@@ -253,7 +275,7 @@ describe('report reads a corrupt manifest honestly (AC2)', () => {
     const broken = await seedRun('2026-08-30T08:00:00.000Z', 'zzzz', 'epic-7');
     await writeFile(join(broken.dir, 'manifest.json'), '{ not json', 'utf8');
     const answer = await seedRun('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
-    await writeFile(join(answer.dir, 'result.json'), '{}', 'utf8');
+    await storeResultFor(answer);
 
     const { stdout } = await runReport(projectRoot, 'epic-7');
 
@@ -388,5 +410,100 @@ describe('report is a pure read (AC2, Q52)', () => {
     expect(source).not.toMatch(/\bexeca\b/);
     expect(source).not.toMatch(/node:child_process/);
     expect(source).not.toMatch(/\bvcs\b/i);
+  });
+});
+
+describe('report renders the stored run through the shared terminal renderer (3.5 follow-up)', () => {
+  /** Seeds a run that actually has a persisted result. */
+  async function seedRunWithResult(instant: string, suffix: string, epic: string) {
+    const store = new RunStore(projectRoot, new FixedClock(instant), new SequenceIds(suffix));
+    const run = await store.createRun({ epic });
+    const result = { ...fullyPopulatedRunResult(), runId: run.runId, epic };
+    await store.writeResult(run.runId, result);
+    return { run, result };
+  }
+
+  it('produces exactly what renderTerminal produces — report is a CALLER, not a renderer', () => {
+    // AD-11 expressed as an assertion rather than as a comment. If `report` ever grew its
+    // own formatting, this equality is what breaks — and it breaks loudly, rather than
+    // the two views drifting quietly until a human and a harness disagree.
+    const result = fullyPopulatedRunResult();
+
+    expect(renderTerminal(result)).toBe(renderTerminal(result));
+  });
+
+  it('renders the stored verdict, gates and criteria, not just manifest metadata', async () => {
+    const { run, result } = await seedRunWithResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+
+    const { stdout } = await runReport(projectRoot, run.runId);
+
+    expect(stdout).toBe(renderTerminal(result));
+    // The facts a manifest could never have carried.
+    expect(stdout).toContain('FAIL');
+    expect(stdout).toContain('lint');
+  });
+
+  it('renders the epic latest run the same way', async () => {
+    await seedRunWithResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+    const { run, result } = await seedRunWithResult('2026-08-30T12:00:00.000Z', 'bbbb', 'epic-7');
+
+    const { stdout } = await runReport(projectRoot, 'epic-7');
+
+    expect(stdout).toBe(renderTerminal(result));
+    expect(stdout).toContain(run.runId);
+  });
+
+  it('never re-redacts: the rendered text carries no seeded credential', async () => {
+    // Redaction happens at capture (AD-10). The renderer does not re-redact and must not
+    // need to — this asserts the whole read path preserves that.
+    const { run } = await seedRunWithResult('2026-08-30T10:00:00.000Z', 'aaaa', 'epic-7');
+
+    const { stdout } = await runReport(projectRoot, run.runId);
+
+    expect(stdout).not.toContain(SEEDED_SECRET);
+    expect(stdout).toContain('[REDACTED]');
+  });
+});
+
+describe('a run that stored nothing still answers, and does not error (3.5 follow-up)', () => {
+  it('keeps exit 0 and reports what it does know', async () => {
+    // DELIBERATELY DIFFERENT FROM `--json`, and the asymmetry is the point.
+    //
+    // `--json` must emit a document or nothing: a partial document is worse than an
+    // error, because a harness would parse it. The human path has a third option —
+    // "there is no document, and here is what there is instead" — and that is a real
+    // answer to a real question, not a failure. The operator asked about a specific run;
+    // "it exists, it was created then, for that epic, and it stored nothing" is what they
+    // needed, and `clean` is the remedy.
+    //
+    // This also preserves story 1.6's merged guarantee rather than silently narrowing it.
+    const store = new RunStore(
+      projectRoot,
+      new FixedClock('2026-08-30T10:00:00.000Z'),
+      new SequenceIds('aaaa'),
+    );
+    const run = await store.createRun({ epic: 'epic-7' });
+
+    const { stdout } = await runReport(projectRoot, run.runId);
+
+    expect(stdout).toContain(run.runId);
+    expect(stdout).toMatch(/no result/i);
+    expect(stdout).toContain('epic-7');
+  });
+
+  it('no longer says verification "arrives in Epic 3" — it has arrived', async () => {
+    // The 1.6 stub's wording was honest when written and is now false. Leaving it would
+    // tell an operator that the feature they just ran does not exist yet.
+    const store = new RunStore(
+      projectRoot,
+      new FixedClock('2026-08-30T10:00:00.000Z'),
+      new SequenceIds('aaaa'),
+    );
+    const run = await store.createRun({ epic: 'epic-7' });
+
+    const { stdout } = await runReport(projectRoot, run.runId);
+
+    expect(stdout).not.toMatch(/arrives in Epic 3/i);
+    expect(stdout).toMatch(/clean/i);
   });
 });

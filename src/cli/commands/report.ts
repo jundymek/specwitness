@@ -20,7 +20,9 @@
  *
  * AD-11: `report` is a CALLER of a renderer, never a second renderer. The
  * rendering itself belongs to `src/report/**` (story 3.6) so that the terminal
- * view, the `--json` view and the stored `result.json` cannot drift apart.
+ * view, the `--json` view and the stored `result.json` cannot drift apart. The
+ * human path calls `renderTerminal`; `--json` emits the stored file's own bytes,
+ * which is the same document by construction.
  *
  * AD-1: this is the edge, so it may reach into `infra`. Nothing beneath the
  * CLI may import back the other way.
@@ -35,6 +37,8 @@ import { isRunId, parseRunId } from '../../domain/run-id.js';
 import { SystemClock } from '../../infra/clock.js';
 import { RandomIds } from '../../infra/ids.js';
 import { RunStore } from '../../infra/run-store.js';
+import { renderTerminal } from '../../report/index.js';
+import { toRunResult } from '../../schemas/result.js';
 
 /**
  * What the single positional argument named.
@@ -274,24 +278,50 @@ async function latestRunOfEpic(
  * Returns a string rather than printing, so the rendering is testable without
  * capturing stdout.
  *
- * STILL THE STORY 1.6 SHAPE. Full rendering from the persisted `RunResult`
- * arrives with story 3.6's renderers, which this command will call rather than
- * reimplement (AD-11).
+ * **`report` CALLS a renderer; it is never one (AD-11).** The sectioned output
+ * belongs to `src/report/terminal.ts`, and this function's whole job is to
+ * fetch the model and hand it over. If a fact is missing from a report, the
+ * fix is in the model or in the renderer — adding a line here would be the
+ * start of a second renderer, and the terminal view and the JSON view would
+ * begin to disagree about the same run.
+ *
+ * A RUN THAT STORED NOTHING STILL GETS AN ANSWER, and that is deliberately
+ * different from `--json`. The machine path must emit a document or nothing,
+ * because a partial document is worse than an error — a harness would parse
+ * it. The human path has a third option: *there is no document, and here is
+ * what there is instead.* The operator asked about a specific run, and "it
+ * exists, it was created then, for that epic, and it stored nothing" answers
+ * the question they actually had. It also keeps story 1.6's merged guarantee
+ * rather than narrowing it silently.
  */
 async function renderRun(store: RunStore, runId: string): Promise<string> {
+  if (await store.hasResult(runId)) {
+    const stored = await store.readResult(runId);
+    return renderTerminal(toRunResult(stored.document));
+  }
+
+  return renderRunWithoutResult(store, runId);
+}
+
+/**
+ * What can honestly be said about a run that never stored a result.
+ *
+ * Everything here comes from the crash-recovery manifest, which is written
+ * before the run acquires any resource — so this is exactly the set of facts
+ * that survives a run dying early, and no more.
+ */
+async function renderRunWithoutResult(store: RunStore, runId: string): Promise<string> {
   const manifest = await store.readManifest(runId);
-  const hasResult = await store.hasResult(runId);
 
   const lines = [
     `Run:      ${manifest.runId}`,
     `Created:  ${manifest.createdAt}`,
     `Epic:     ${manifest.epic ?? '(none)'}`,
     `Reaped:   ${manifest.reaped ? 'yes' : 'no'}`,
-    `Result:   ${
-      hasResult
-        ? 'result.json is present (full rendering arrives in Epic 3)'
-        : 'no result yet — run verification arrives in Epic 3'
-    }`,
+    // Names the remedy rather than only the absence. A run with no result ended
+    // before persisting; `clean` is what reaps whatever it left behind.
+    'Result:   no result stored — this run ended before persisting.',
+    "          Run 'specwitness clean' to reap anything it left behind.",
   ];
 
   return `${lines.join('\n')}\n`;
