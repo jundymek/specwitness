@@ -77,6 +77,21 @@ export const SCHEMA_VERSIONS = Object.freeze({
    * contract in existence would report tampering the day the schema evolves.
    */
   contract: 1,
+
+  /**
+   * The compiled Verification Plan (`.specwitness/plans/<epic>.yaml`), story
+   * 4.2. The reserved key this file's header has named since story 1.2.
+   *
+   * Version 1 already carries the deterministic-data block (seed + bindings,
+   * AD-9) and the full four-surface probe union including `browser`, so
+   * story 4.3 filling in data semantics and Epic 5 implementing the browser
+   * executor are additive rather than migrations.
+   *
+   * Unlike `contract`, this number gates NOTHING that is fingerprinted: a plan
+   * is not hashed, and its integrity question is "was it compiled from this
+   * contract", answered by the contract fingerprint it stores.
+   */
+  plan: 1,
 } as const satisfies Record<string, number>);
 
 /** Keys of the registry. Derived — never hand-maintained. */

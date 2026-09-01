@@ -71,7 +71,7 @@ development_status:
 
   epic-4: in-progress
   4-1-service-lifecycle-readiness: done
-  4-2-plan-model-compilation-via-plan-author-provider: ready-for-dev
+  4-2-plan-model-compilation-via-plan-author-provider: done
   4-3-deterministic-test-data: ready-for-dev
   4-4-http-probe-executor: ready-for-dev
   4-5-observation-probes-before-after-invariants: ready-for-dev
