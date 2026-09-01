@@ -69,14 +69,14 @@ development_status:
   3-8-provider-provenance-wiring: done
   epic-3-retrospective: done
 
-  epic-4: backlog
-  4-1-service-lifecycle-readiness: backlog
-  4-2-plan-model-compilation-via-plan-author-provider: backlog
-  4-3-deterministic-test-data: backlog
-  4-4-http-probe-executor: backlog
-  4-5-observation-probes-before-after-invariants: backlog
-  4-6-shell-probes: backlog
-  4-7-ai-free-behavioral-verify-end-to-end: backlog
+  epic-4: in-progress
+  4-1-service-lifecycle-readiness: ready-for-dev
+  4-2-plan-model-compilation-via-plan-author-provider: ready-for-dev
+  4-3-deterministic-test-data: ready-for-dev
+  4-4-http-probe-executor: ready-for-dev
+  4-5-observation-probes-before-after-invariants: ready-for-dev
+  4-6-shell-probes: ready-for-dev
+  4-7-ai-free-behavioral-verify-end-to-end: ready-for-dev
   epic-4-retrospective: optional
 
   epic-5: backlog
