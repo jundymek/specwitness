@@ -310,16 +310,50 @@ describe('removeWorktreeAt — the path-only form clean (3.2) uses', () => {
     await expect(vcs().removeWorktreeAt(root, created.path)).resolves.toBeUndefined();
   });
 
-  it('does NOT delete a container it was not told about', async () => {
-    const { repo, root } = await repoWithRoot('wt-at-container');
+  it('removes the container too, since a path proves which one it is', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-container-owned');
     const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+
+    // Teardown only ever has the PATH: the stage publishes
+    // `environment.worktreePath` and the `CreatedWorktree` (with its container)
+    // does not survive the stage. So if the path-only form left the container,
+    // every single verification run would leak an empty temp directory — and so
+    // would every crashed run `clean` reaps.
+    //
+    // It is safe to remove because the ownership guard has already proved the
+    // shape: the path is `<specwitness-worktree-*>/worktree`, so its parent is
+    // OUR container by construction rather than by guess.
+    await vcs().removeWorktreeAt(root, created.path);
+
+    expect(await exists(created.path)).toBe(false);
+    expect(await exists(created.container)).toBe(false);
+  });
+
+  it('leaves a container alone if anything else is in it', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-container-occupied');
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+    await writeFile(join(created.container, 'someone-elses-file.txt'), 'not ours\n', 'utf8');
 
     await vcs().removeWorktreeAt(root, created.path);
 
-    // A path alone does not identify a container, and guessing at deleting a
-    // temp directory nobody claimed is not something a reaper should do.
+    // The emptiness check is what keeps this a removal of our own leftover
+    // rather than a recursive delete of whatever happens to be nearby.
+    expect(await exists(created.path)).toBe(false);
     expect(await exists(created.container)).toBe(true);
-    await rm(created.container, { recursive: true, force: true });
+  });
+
+  it('never removes a directory that is not one of our containers', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-foreign-parent');
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+
+    // The container cleanup keys on the `specwitness-worktree-*` name that the
+    // ownership guard has already proved, so a worktree living somewhere else
+    // could never drag its parent down with it. Asserted from the other side:
+    // the repository's own directory is untouched by a removal next door.
+    await vcs().removeWorktreeAt(root, created.path);
+
+    expect(await exists(repo.path)).toBe(true);
+    expect(await exists(repo.scratch)).toBe(true);
   });
 });
 
@@ -405,5 +439,56 @@ describe('the worktree directory is a real checkout', () => {
     await vcs().removeWorktree(root, created);
     const entries = await vcs().listWorktrees(root);
     expect(entries.map((entry) => entry.path)).not.toContain(created.path);
+  });
+});
+
+describe('a registration whose checkout is gone is still a registration', () => {
+  it('removes it rather than reporting success and leaving it behind', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-missing-checkout');
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+
+    // The ordinary shape of what `clean` replays: a crashed run whose temp
+    // checkout the OS (or anything else) later removed, while git's
+    // registration survived — which is precisely what `git worktree prune`
+    // exists for.
+    await rm(created.path, { recursive: true, force: true });
+    const before = await vcs().listWorktrees(root);
+    expect(before.map((entry) => entry.path)).toContain(created.path);
+
+    // Addressed by a NON-canonical spelling of the same path, because that is
+    // what a caller can hold. `os.tmpdir()` returns the symlink form on macOS
+    // (`/var/folders/…`) while git records and reports the resolved one
+    // (`/private/var/folders/…`), so any caller that joined a path from
+    // `tmpdir()` rather than from `realpath(tmpdir())` has this spelling. The
+    // function must not care which spelling it is handed.
+    const asCallerSpelledIt = created.path.startsWith('/private/')
+      ? created.path.slice('/private'.length)
+      : created.path;
+
+    await vcs().removeWorktreeAt(root, asCallerSpelledIt);
+
+    // Reported by bob (3.2) with the mechanism, which is worth keeping: once
+    // the leaf is gone `realpath` can no longer resolve the recorded path, so a
+    // resolver that silently falls back to a LEXICAL path leaves it as
+    // `/var/folders/…` while git reports the canonical `/private/var/folders/…`.
+    // The two stop comparing equal, the registration lookup answers "absent",
+    // and removal takes its no-op branch and returns SUCCESS — so `clean` marks
+    // the run reaped with the registration still there.
+    //
+    // Same class as this module's first defect: never conclude "absent" from a
+    // lookup that could not be answered.
+    const after = await vcs().listWorktrees(root);
+    expect(after.map((entry) => entry.path)).not.toContain(created.path);
+  });
+
+  it('is still a no-op for a path that was never registered at all', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-never-registered');
+
+    // The other half, so the fix cannot be "always attempt a removal": a path
+    // that genuinely names nothing must still resolve quietly, or `clean` stops
+    // replaying the moment it meets an already-reaped entry.
+    await expect(
+      vcs().removeWorktreeAt(root, join(repo.scratch, 'specwitness-worktree-never', 'worktree')),
+    ).resolves.toBeUndefined();
   });
 });

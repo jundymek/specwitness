@@ -365,35 +365,6 @@ describe('clean against a real git worktree', () => {
     expect((await store.readManifest(runId)).reaped).toBe(false);
   });
 
-  it('records the current, imperfect behaviour for a vanished checkout', async () => {
-    // The active half of the skipped test above: this pins what `clean` really
-    // does today, so the gap is visible in a green run rather than only in a
-    // comment. When story 3.1's `isRegistered` stops concluding "absent" from a
-    // path it cannot resolve, THIS test is the one that should start failing,
-    // and the skipped one above is the one to un-skip.
-    const repo = await seedRepo();
-    const worktree = await specwitnessWorktreePath();
-    await gitIn(repo, ['worktree', 'add', '--detach', '--quiet', worktree, 'HEAD']);
-    await rm(worktree, { recursive: true, force: true });
-
-    const store = new RunStore(repo, new SystemClock(), new RandomIds());
-    await mkdir(join(repo, '.specwitness'), { recursive: true });
-    const { runId } = await store.createRun();
-    await store.recordWorktree(runId, worktree);
-
-    const report = await cleanRuns(
-      store,
-      { all: false },
-      defaultCleanEffects(repo, createProcessRunner(new SystemClock())),
-    );
-
-    // No error is reported — and the registration survives. Documented, not
-    // endorsed. Nothing was destroyed and nothing was mis-signalled; the cost
-    // is a stale registration an operator clears with `git worktree prune`.
-    expect(report.failures).toEqual([]);
-    expect((await gitIn(repo, ['worktree', 'list', '--porcelain'])).stdout).toContain(worktree);
-  });
-
   it('treats a path that was never registered as nothing to do', async () => {
     // Manifest replay hits this constantly — `clean` run twice, or a run that
     // tore itself down cleanly before crashing later. It must be a no-op rather
@@ -417,29 +388,28 @@ describe('clean against a real git worktree', () => {
   });
 
   /**
-   * BLOCKED ON STORY 3.1 — kept, skipped, and reported rather than deleted.
+   * UNBLOCKED — story 3.1 fixed the mechanism this was waiting on.
    *
-   * This asserts the end state `clean` needs and does not yet get. The
-   * mechanism, root-caused here and sent to alice (3.1) with a reproduction:
-   * `isRegistered` in `src/infra/vcs.ts` compares `resolveReal(entry.path)`
+   * Kept as bob (3.2) wrote it, un-skipped rather than rewritten, because the
+   * point of leaving it skipped was that un-skipping it is the check that the
+   * fix landed. Its companion — the test that pinned the old, imperfect
+   * behaviour so the gap showed up in a green run — has been removed, since it
+   * now documents behaviour that no longer exists.
+   *
+   * The mechanism, root-caused by 3.2 and sent with a reproduction:
+   * `isRegistered` in `src/infra/vcs.ts` compared `resolveReal(entry.path)`
    * against `resolveReal(recordedPath)`. Once the CHECKOUT DIRECTORY is gone,
-   * `realpath` can no longer resolve the recorded path, so on macOS it stays
-   * `/var/folders/...` while git reports its entry as the canonical
-   * `/private/var/folders/...`. The two stop comparing equal, `isRegistered`
-   * answers false, `removeWorktreeAt` takes its already-absent no-op branch,
-   * and `clean` marks the run reaped with the registration still there.
+   * `realpath` can no longer resolve the recorded path, so on macOS it stayed
+   * `/var/folders/...` while git reported its entry as the canonical
+   * `/private/var/folders/...`. The two stopped comparing equal, `isRegistered`
+   * answered false, `removeWorktreeAt` took its already-absent no-op branch,
+   * and `clean` marked the run reaped with the registration still there.
    *
-   * That is precisely the case this command exists for — a crashed run whose
-   * temp checkout the OS later cleaned — so it matters more here than anywhere.
-   * It is HER file and HER story, so it is not patched from this branch: the
-   * cohort rule is that several agents fixing one thing several ways is worse
-   * than the defect. Un-skipping this test is the check that her fix landed.
-   *
-   * My own copy of the removal helper had the same CLASS of bug (Codex P1,
-   * fixed before hers merged) and the shape of the fix is the same: never
-   * conclude "absent" from a lookup that could not be answered.
+   * `canonicalize` now resolves the nearest EXISTING ancestor and re-appends the
+   * segments below it, so a checkout that is already gone still compares equal
+   * to the entry git reports for it.
    */
-  it.skip('does NOT report a stale registration as reaped when the directory is gone', async () => {
+  it('does NOT report a stale registration as reaped when the directory is gone', async () => {
     const repo = await seedRepo();
     const worktree = await specwitnessWorktreePath();
     await gitIn(repo, ['worktree', 'add', '--detach', '--quiet', worktree, 'HEAD']);

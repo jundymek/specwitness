@@ -398,21 +398,46 @@ describe('removal only ever touches worktrees SpecWitness created', () => {
       }
     }
 
-    // Nothing was left behind in the operator's checkout — asserted on the
-    // DIRECTORY, not only on `git status`.
+    // Nothing of OURS was left behind in the operator's checkout — asserted on
+    // the DIRECTORY, not only on `git status`.
     //
-    // Both assertions are here on purpose, and the order matters. Measured:
-    // git does not report an EMPTY untracked directory (an empty `scratch/` is
-    // silent; a `scratch/` with a file in it shows `?? scratch/`). So the
-    // status check alone would miss a leaked empty `mkdtemp` container — which
-    // is exactly what a broken guard leaves behind. Reading the directory
-    // catches that; the status check still earns its place by catching any
-    // FILE the attempt might have written.
-    expect(await readdir(tmpInsideCheckout)).toEqual([]);
-    expect((await git(linked, 'status', '--porcelain')).trim()).toBe('');
+    // Both assertions are here on purpose. Measured: git does not report an
+    // EMPTY untracked directory (an empty `scratch/` is silent; a `scratch/`
+    // with a file in it shows `?? scratch/`). So the status check alone would
+    // miss a leaked empty `mkdtemp` container, which is exactly what a broken
+    // guard leaves behind. Reading the directory catches that; the status check
+    // still earns its place by catching any FILE the attempt might have written.
+    //
+    // Asserted as "no container of ours" rather than "completely empty": with
+    // `TMPDIR` pointed here, macOS may drop its own cache files (`xcrun_db` and
+    // friends) into the directory when anything spawns a tool. An emptiness
+    // assertion would then fail for a reason that has nothing to do with this
+    // code, making the suite platform-dependent — and a test that fails for the
+    // wrong reason teaches the next reader to ignore it.
+    // Property one: no container of ours survived the refusal.
+    const strays = (await readdir(tmpInsideCheckout)).filter((name) =>
+      name.startsWith('specwitness-worktree-'),
+    );
+    expect(strays).toEqual([]);
 
-    // And leave the fixture as we found it, so nothing downstream inherits it.
+    // The scaffolding comes out BEFORE the status check, and the order is the
+    // point rather than tidiness. `scratch/` is a directory THIS TEST created to
+    // point `TMPDIR` at; it is not SpecWitness output. Leaving it in place made
+    // the status assertion depend on whether anything had dropped a cache file
+    // into it — macOS can, when a tool spawns — in which case `git status` would
+    // report `?? scratch/` and the test would fail for a reason that has nothing
+    // to do with the code under test. Filtering the `readdir` above hardened one
+    // assertion and left this one exposed to the identical condition.
+    //
+    // Not reproduced on this machine (the exact single-test command passes
+    // repeatedly, and a direct probe spawning git with `TMPDIR` pointed inside a
+    // checkout leaves it empty), but the exposure is real and removing it costs
+    // nothing.
     await rm(tmpInsideCheckout, { recursive: true, force: true });
+
+    // Property two, now asserted about SpecWitness alone: nothing was written
+    // anywhere else in the operator's checkout.
+    expect((await git(linked, 'status', '--porcelain')).trim()).toBe('');
   });
 
   it('refuses the main worktree outright', async () => {

@@ -43,9 +43,9 @@
  * and nothing reads `process.env` by name.
  */
 
-import { mkdtemp, realpath, rm, stat } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, rmdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 import { InfraError } from '../domain/errors.js';
 import type { ProcessResult, ProcessRunner } from '../domain/process-runner.js';
@@ -371,6 +371,24 @@ export function isObjectId(value: string): boolean {
   return /^[0-9a-f]{40}$/.test(value) || /^[0-9a-f]{64}$/.test(value);
 }
 
+/**
+ * Removes the `mkdtemp` container holding `worktreePath`, if it is now empty.
+ *
+ * Only ever called after `isSpecWitnessWorktreePath` has proved the shape, so the
+ * parent is a container this module minted. `rmdir` rather than a recursive
+ * remove is the safety property: it refuses a non-empty directory, so anything
+ * unexpected sitting alongside the worktree keeps both itself and the directory.
+ * Best-effort — a container that cannot be removed is a stray empty temp
+ * directory, which is not worth failing a teardown over.
+ */
+async function removeEmptyContainer(worktreePath: string): Promise<void> {
+  try {
+    await rmdir(dirname(worktreePath));
+  } catch {
+    // Not empty, already gone, or not ours to remove. All fine.
+  }
+}
+
 /** True when the path exists and is a directory. */
 async function isDirectory(path: string): Promise<boolean> {
   try {
@@ -386,6 +404,51 @@ async function resolveReal(path: string): Promise<string> {
     return await realpath(path);
   } catch {
     return resolve(path);
+  }
+}
+
+/**
+ * The canonical form of a path, WHETHER OR NOT IT STILL EXISTS.
+ *
+ * `resolveReal` cannot do this, and the difference is a real defect it caused.
+ * `realpath` fails on a path that is gone, so it falls back to a LEXICAL
+ * resolve — which leaves a macOS temp path as `/var/folders/…` while git,
+ * having resolved it when the worktree was created, reports
+ * `/private/var/folders/…`. The two stop comparing equal exactly when the
+ * checkout has been deleted, so `isRegistered` answered "absent" for a worktree
+ * that was still registered, `removeWorktreeAt` took its no-op branch, and
+ * story 3.2's `clean` marked the run reaped with the registration alive.
+ *
+ * That is the ordinary shape of what `clean` replays — a crashed run whose temp
+ * checkout something later removed, which is what `git worktree prune` exists
+ * for — so the one input where the shortcut was wrong is the one input that
+ * matters most. Reported by bob (3.2) with the mechanism and a reproduction.
+ *
+ * It is also this module's first defect wearing a new hat: never conclude
+ * "absent" from a lookup that could not be answered. So this resolves the
+ * NEAREST EXISTING ANCESTOR — which for a deleted worktree is its container, or
+ * failing that the temp root — and re-appends the segments below it. The
+ * existing part gets canonicalised properly; the missing part cannot lie.
+ */
+async function canonicalize(path: string): Promise<string> {
+  const absolute = resolve(path);
+  const missing: string[] = [];
+  let current = absolute;
+
+  for (;;) {
+    try {
+      const real = await realpath(current);
+      return missing.length === 0 ? real : join(real, ...missing.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) {
+        // Reached the filesystem root without resolving anything. Nothing is
+        // canonicalisable, so the lexical form is the most honest answer.
+        return absolute;
+      }
+      missing.push(basename(current));
+      current = parent;
+    }
   }
 }
 
@@ -917,9 +980,12 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
   /** True when a worktree at `path` is currently registered in the repository. */
   const isRegistered = async (root: RepoRoot, path: string): Promise<boolean> => {
     const entries = await requireWorktrees(root);
-    const target = await resolveReal(path);
+    // BOTH sides canonicalised the same way, and with `canonicalize` rather
+    // than `resolveReal`, so a checkout that has already been deleted still
+    // compares equal to the entry git reports for it.
+    const target = await canonicalize(path);
     for (const entry of entries) {
-      if ((await resolveReal(entry.path)) === target) {
+      if ((await canonicalize(entry.path)) === target) {
         return true;
       }
     }
@@ -1053,7 +1119,7 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // Without that guard, one corrupt manifest could erase a developer's
     // workspace — on this machine, nine agent worktrees full of uncommitted
     // work.
-    const resolved = await resolveReal(worktreePath);
+    const resolved = await canonicalize(worktreePath);
     if (!isSpecWitnessWorktreePath(resolved)) {
       throw new InfraError(
         `refusing to remove a worktree SpecWitness did not create: ${worktreePath}`,
@@ -1087,6 +1153,27 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
         `run 'git worktree prune' in ${root.mainWorktreeRoot}`,
       );
     }
+
+    // And the container, which by now is provably ours and provably empty.
+    //
+    // This is a REVERSAL of the earlier contract, and the reason is worth
+    // recording. It originally left the container alone, agreed with story 3.2
+    // on the grounds that a reaper holding only a path "does not know the
+    // container and should not guess at deleting a temp directory". That
+    // reasoning was sound when it was made — and the ownership guard above
+    // retired it. A path that reaches this line has been proved to be
+    // `<specwitness-worktree-*>/worktree`, so its parent is the container this
+    // module minted, by construction rather than by inference.
+    //
+    // Leaving it was not a tidiness question either: teardown only ever has the
+    // PATH (the stage publishes `environment.worktreePath`; the
+    // `CreatedWorktree` does not survive it), so the container would leak on
+    // EVERY successful run as well as every crashed one it reaps.
+    //
+    // Removed non-recursively and only when empty, so this can never become a
+    // recursive delete of whatever happens to sit nearby — if anything else is
+    // in there, it stays, and so does the directory.
+    await removeEmptyContainer(worktreePath);
   };
 
   const removeWorktree = async (root: RepoRoot, worktree: CreatedWorktree): Promise<void> => {
