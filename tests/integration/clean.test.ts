@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { defaultCleanEffects, cleanRuns } from '../../src/cli/commands/clean.js';
 import { SystemClock } from '../../src/infra/clock.js';
 import { createProcessRunner } from '../../src/infra/process-runner.js';
-import { RunStore } from '../../src/infra/run-store.js';
+import { OWNER_FILENAME, RunStore } from '../../src/infra/run-store.js';
 import { RandomIds } from '../../src/infra/ids.js';
 
 /**
@@ -79,6 +79,55 @@ async function waitForFile(path: string, timeoutMs = 5_000): Promise<string> {
 
 function makeStore(): RunStore {
   return new RunStore(projectRoot, new SystemClock(), new RandomIds());
+}
+
+/**
+ * Makes a run look CRASHED by giving it an owner that has exited.
+ *
+ * `clean` refuses to touch a run whose owning process is still alive — without
+ * that, running `clean` while a `verify` is in flight would SIGTERM the
+ * verification and then mark its run reaped. In these tests the owner is the
+ * VITEST process, which is emphatically alive, so every run would be skipped as
+ * active and nothing would be reaped.
+ *
+ * So the owner record is rewritten to describe an owner that is gone — which is
+ * exactly what a crashed run leaves behind.
+ *
+ * BOTH FIELDS MATTER, and the second one is what makes this deterministic. An
+ * earlier version used only the pid of a process that had just exited, and that
+ * was a race: macOS hands out pids near-sequentially, so the very next spawn —
+ * `clean`'s own `ps` probe — could be given that pid back. The probe then found
+ * it alive, its start time fell inside the one-second identity tolerance, the
+ * run was classified ACTIVE, and every cleanup assertion in this file failed.
+ * Caught in review; it reproduced.
+ *
+ * So `recordedAt` is set far in the past as well. Now BOTH arms of the guard
+ * agree the owner is gone, and neither depends on how the OS allocates pids:
+ *
+ *   pid genuinely free  -> the probe says `gone`          (the liveness arm)
+ *   pid reused          -> alive, but started long AFTER  (the identity arm)
+ *                          `recordedAt`, so it is not the owner
+ *
+ * An owner that died long ago is also the ordinary case for `clean`, so this is
+ * a more faithful fixture than the one it replaces, not merely a steadier one.
+ */
+const LONG_DEAD = '2020-01-01T00:00:00.000Z';
+
+async function simulateCrashedOwner(store: RunStore, runId: string): Promise<void> {
+  const finished = await createProcessRunner(new SystemClock()).run({
+    binary: process.execPath,
+    args: ['-e', ''],
+    cwd: projectRoot,
+    timeoutMs: 30_000,
+    env: { inherit: true },
+  });
+  const deadPid = finished.pgid as number;
+  await waitForExit(deadPid);
+
+  await writeFile(
+    join(store.runDir(runId), OWNER_FILENAME),
+    `${JSON.stringify({ pid: deadPid, recordedAt: LONG_DEAD }, null, 2)}\n`,
+  );
 }
 
 beforeEach(async () => {
@@ -166,6 +215,8 @@ describe('clean against real processes', () => {
       // the ordering that makes crash recovery possible at all.
       expect((await store.readManifest(runId)).processGroups).toEqual([pgid]);
 
+      await simulateCrashedOwner(store, runId);
+
       const report = await cleanRuns(
         makeStore(),
         { all: false },
@@ -206,6 +257,7 @@ describe('clean against real processes', () => {
 
     expect(finished.outcome).toBe('completed');
     expect(await waitForExit(pgid)).toBe(true);
+    await simulateCrashedOwner(store, runId);
 
     const report = await cleanRuns(
       makeStore(),
@@ -253,6 +305,7 @@ describe('clean against real processes', () => {
     };
     manifest.processGroups = [pgid];
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await simulateCrashedOwner(store, runId);
 
     const report = await cleanRuns(
       makeStore(),
@@ -312,6 +365,54 @@ async function seedRepo(): Promise<string> {
   return repo;
 }
 
+describe('the crashed-owner fixture itself cannot be defeated by pid reuse', () => {
+  it('still reaps when the recorded owner pid is very much alive', async () => {
+    // Review found the previous fixture nondeterministic: it recorded the pid of
+    // a process that had just exited, and macOS hands pids out near-sequentially,
+    // so `clean`'s own `ps` probe could be given that pid back. The probe then
+    // saw it alive, its start time fell inside the one-second identity
+    // tolerance, the run read as ACTIVE, and every cleanup assertion in this
+    // file failed.
+    //
+    // The fixture now also backdates `recordedAt`, so the identity arm rejects
+    // any live occupant of that pid. This test is that claim made falsifiable:
+    // it hands the guard the WORST case — the pid of this very process, which is
+    // unambiguously alive — and requires the run to be reaped anyway.
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await store.recordWorktree(runId, join(projectRoot, 'never-existed'));
+    await simulateCrashedOwner(store, runId);
+
+    // Overwrite with a pid that cannot possibly be free.
+    await writeFile(
+      join(store.runDir(runId), OWNER_FILENAME),
+      `${JSON.stringify({ pid: process.pid, recordedAt: LONG_DEAD }, null, 2)}\n`,
+    );
+
+    const repo = await seedRepo();
+    const repoStore = new RunStore(repo, new SystemClock(), new RandomIds());
+    await mkdir(join(repo, '.specwitness'), { recursive: true });
+    const { runId: repoRunId } = await repoStore.createRun();
+    await repoStore.recordWorktree(repoRunId, join(projectRoot, 'never-existed'));
+    await writeFile(
+      join(repoStore.runDir(repoRunId), OWNER_FILENAME),
+      `${JSON.stringify({ pid: process.pid, recordedAt: LONG_DEAD }, null, 2)}\n`,
+    );
+
+    const report = await cleanRuns(
+      repoStore,
+      { all: false },
+      defaultCleanEffects(repo, createProcessRunner(new SystemClock())),
+    );
+
+    // Not skipped as active: a live pid that started long after the record is
+    // not the owner, whatever the OS did with pid allocation.
+    expect(report.runs[0]?.skipped).toBeUndefined();
+    expect(report.failures).toEqual([]);
+    expect((await repoStore.readManifest(repoRunId)).reaped).toBe(true);
+  });
+});
+
 describe('clean against a real git worktree', () => {
   it('removes a recorded worktree and leaves no registration behind', async () => {
     const repo = await seedRepo();
@@ -322,6 +423,7 @@ describe('clean against a real git worktree', () => {
     await mkdir(join(repo, '.specwitness'), { recursive: true });
     const { runId } = await store.createRun();
     await store.recordWorktree(runId, worktree);
+    await simulateCrashedOwner(store, runId);
 
     const report = await cleanRuns(
       store,
@@ -351,6 +453,7 @@ describe('clean against a real git worktree', () => {
     await mkdir(join(repo, '.specwitness'), { recursive: true });
     const { runId } = await store.createRun();
     await store.recordWorktree(runId, foreign);
+    await simulateCrashedOwner(store, runId);
 
     const report = await cleanRuns(
       store,
@@ -375,6 +478,7 @@ describe('clean against a real git worktree', () => {
     await mkdir(join(repo, '.specwitness'), { recursive: true });
     const { runId } = await store.createRun();
     await store.recordWorktree(runId, join(projectRoot, 'never-existed'));
+    await simulateCrashedOwner(store, runId);
 
     const report = await cleanRuns(
       store,
@@ -422,6 +526,7 @@ describe('clean against a real git worktree', () => {
     await mkdir(join(repo, '.specwitness'), { recursive: true });
     const { runId } = await store.createRun();
     await store.recordWorktree(runId, worktree);
+    await simulateCrashedOwner(store, runId);
 
     const report = await cleanRuns(
       store,

@@ -96,6 +96,15 @@ interface ProcessSnapshot {
    */
   readonly undatable: ReadonlySet<number>;
   /**
+   * PIDs whose row was present but undatable — the same fact indexed by
+   * process rather than by group, because `probeProcesses` asks about a pid.
+   *
+   * Kept separately rather than derived: a pid appearing in `undatable` would
+   * only mean "some member of the group with that NUMBER was undatable", which
+   * is a different claim and true by coincidence.
+   */
+  readonly undatablePids: ReadonlySet<number>;
+  /**
    * True when some line could not be attributed to a pgid at all. Then no
    * absence can be proved from this snapshot, because the missing member could
    * have been in any of those lines.
@@ -192,6 +201,139 @@ export async function probeProcessGroups(
   return probes;
 }
 
+/** What is known about one process, right now. */
+export interface ProcessProbe {
+  readonly pid: number;
+  readonly state: 'live' | 'gone' | 'unknown';
+  /** When the OS says it started. Present only when `live`. */
+  readonly startedAt?: Date;
+  readonly detail?: string;
+}
+
+/**
+ * Probes individual PROCESSES — used to ask whether a run's owner is still
+ * running, so `clean` never reaps a verification that is still going.
+ *
+ * Same one-`ps` shape and the same one-sided rule as the group probe: `gone` is
+ * concluded only from evidence of absence, and anything unreadable is `unknown`.
+ * `unknown` makes `clean` leave the run alone, which is the safe direction here
+ * too — refusing to reap costs a leak an operator can see, while reaping a live
+ * run kills their verification.
+ */
+export async function probeProcesses(
+  runner: ProcessRunner,
+  pids: readonly number[],
+  cwd: string,
+): Promise<ReadonlyMap<number, ProcessProbe>> {
+  const probes = new Map<number, ProcessProbe>();
+  if (pids.length === 0) {
+    return probes;
+  }
+
+  const result = await runner.run({
+    binary: 'ps',
+    args: ['-A', '-o', 'pid=,pgid=,lstart='],
+    cwd,
+    timeoutMs: PS_TIMEOUT_MS,
+    env: { inherit: true, set: { LC_ALL: 'C' } },
+  });
+
+  if (result.outcome !== 'completed' || result.exitCode !== 0) {
+    const detail = describeProbeFailure(result.outcome, result.exitCode, result.stderr);
+    for (const pid of pids) {
+      probes.set(pid, { pid, state: 'unknown', detail });
+    }
+    return probes;
+  }
+
+  const snapshot = parseProcessSnapshot(result.stdout);
+
+  for (const pid of pids) {
+    // Asked first and authoritative about existence, exactly as for groups: it
+    // is the same question the decision actually turns on, and it cannot be
+    // defeated by a `ps` line this module failed to parse.
+    const exists = processExists(pid);
+
+    if (exists === false) {
+      probes.set(pid, { pid, state: 'gone' });
+      continue;
+    }
+
+    const row = snapshot.rows.find((candidate) => candidate.pid === pid);
+    if (row !== undefined && !snapshot.undatablePids.has(pid)) {
+      probes.set(pid, { pid, state: 'live', startedAt: row.startedAt });
+      continue;
+    }
+
+    // Present but undatable, or alive but unlisted, or unparseable output. All
+    // three are `unknown`, and `clean` treats an unknown owner as ALIVE — which
+    // costs a visible leak rather than a killed verification.
+    probes.set(pid, {
+      pid,
+      state: 'unknown',
+      detail: snapshot.undatablePids.has(pid)
+        ? 'ps listed the process but its start time could not be parsed, so its identity could not be verified'
+        : exists === true
+          ? 'the process is alive but ps did not list it, so its identity could not be verified'
+          : 'ps produced output this build could not parse, so the process could not be proved absent',
+    });
+  }
+
+  return probes;
+}
+
+/**
+ * Does a process exist? `undefined` when it cannot be asked.
+ *
+ * The single-process twin of `processGroupExists`, with the same one-sided
+ * rule: only a definite ESRCH may conclude absence. EPERM means it exists and
+ * belongs to somebody else, which is not "gone".
+ */
+function processExists(pid: number): boolean | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return undefined;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') {
+      return false;
+    }
+    if (code === 'EPERM') {
+      return true;
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Is a run's recorded owner still the process that owns it?
+ *
+ * The check runs in the OPPOSITE direction to the process-group one, and is
+ * sound for the same reason. A run's owner must have STARTED BEFORE the run
+ * recorded it — it is the process that did the recording. If that owner died,
+ * its pid can only have been reused by a process that started after the death,
+ * which is after the record. So "started at or before the recorded instant"
+ * identifies the true owner, and a recycled pid fails it.
+ *
+ * NO FORWARD SLACK, and the reason is the one that made the first version
+ * wrong. `ps lstart` reports whole seconds, so a start time is TRUNCATED — it
+ * only ever moves EARLIER than the truth, never later. A genuine owner
+ * therefore satisfies `reported <= true start < recordedAt` on its own, and the
+ * second of slack the first version added bought nothing for it. What that
+ * slack did buy was a pid reused within the same second as the record looking
+ * like the original owner — and because the guard errs toward "still running",
+ * a long-lived replacement would make every future `clean` skip that crashed
+ * run permanently. The rounding direction is what settles it: correcting for a
+ * granularity that only ever underestimates, by overestimating, adds a failure
+ * mode instead of removing one.
+ */
+export function ownerStartedBeforeRecord(startedAt: Date, recordedAt: Date): boolean {
+  return startedAt.getTime() <= recordedAt.getTime();
+}
+
 /**
  * Does a process group have any member? `undefined` when it cannot be asked.
  *
@@ -270,6 +412,7 @@ export function startTimeMatchesRecord(startedAt: Date, recordedAt: Date): boole
 function parseProcessSnapshot(stdout: string): ProcessSnapshot {
   const rows: ProcessRow[] = [];
   const undatable = new Set<number>();
+  const undatablePids = new Set<number>();
   let unattributable = false;
 
   for (const line of stdout.split('\n')) {
@@ -286,15 +429,17 @@ function parseProcessSnapshot(stdout: string): ProcessSnapshot {
     const pgid = Number(pgidText);
     const startedAt = new Date(startText);
     if (Number.isNaN(startedAt.getTime())) {
-      // The group is demonstrably alive — we are looking at one of its members
-      // — we simply cannot date it. That is `unknown`, never `gone`.
+      // The process is demonstrably alive — we are looking at its row — we
+      // simply cannot date it. That is `unknown`, never `gone`, for the group
+      // it belongs to AND for the process itself.
       undatable.add(pgid);
+      undatablePids.add(Number(pidText));
       continue;
     }
     rows.push({ pid: Number(pidText), pgid, startedAt });
   }
 
-  return { rows, undatable, unattributable };
+  return { rows, undatable, undatablePids, unattributable };
 }
 
 /** A sentence an operator can act on, for each way `ps` can fail. */

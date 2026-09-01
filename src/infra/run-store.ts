@@ -40,7 +40,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, open, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { InfraError } from '../domain/errors.js';
@@ -48,6 +48,7 @@ import type { Clock, Ids } from '../domain/ports.js';
 import type { RunResult } from '../domain/run-result.js';
 import { isRunId, makeRunId, parseRunId } from '../domain/run-id.js';
 import {
+  IsoUtcTimestamp,
   MANIFEST_FILENAME,
   newRunManifest,
   parseRunManifest,
@@ -96,6 +97,28 @@ const RESULT_FILENAME = 'result.json';
 export const PROCESS_GROUPS_FILENAME = 'process-groups.json';
 
 /**
+ * Which SpecWitness process owns a run, so `clean` can tell a CRASHED run from
+ * one that is still going.
+ *
+ * `clean` replays manifests, and a manifest cannot say whether its run is
+ * finished. Without this, running `clean` in one terminal while `verify` runs in
+ * another does two bad things at once: the active run's process groups pass
+ * every liveness and identity check — they genuinely are groups SpecWitness
+ * recorded moments ago — so `clean` SIGTERMs an in-progress verification; and it
+ * then marks the run `reaped`, after which the still-running verify appends more
+ * pgids and worktrees to a reaped manifest that later `clean` runs skip. A
+ * permanent leak, created by the command whose job is to prevent leaks.
+ *
+ * The identity check runs in the opposite direction to the process-group one,
+ * and is sound for the same reason. A run's owner must have STARTED BEFORE the
+ * run was created. If the owner died, its pid can only have been reused by a
+ * process that started after that death — which is after the run was created.
+ * So "alive AND started before `createdAt`" identifies the true owner, and a
+ * recycled pid fails it.
+ */
+export const OWNER_FILENAME = 'owner.json';
+
+/**
  * A staging name reserved by agreement — and NOTHING WRITES IT ANY MORE.
  *
  * Story 3.2 reserved this when story 3.5 expected to stage under its own name.
@@ -123,6 +146,7 @@ const RESERVED_FILENAMES: ReadonlySet<string> = new Set([
   RESULT_FILENAME,
   RESULT_STAGING_FILENAME,
   PROCESS_GROUPS_FILENAME,
+  OWNER_FILENAME,
 ]);
 
 /**
@@ -159,6 +183,14 @@ export interface StoredResult {
   readonly text: string;
   /** Absolute path, for error messages that name what was read. */
   readonly path: string;
+}
+
+/** Which process created a run, and when. See `OWNER_FILENAME`. */
+export interface RunOwner {
+  /** The pid of the SpecWitness process that created the run. */
+  readonly pid: number;
+  /** When the run recorded that ownership, ISO-8601 UTC from the AD-9 clock. */
+  readonly recordedAt: string;
 }
 
 /** A newly created run. */
@@ -275,6 +307,22 @@ export class RunStore {
         `check that ${this.runsRoot} is writable`,
       );
     }
+
+    // OWNERSHIP FIRST, before the manifest exists.
+    //
+    // The manifest is what makes a run readable to `clean`; a run whose
+    // manifest cannot be read is reported rather than reaped. So writing the
+    // owner first means there is no instant at which a run is reapable but
+    // unprotected. Recording ownership only on first RESOURCE acquisition left
+    // exactly that window: `clean` running in it saw a run with no owner and no
+    // resources, reaped it, and set `reaped: true` — and the live verifier then
+    // appended its first worktree or process group to a reaped manifest that
+    // ordinary future cleans skip forever. The same leak the guard exists to
+    // prevent, moved earlier in the run.
+    //
+    // `createdAt` is reused rather than reading the clock again, so run creation
+    // still consumes exactly one instant (AD-9 fakes are scripted sequences).
+    await this.#recordOwner(runId, createdAt);
 
     const manifest = newRunManifest({ runId, createdAt, epic: options.epic });
     await this.#writeDurably(dir, MANIFEST_FILENAME, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -502,6 +550,7 @@ export class RunStore {
    */
   async recordWorktree(runId: string, worktreePath: string): Promise<void> {
     await this.#serialize(async () => {
+      await this.#recordOwner(runId, this.#clock.now());
       await this.#updateManifest(runId, (manifest) =>
         manifest.worktrees.includes(worktreePath)
           ? null
@@ -541,6 +590,7 @@ export class RunStore {
     // is marked reaped while it is still acquiring resources is a CALLER
     // ordering question and nothing here can decide it.
     await this.#serialize(async () => {
+      await this.#recordOwner(runId, this.#clock.now());
       await this.#recordProcessGroupEvidence(runId, pgid);
       await this.#updateManifest(runId, (manifest) =>
         manifest.processGroups.includes(pgid)
@@ -564,6 +614,116 @@ export class RunStore {
         manifest.reaped ? null : { ...manifest, reaped: true },
       );
     });
+  }
+
+  /**
+   * Which process owns this run, or `null` when it never acquired a resource.
+   *
+   * A missing file is not an error: a run that recorded nothing has nothing to
+   * reap and nothing to protect. An unreadable one IS an error, because
+   * treating it as absent would let `clean` reap a live run.
+   */
+  async readOwner(runId: string): Promise<RunOwner | null> {
+    const path = join(this.runDir(runId), OWNER_FILENAME);
+
+    let text: string;
+    try {
+      text = await readFile(path, 'utf8');
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null;
+      }
+      throw new InfraError(
+        `could not read the owner record for ${runId}: ${describe(cause)}`,
+        `check that ${path} is readable`,
+      );
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new InfraError(
+        `owner record is not valid JSON: ${path}`,
+        'the file is corrupt, so SpecWitness cannot tell whether this run is still going; inspect it before reaping the run by hand',
+      );
+    }
+
+    const record = parsed as { pid?: unknown; recordedAt?: unknown };
+
+    // VALIDATED, not merely type-checked, because this record decides whether
+    // `clean` may signal anything. A type-compatible but meaningless value
+    // fails the guard OPEN, which is exactly backwards: a `recordedAt` of
+    // "yesterday" parses to `Invalid Date`, every comparison against it is
+    // false, the live verifier stops looking like the owner, and `clean`
+    // terminates the process groups of a run that is still going. The whole
+    // point of this file is that a doubtful answer means "leave it alone".
+    const pidIsValid = typeof record.pid === 'number' && Number.isInteger(record.pid) && record.pid > 0;
+    // Validated with the SHARED house validator from `src/schemas/manifest.ts`,
+    // not a second copy. Story 3.5 exported it for exactly this reason and the
+    // note there is right: two date validators in one codebase drift, and the
+    // way they drift is that one starts accepting `2026-02-31T…`, which
+    // JavaScript normalises to 3 March.
+    //
+    // Why anything stricter than `Date.parse` is needed here at all: this is a
+    // SAFETY record. `Date.parse` accepts `"0"` (the year 2000), `"2026"` and
+    // `"Mon Aug 31"`, and an accepted-but-meaningless old date makes the
+    // genuine live owner's start time look NEWER than the record — so `clean`
+    // decides the run has crashed and terminates the resources of a
+    // verification that is still going. The guard would fail OPEN on exactly
+    // the corruption it exists to catch.
+    const recordedAtIsValid =
+      typeof record.recordedAt === 'string' && IsoUtcTimestamp.safeParse(record.recordedAt).success;
+
+    if (!pidIsValid || !recordedAtIsValid) {
+      throw new InfraError(
+        `owner record is malformed: ${path}`,
+        'expected an object with a positive integer pid and an ISO-8601 UTC recordedAt (YYYY-MM-DDTHH:MM:SS.mmmZ); SpecWitness will not reap a run whose ownership it cannot read',
+      );
+    }
+
+    return { pid: record.pid as number, recordedAt: record.recordedAt as string };
+  }
+
+  /**
+   * Records this process as the run's owner, once, at run CREATION.
+   *
+   * Also called from each acquisition path, where it is a no-op for any run
+   * created by this build — kept so a run directory created by an older one
+   * still gains an owner the first time it acquires something, rather than
+   * staying unprotected for its whole life.
+   *
+   * Written before the resource it protects, like everything else here: if the
+   * process dies between this and the pgid append, `clean` sees an owner that is
+   * gone and reaps normally, which is correct. The reverse order would leave a
+   * window in which a live run looks crashed.
+   *
+   * NOT serialized here — its callers hold the queue, and `createRun` runs
+   * before any queue exists for this run. See `#updateManifest`.
+   */
+  async #recordOwner(runId: string, recordedAt: Date): Promise<void> {
+    const path = join(this.runDir(runId), OWNER_FILENAME);
+    try {
+      await stat(path);
+      return; // already recorded; ownership does not change mid-run
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new InfraError(
+          `could not check the owner record for ${runId}: ${describe(cause)}`,
+          `check that ${path} is readable`,
+        );
+      }
+    }
+
+    const owner: RunOwner = {
+      pid: process.pid,
+      recordedAt: recordedAt.toISOString(),
+    };
+    await this.#writeDurably(
+      this.runDir(runId),
+      OWNER_FILENAME,
+      `${JSON.stringify(owner, null, 2)}\n`,
+    );
   }
 
   /**
@@ -638,19 +798,79 @@ export class RunStore {
       const contained = this.#containedPath(dir, relativeName);
       const parent = dirname(contained.absolute);
 
-      await mkdir(parent, { recursive: true });
-      // The lexical check above proves the NAME cannot escape. It does not
-      // prove the PATH cannot: a component inside the run directory could be a
-      // symlink pointing elsewhere, and `mkdir`/`open` follow symlinks happily.
-      // So the resolved parent is checked against the resolved run directory
-      // after the directories exist — the only point at which the question can
-      // actually be answered.
+      // Creates the parent directories, refusing at the first symlinked
+      // component INSTEAD of creating through it. See the method below for why
+      // the check cannot come afterwards.
+      await this.#createContainedDirectory(dir, parent, relativeName);
+      // Belt and braces, and cheap: prove the parent really resolves inside.
       await this.#assertResolvesInside(dir, parent, relativeName);
 
       await this.#writeDurably(parent, basename(contained.absolute), contents);
 
       return contained.relative;
     });
+  }
+
+  /**
+   * Creates the parent directories of an evidence file WITHOUT ever descending
+   * through a symlink.
+   *
+   * The obvious implementation — `mkdir(parent, {recursive: true})` and then
+   * check where it landed — is wrong, and subtly so: for a name like
+   * `linked/new/out.txt` where `linked` already points outside the run
+   * directory, the recursive `mkdir` has CREATED `new` outside before any check
+   * runs. Rejecting afterwards leaves the mutation behind. A containment
+   * guarantee that only holds after the fact is not a containment guarantee.
+   *
+   * So each component is inspected before it is descended into: an existing
+   * symlink is refused, an existing non-directory is refused, and a missing one
+   * is created non-recursively — which cannot itself be a symlink, because this
+   * is what just made it.
+   *
+   * HONEST LIMIT: this narrows but cannot close a TOCTOU race, since another
+   * process could replace a component between the `lstat` and the `mkdir`.
+   * Closing it entirely needs `openat`-style relative descent, which Node does
+   * not expose. The realpath check that follows would still catch the result,
+   * and the threat model is someone who already has write access inside
+   * `.specwitness/runs/`.
+   */
+  async #createContainedDirectory(
+    dir: string,
+    parent: string,
+    relativeName: string,
+  ): Promise<void> {
+    const segments = relative(dir, parent)
+      .split(sep)
+      .filter((segment) => segment.length > 0);
+
+    let current = dir;
+    for (const segment of segments) {
+      const next = join(current, segment);
+      const info = await lstat(next).catch(() => null);
+
+      if (info === null) {
+        try {
+          await mkdir(next);
+        } catch (cause) {
+          throw new InfraError(
+            `could not create the evidence directory for '${relativeName}': ${describe(cause)}`,
+            'check free space and permissions on the run directory',
+          );
+        }
+      } else if (info.isSymbolicLink()) {
+        throw new InfraError(
+          `refusing to write evidence to '${relativeName}': '${segment}' is a symbolic link`,
+          'SpecWitness writes only inside the run directory, and will not follow a link out of it',
+        );
+      } else if (!info.isDirectory()) {
+        throw new InfraError(
+          `refusing to write evidence to '${relativeName}': '${segment}' exists and is not a directory`,
+          'choose an evidence name whose parent directories are directories',
+        );
+      }
+
+      current = next;
+    }
   }
 
   /**

@@ -14,7 +14,9 @@
  *                             re-verified and reported
  *
  * `--all` re-verifies; it does not widen the blast radius. It never reaches
- * another project, and it deletes nothing that bare `clean` would keep.
+ * another project, it deletes nothing that bare `clean` would keep, and it does
+ * NOT override the active-run guard below — "re-verify reaped runs" is not
+ * "kill things that are still working".
  *
  * IT REAPS RESOURCES, NEVER RESULTS (Q51). This command does not delete a run
  * directory, a `result.json`, an evidence file, or the manifest — on any path,
@@ -35,7 +37,10 @@
  *   3. `ps` reports the group is live;
  *   4. the earliest start time in that group matches the recorded instant
  *      (`src/infra/process-identity.ts`);
- *   5. it is not the process group SpecWitness itself is running in.
+ *   5. it is not the process group SpecWitness itself is running in;
+ *   6. the run is not STILL RUNNING — a manifest cannot say whether its run has
+ *      finished, and an active run's groups pass every check above, so `clean`
+ *      would otherwise SIGTERM a `verify` running in another terminal.
  *
  * Anything else is REPORTED and left running. Leaking is visible and
  * recoverable; killing the wrong process tree is neither.
@@ -52,9 +57,12 @@ import type { ProcessRunner } from '../../domain/process-runner.js';
 import { SystemClock } from '../../infra/clock.js';
 import { RandomIds } from '../../infra/ids.js';
 import {
+  ownerStartedBeforeRecord,
   probeProcessGroups,
+  probeProcesses,
   startTimeMatchesRecord,
   type ProcessGroupProbe,
+  type ProcessProbe,
 } from '../../infra/process-identity.js';
 import { createProcessRunner, terminateProcessGroup } from '../../infra/process-runner.js';
 import { RunStore } from '../../infra/run-store.js';
@@ -82,6 +90,8 @@ import { removeWorktreeAtPath } from '../../infra/vcs.js';
  */
 export interface CleanEffects {
   probeProcessGroups(pgids: readonly number[]): Promise<ReadonlyMap<number, ProcessGroupProbe>>;
+  /** Is a run's recorded owner process still running? */
+  probeProcesses(pids: readonly number[]): Promise<ReadonlyMap<number, ProcessProbe>>;
   terminateProcessGroup(pgid: number): Promise<void>;
   /**
    * Removes a recorded worktree AND verifies the git registration is gone.
@@ -100,8 +110,11 @@ export interface CleanEffects {
 /** What `clean` did to one run. */
 export interface RunCleanReport {
   readonly runId: string;
-  /** Set when the run was passed over entirely (already reaped, without --all). */
-  readonly skipped?: 'already-reaped';
+  /**
+   * Set when the run was passed over entirely: `already-reaped` without
+   * `--all`, or `active` because the process that owns it is still running.
+   */
+  readonly skipped?: 'already-reaped' | 'active';
   readonly killed: readonly number[];
   readonly alreadyGone: readonly number[];
   /** Recorded paths that are now confirmed removed AND unregistered. */
@@ -162,6 +175,7 @@ export function register(program: Command): void {
 export function defaultCleanEffects(projectRoot: string, runner: ProcessRunner): CleanEffects {
   return {
     probeProcessGroups: (pgids) => probeProcessGroups(runner, pgids, projectRoot),
+    probeProcesses: (pids) => probeProcesses(runner, pids, projectRoot),
     terminateProcessGroup: (pgid) => terminateProcessGroup(pgid),
     // Story 3.1's implementation (alice), now that hers is merged. She landed
     // first, so per the agreement made in cohort intent-sync the second to
@@ -217,10 +231,8 @@ async function cleanOneRun(
   } as const;
 
   let manifest;
-  let records: ReadonlyMap<number, string>;
   try {
     manifest = await store.readManifest(runId);
-    records = await store.readProcessGroupRecords(runId);
   } catch (cause) {
     // A corrupt manifest is NAMED and the run is NOT silently skipped: the run
     // it describes may still own a live worktree or process group, so pretending
@@ -229,8 +241,72 @@ async function cleanOneRun(
     return { ...empty, problems: [describeCause(cause)] };
   }
 
+  // The reaped check comes BEFORE the reaping evidence is read, because a run
+  // being passed over must not be able to fail the command on the strength of an
+  // auxiliary file nothing is about to use. Reading it first made a corrupt
+  // `process-groups.json` on an already-reaped run turn a plain `clean` into
+  // exit 3 over resources it had already decided not to re-verify.
   if (manifest.reaped && !options.all) {
     return { ...empty, skipped: 'already-reaped', reaped: true, problems: [] };
+  }
+
+  // NEVER REAP A RUN THAT IS STILL RUNNING.
+  //
+  // A manifest cannot say whether its run has finished, and an active run's
+  // process groups pass every liveness and identity check below — they
+  // genuinely are groups SpecWitness recorded moments ago. So `clean` in one
+  // terminal would SIGTERM a `verify` in another, then mark its run reaped,
+  // after which the still-running verify appends more resources to a reaped
+  // manifest that later `clean` runs skip: a permanent leak, created by the
+  // command whose job is to prevent leaks.
+  //
+  // `--all` does NOT override this. `--all` means "re-verify reaped runs", not
+  // "kill things that are still working".
+  let owner;
+  try {
+    owner = await store.readOwner(runId);
+  } catch (cause) {
+    return { ...empty, problems: [describeCause(cause)] };
+  }
+
+  if (owner !== null) {
+    const ownerProbe = (await effects.probeProcesses([owner.pid])).get(owner.pid);
+
+    // STATED AS A POSITIVE PROOF REQUIREMENT, because every earlier phrasing of
+    // this condition leaked a way to fail OPEN. Reaping is permitted only when
+    // the probe DEMONSTRATES one of two things:
+    //
+    //   the owner is gone; or
+    //   the owner is alive but started AFTER the run recorded it, so the pid
+    //   was reused and this is somebody else.
+    //
+    // Everything else — a probe that could not answer, a probe entry that is
+    // missing entirely, a live process whose start time could not be read —
+    // means the run may still be going, and the run is left alone. Written this
+    // way round so that a new probe state added later defaults to safe rather
+    // than to reaping.
+    const provablyNotTheOwner =
+      ownerProbe !== undefined &&
+      (ownerProbe.state === 'gone' ||
+        (ownerProbe.state === 'live' &&
+          ownerProbe.startedAt !== undefined &&
+          !ownerStartedBeforeRecord(ownerProbe.startedAt, new Date(owner.recordedAt))));
+
+    if (!provablyNotTheOwner) {
+      // Skipped, not failed: leaving a running verification alone is the
+      // command behaving correctly, so it does not colour the exit code.
+      return { ...empty, skipped: 'active', reaped: manifest.reaped, problems: [] };
+    }
+  }
+
+  let records: ReadonlyMap<number, string>;
+  try {
+    records = await store.readProcessGroupRecords(runId);
+  } catch (cause) {
+    // Unreadable evidence is reported, never read as "no pgids were recorded":
+    // that reading would let a run with live process groups look clean. Fail
+    // closed and name the file.
+    return { ...empty, problems: [describeCause(cause)] };
   }
 
   const killed: number[] = [];
@@ -335,6 +411,11 @@ export function renderCleanReport(report: CleanReport): string {
       continue;
     }
 
+    if (run.skipped === 'active') {
+      lines.push(`${run.runId}  still running — left alone`);
+      continue;
+    }
+
     const did: string[] = [];
     for (const pgid of run.killed) {
       did.push(`  killed process group ${pgid}`);
@@ -354,9 +435,11 @@ export function renderCleanReport(report: CleanReport): string {
   }
 
   const reaped = report.runs.filter((run) => run.reaped).length;
+  const active = report.runs.filter((run) => run.skipped === 'active').length;
   lines.push('');
   lines.push(
-    `${report.runs.length} run(s) visited, ${reaped} reaped, ${report.failures.length} resource(s) left behind.`,
+    `${report.runs.length} run(s) visited, ${reaped} reaped, ${report.failures.length} resource(s) left behind` +
+      (active === 0 ? '.' : `, ${active} still running and left alone.`),
   );
   // Said every time, not only when something was kept: an operator scanning this
   // output should never have to wonder whether their evidence survived.

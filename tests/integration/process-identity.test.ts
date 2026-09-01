@@ -6,7 +6,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { ProcessResult, ProcessRunOptions, ProcessRunner } from '../../src/domain/process-runner.js';
 import { SystemClock } from '../../src/infra/clock.js';
-import { probeProcessGroups, startTimeMatchesRecord } from '../../src/infra/process-identity.js';
+import {
+  ownerStartedBeforeRecord,
+  probeProcessGroups,
+  probeProcesses,
+  startTimeMatchesRecord,
+} from '../../src/infra/process-identity.js';
 import { createProcessRunner, terminateProcessGroup } from '../../src/infra/process-runner.js';
 
 /**
@@ -252,6 +257,117 @@ describe('gone is concluded only from evidence of absence', () => {
     const probes = await probeProcessGroups(scriptedPs({ stdout: '' }), [], projectRoot);
 
     expect(probes.size).toBe(0);
+  });
+});
+
+describe('probeProcesses: an owner is never wrongly declared gone', () => {
+  /**
+   * `clean` refuses to touch a run whose owner is still alive. Every way of
+   * getting that wrong ends with a verification being killed, so `gone` is
+   * concluded ONLY from a definite absence — never from a row this build could
+   * not read, and never from a listing that omitted a process `kill(pid, 0)`
+   * says exists.
+   */
+  it('reports UNKNOWN when ps lists the owner but its start time is unreadable', async () => {
+    // The row IS there — we are looking at proof the process exists — so
+    // dropping it and answering `gone` would reap a live run.
+    const probe = (
+      await probeProcesses(
+        scriptedPs({ stdout: `${process.pid} ${process.pid} not-a-date-at-all\n` }),
+        [process.pid],
+        projectRoot,
+      )
+    ).get(process.pid);
+
+    expect(probe?.state).toBe('unknown');
+    expect(probe?.startedAt).toBeUndefined();
+    expect(probe?.detail).toMatch(/start time/i);
+  });
+
+  it('reports UNKNOWN when ps omits an owner that is genuinely alive', async () => {
+    const probe = (await probeProcesses(scriptedPs({ stdout: '' }), [process.pid], projectRoot)).get(
+      process.pid,
+    );
+
+    expect(probe?.state).toBe('unknown');
+    expect(probe?.detail).toMatch(/alive/i);
+  });
+
+  it('reports UNKNOWN for every pid when ps itself could not run', async () => {
+    const probes = await probeProcesses(
+      scriptedPs({ outcome: 'not-found', exitCode: null }),
+      [process.pid],
+      projectRoot,
+    );
+
+    expect(probes.get(process.pid)?.state).toBe('unknown');
+  });
+
+  it('reports LIVE with the start time when ps describes the owner properly', async () => {
+    const probe = (
+      await probeProcesses(
+        scriptedPs({ stdout: `${process.pid} ${process.pid} Mon Aug 31 22:10:45 2026\n` }),
+        [process.pid],
+        projectRoot,
+      )
+    ).get(process.pid);
+
+    expect(probe?.state).toBe('live');
+    expect(probe?.startedAt?.toISOString()).toBe(new Date('Mon Aug 31 22:10:45 2026').toISOString());
+  });
+
+  it('reports GONE only for a pid whose process really has exited', async () => {
+    const finished = await createProcessRunner(new SystemClock()).run({
+      binary: process.execPath,
+      args: ['-e', ''],
+      cwd: projectRoot,
+      timeoutMs: 30_000,
+      env: { inherit: true },
+    });
+    const deadPid = finished.pgid as number;
+
+    const probe = (await probeProcesses(scriptedPs({ stdout: '' }), [deadPid], projectRoot)).get(
+      deadPid,
+    );
+
+    expect(probe?.state).toBe('gone');
+  });
+});
+
+describe('ownerStartedBeforeRecord', () => {
+  const recorded = new Date('2026-08-31T22:10:45.000Z');
+
+  it('accepts an owner that started before the run recorded it', () => {
+    // Which every real owner did: a process cannot record a run it started
+    // after.
+    expect(ownerStartedBeforeRecord(new Date('2026-08-31T20:00:00.000Z'), recorded)).toBe(true);
+    expect(ownerStartedBeforeRecord(recorded, recorded)).toBe(true);
+  });
+
+  it('accepts the truncated start time ps actually reports for a real owner', () => {
+    // `ps lstart` reports whole seconds, so the value is TRUNCATED — earlier
+    // than the truth, never later. A genuine owner that started at 22:10:45.900
+    // and recorded the run at 22:10:45.000... is impossible; the realistic shape
+    // is a start time truncated to a second at or before the record.
+    expect(ownerStartedBeforeRecord(new Date('2026-08-31T22:10:45.000Z'), recorded)).toBe(true);
+  });
+
+  it('rejects a pid that started after the record — the reuse case', () => {
+    // If the owner died, its pid can only have been reused by a process that
+    // started after the death, which is after the record. So this is somebody
+    // else and the run really is crashed.
+    expect(ownerStartedBeforeRecord(new Date('2026-09-01T09:00:00.000Z'), recorded)).toBe(false);
+  });
+
+  it('rejects a pid reused within the SAME SECOND as the record', () => {
+    // The first version allowed a second of forward slack, meaning to absorb
+    // `lstart`'s granularity. Truncation only moves a start time EARLIER, so
+    // the slack protected no real owner and instead let a same-second
+    // replacement impersonate one. Because the guard errs toward "still
+    // running", a long-lived impostor would make every future `clean` skip that
+    // crashed run permanently — a leak with no end.
+    expect(ownerStartedBeforeRecord(new Date('2026-08-31T22:10:45.001Z'), recorded)).toBe(false);
+    expect(ownerStartedBeforeRecord(new Date('2026-08-31T22:10:45.999Z'), recorded)).toBe(false);
   });
 });
 
