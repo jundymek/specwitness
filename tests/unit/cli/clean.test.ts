@@ -52,6 +52,11 @@ function effects(
 ): CleanEffects {
   return {
     probeProcessGroups: async () => new Map(),
+    // Default: no owner is alive, i.e. every run under test is a CRASHED run.
+    // Tests that mean "still running" say so explicitly, so the dangerous case
+    // is never the accidental default.
+    probeProcesses: async (pids) =>
+      new Map(pids.map((pid) => [pid, { pid, state: 'gone' as const }])),
     terminateProcessGroup: async (pgid) => {
       recorder.signalled.push(pgid);
     },
@@ -339,6 +344,228 @@ describe('clean: which runs are visited', () => {
     );
 
     expect([...rec.signalled].sort()).toEqual([11, 22]);
+  });
+});
+
+describe('clean: a run that is still running is left completely alone', () => {
+  /**
+   * A manifest cannot say whether its run has finished, and an ACTIVE run's
+   * process groups pass every liveness and identity check `clean` makes — they
+   * genuinely are groups SpecWitness recorded moments ago. So without this
+   * guard, `clean` in one terminal SIGTERMs a `verify` in another, then marks
+   * the run reaped; the still-running verify appends more resources to a reaped
+   * manifest that later `clean` runs skip, and they leak permanently. The
+   * command whose job is to prevent leaks would be creating one.
+   */
+  const liveOwner = (pid: number, startedAt: string) => ({
+    probeProcesses: async () =>
+      new Map([[pid, { pid, state: 'live' as const, startedAt: new Date(startedAt) }]]),
+  });
+
+  it('does not signal the process groups of a running verification', async () => {
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+    const owner = await store.readOwner(runId);
+    const rec = recorder();
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      effects(rec, {
+        ...liveOwner(owner?.pid as number, '2026-08-31T14:00:00.000Z'),
+        probeProcessGroups: async () => {
+          throw new Error('must not probe the groups of a run that is still going');
+        },
+      }),
+    );
+
+    expect(rec.signalled).toEqual([]);
+    expect(report.runs[0]?.skipped).toBe('active');
+    // Skipped, not FAILED: leaving a running verification alone is correct
+    // behaviour, so it must not colour the exit code.
+    expect(report.failures).toEqual([]);
+    expect((await store.readManifest(runId)).reaped).toBe(false);
+  });
+
+  it('does not remove the worktree of a running verification', async () => {
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await store.recordWorktree(runId, '/tmp/specwitness-x/worktree');
+    const owner = await store.readOwner(runId);
+    const rec = recorder();
+
+    await cleanRuns(
+      store,
+      { all: false },
+      effects(rec, liveOwner(owner?.pid as number, '2026-08-31T14:00:00.000Z')),
+    );
+
+    expect(rec.removed).toEqual([]);
+  });
+
+  it('is NOT overridden by --all', async () => {
+    // `--all` means "re-verify reaped runs", not "kill things that are still
+    // working". Getting that wrong would make the safer-looking flag the
+    // dangerous one.
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+    const owner = await store.readOwner(runId);
+    const rec = recorder();
+
+    const report = await cleanRuns(
+      store,
+      { all: true },
+      effects(rec, liveOwner(owner?.pid as number, '2026-08-31T14:00:00.000Z')),
+    );
+
+    expect(rec.signalled).toEqual([]);
+    expect(report.runs[0]?.skipped).toBe('active');
+  });
+
+  it('DOES reap when the owner pid is alive but started after the record — pid reuse', async () => {
+    // The other direction of the same check. A run's owner must have STARTED
+    // BEFORE the run recorded it; if the owner died, its pid can only have been
+    // reused by a process that started after that death, which is after the
+    // record. So a "live" owner that started later is somebody else, and the
+    // run really is crashed.
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+    const owner = await store.readOwner(runId);
+    const rec = recorder();
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      effects(rec, {
+        ...liveOwner(owner?.pid as number, '2026-09-05T10:00:00.000Z'),
+        probeProcessGroups: async () =>
+          new Map([[4242, { pgid: 4242, state: 'live' as const, startedAt: new Date(CLOCK) }]]),
+      }),
+    );
+
+    expect(rec.signalled).toEqual([4242]);
+    expect(report.runs[0]?.skipped).toBeUndefined();
+  });
+
+  it('leaves the run alone when the owner cannot be probed at all', async () => {
+    // Fail closed in the direction that costs a visible leak rather than a
+    // killed verification.
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+    const owner = await store.readOwner(runId);
+    const rec = recorder();
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      effects(rec, {
+        probeProcesses: async () =>
+          new Map([
+            [
+              owner?.pid as number,
+              { pid: owner?.pid as number, state: 'unknown' as const, detail: 'ps unavailable' },
+            ],
+          ]),
+      }),
+    );
+
+    expect(rec.signalled).toEqual([]);
+    expect(report.runs[0]?.skipped).toBe('active');
+  });
+
+  it('leaves the run alone when the probe does not mention the owner at all', async () => {
+    // Fails OPEN if the condition is written as "alive when the probe says so"
+    // rather than "reapable only when the probe proves otherwise": a missing
+    // entry is not evidence of anything, and treating it as evidence of death
+    // is how an active run gets reaped.
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+    const rec = recorder();
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      effects(rec, { probeProcesses: async () => new Map() }),
+    );
+
+    expect(rec.signalled).toEqual([]);
+    expect(report.runs[0]?.skipped).toBe('active');
+    expect((await store.readManifest(runId)).reaped).toBe(false);
+  });
+
+  it('leaves the run alone when the owner is live but its start time is unreadable', async () => {
+    // The other missing-evidence shape. Without a start time the pid-reuse
+    // question cannot be answered, so the run may still be going.
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+    const owner = await store.readOwner(runId);
+    const rec = recorder();
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      effects(rec, {
+        probeProcesses: async () =>
+          new Map([[owner?.pid as number, { pid: owner?.pid as number, state: 'live' as const }]]),
+      }),
+    );
+
+    expect(rec.signalled).toEqual([]);
+    expect(report.runs[0]?.skipped).toBe('active');
+  });
+
+  it('reaps normally when the run has no owner record at all', async () => {
+    // Run directories created before this build carry no owner record, and they
+    // must not be unreapable forever. Simulated by removing the record a
+    // current `createRun` now writes.
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    await rm(join(store.runDir(runId), 'owner.json'));
+    const rec = recorder();
+
+    const report = await cleanRuns(store, { all: false }, effects(rec));
+
+    expect(report.runs[0]?.skipped).toBeUndefined();
+    expect((await store.readManifest(runId)).reaped).toBe(true);
+  });
+
+  it('protects a run from the moment it is created, before it owns anything', async () => {
+    // The window the owner record used to leave open: a run that has been
+    // created but has not yet acquired its first resource is still ACTIVE, and
+    // reaping it would let the verifier append that first resource to a
+    // manifest already marked reaped — invisible to every ordinary `clean`
+    // afterwards.
+    const store = makeStore();
+    const { runId } = await store.createRun();
+    const owner = await store.readOwner(runId);
+    const rec = recorder();
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      effects(rec, {
+        probeProcesses: async () =>
+          new Map([
+            [
+              owner?.pid as number,
+              {
+                pid: owner?.pid as number,
+                state: 'live' as const,
+                startedAt: new Date('2026-08-31T14:00:00.000Z'),
+              },
+            ],
+          ]),
+      }),
+    );
+
+    expect(report.runs[0]?.skipped).toBe('active');
+    expect((await store.readManifest(runId)).reaped).toBe(false);
   });
 });
 

@@ -328,7 +328,11 @@ describe('RunStore: a post-rename failure is never reported as a failed write', 
     const { runId } = await store.createRun();
     failDirectorySync = true;
 
-    const error = await store.recordProcessGroup(runId, 4242).catch((e: unknown) => e);
+    // `markReaped` writes the MANIFEST and nothing else, which makes the
+    // published file unambiguous. (`recordProcessGroup` writes the owner record
+    // and the reaping evidence first, so it would fail on one of those instead
+    // and the assertion below would be about the wrong file.)
+    const error = await store.markReaped(runId).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(InfraError);
     // The accurate message: the barrier failed, not the write.
@@ -337,14 +341,11 @@ describe('RunStore: a post-rename failure is never reported as a failed write', 
 
     failDirectorySync = false;
     // And the write really had happened — which is the whole reason the old
-    // message was a lie. The published file is the reaping evidence: it is
-    // written FIRST, so it is the one already renamed into place when the
-    // barrier failed. (The manifest append never ran, which is correct: the
-    // serialized operation aborted, and a manifest with no pgid is safe.)
-    const evidence = JSON.parse(
-      await readFile(join(store.runDir(runId), PROCESS_GROUPS_FILENAME), 'utf8'),
-    ) as Record<string, string>;
-    expect(evidence['4242']).toBe(CLOCK);
+    // message was a lie.
+    const manifest = JSON.parse(
+      await readFile(join(store.runDir(runId), MANIFEST_FILENAME), 'utf8'),
+    ) as { reaped: boolean };
+    expect(manifest.reaped).toBe(true);
   });
 
   it('still reports a genuine write failure as a write failure', async () => {
@@ -483,6 +484,101 @@ describe('RunStore lifecycle appends: a malformed manifest is never silent', () 
     await expect(store.recordProcessGroup('run-20260830T142501Z-a3f9', 1)).rejects.toBeInstanceOf(
       InfraError,
     );
+  });
+});
+
+describe('RunStore: the owner record fails CLOSED when it is unreadable', () => {
+  /**
+   * This record decides whether `clean` may signal anything, so a doubtful
+   * answer has to mean "leave the run alone". Type-compatible rubbish used to
+   * fail it OPEN: a `recordedAt` of "yesterday" parses to `Invalid Date`, every
+   * comparison against it is false, the live verifier stops looking like the
+   * owner, and `clean` terminates the process groups of a run still going.
+   */
+  it('records the owning process at run CREATION, before the manifest exists', async () => {
+    // Recording it on first RESOURCE acquisition left a race: `clean` running
+    // in the window between `createRun` and the first append saw a run with no
+    // owner and no resources, reaped it, and set `reaped: true` — and the live
+    // verifier then appended its first worktree to a reaped manifest that
+    // ordinary future cleans skip forever. The manifest is what makes a run
+    // readable to `clean`, so the owner has to be on disk before it.
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    expect(await store.readOwner(runId)).toEqual({ pid: process.pid, recordedAt: CLOCK });
+  });
+
+  it('keeps that ownership across later acquisitions', async () => {
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+    const atCreation = await store.readOwner(runId);
+
+    await store.recordProcessGroup(runId, 4242);
+
+    expect(await store.readOwner(runId)).toEqual(atCreation);
+  });
+
+  it('records the owner from a worktree acquisition too', async () => {
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    await store.recordWorktree(runId, '/tmp/w');
+
+    expect((await store.readOwner(runId))?.pid).toBe(process.pid);
+  });
+
+  it('does not change ownership mid-run', async () => {
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+
+    await store.recordProcessGroup(runId, 1);
+    const first = await store.readOwner(runId);
+    await store.recordProcessGroup(runId, 2);
+
+    expect(await store.readOwner(runId)).toEqual(first);
+  });
+
+  it('raises rather than accepting a type-compatible but meaningless record', async () => {
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+    const path = join(store.runDir(runId), 'owner.json');
+
+    for (const bad of [
+      { pid: 0, recordedAt: CLOCK },
+      { pid: -1, recordedAt: CLOCK },
+      { pid: 1.5, recordedAt: CLOCK },
+      { pid: process.pid, recordedAt: 'yesterday' },
+      { pid: process.pid, recordedAt: '' },
+      // `Date.parse` accepts all three of these. "0" becomes the year 2000,
+      // which is the dangerous one: an old date makes the genuine LIVE owner's
+      // start time look newer than the record, so the guard decides the run has
+      // crashed and `clean` terminates a verification that is still going. The
+      // guard failing OPEN on exactly the corruption it exists to catch.
+      { pid: process.pid, recordedAt: '0' },
+      { pid: process.pid, recordedAt: '2026' },
+      { pid: process.pid, recordedAt: 'Mon Aug 31 2026' },
+      // Well-formed but impossible: the shape check alone would let it through.
+      { pid: process.pid, recordedAt: '2026-02-31T14:25:01.123Z' },
+      // Right instant, wrong spelling — not what this store writes.
+      { pid: process.pid, recordedAt: '2026-08-31T14:25:01Z' },
+      { pid: process.pid, recordedAt: '2026-08-31T14:25:01.123+00:00' },
+      { pid: 'many', recordedAt: CLOCK },
+      { recordedAt: CLOCK },
+    ]) {
+      await writeFile(path, `${JSON.stringify(bad)}\n`);
+      await expect(store.readOwner(runId)).rejects.toBeInstanceOf(InfraError);
+    }
+  });
+
+  it('raises on corrupt JSON, naming the path', async () => {
+    const store = await makeStore();
+    const { runId } = await store.createRun();
+    await store.recordProcessGroup(runId, 4242);
+    const path = join(store.runDir(runId), 'owner.json');
+    await writeFile(path, '{ not json');
+
+    await expect(store.readOwner(runId)).rejects.toThrow(path);
   });
 });
 
