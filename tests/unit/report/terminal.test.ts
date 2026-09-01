@@ -406,3 +406,78 @@ describe('purity', () => {
     expect(report.endsWith('\n\n')).toBe(false);
   });
 });
+
+describe('a recorded hint on an errored stage', () => {
+  it('renders the remedy, labelled as a record rather than as advice', () => {
+    // The hint is written in the imperative because `verify` prints it live, on
+    // stderr, to the person whose run just failed. `report <run-id>` renders a
+    // run that finished in the past, so the same words addressed to a reader
+    // now would tell them to act on a situation that may be long resolved. The
+    // label turns it back into what it is here — what the run advised at the
+    // time — which is how every timestamp and SHA in this report already reads.
+    const report = renderTerminal(
+      runResult({
+        outcome: { infraError: 'integrity' },
+        contract: undefined,
+        stages: stages('integrity', {
+          stage: 'integrity',
+          status: 'error',
+          detail: 'the contract no longer matches its fingerprint',
+          hint: "inspect the change with 'git diff', then re-freeze with --amend",
+        }),
+      }),
+    );
+
+    expect(report).toContain('recorded hint: ');
+    expect(report).toContain('re-freeze with --amend');
+
+    const lines = report.split('\n');
+    const hintIndex = lines.findIndex((line) => line.includes('recorded hint:'));
+    const errorRow = lines[hintIndex - 1] ?? '';
+    expect(errorRow).toContain('! error');
+    // Aligned with the detail column of the row it belongs to. Asserted because
+    // reading the output is what caught it: the first version hard-coded the
+    // indent and landed two columns left, which reads as a stray line rather
+    // than as a continuation of the row above.
+    expect((lines[hintIndex] ?? '').indexOf('recorded hint:')).toBe(
+      errorRow.indexOf('the contract no longer matches'),
+    );
+  });
+
+  it('never offers a remedy for a stage that did not error', () => {
+    // A hint on an `ok` or `skipped` row is advice about a problem that did not
+    // happen, and a report that offers remedies for non-problems teaches its
+    // reader to skim past the one that matters.
+    const report = renderTerminal(
+      runResult({
+        stages: stages('teardown', {
+          stage: 'gates',
+          status: 'failed',
+          detail: "gate 'build' failed",
+          hint: 'this hint must not be rendered',
+        }),
+      }),
+    );
+
+    expect(report).not.toContain('recorded hint:');
+    expect(report).not.toContain('this hint must not be rendered');
+  });
+});
+
+describe('gate evidence names the command that produced it', () => {
+  it('prints the declared command beside the gate id', () => {
+    // Without it a reader of a stored run has `gateId: 'lint'` and some output,
+    // and learning what actually ran means reconstructing the config as it was
+    // at that revision — which defeats the run directory being self-contained.
+    const report = renderTerminal(
+      runResult({
+        outcome: { verdict: 'FAIL', gateFailed: 'lint' },
+        gates: [gate('lint', 'fail')],
+        evidence: [shortGateEvidence('lint', 'fail')],
+      }),
+    );
+
+    expect(report).toContain('gate lint');
+    expect(report).toContain('pnpm lint');
+  });
+});

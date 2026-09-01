@@ -48,12 +48,24 @@ export const CONTRACT: ContractSummary = {
  */
 export function stages(
   stoppedAfter: StageName = 'teardown',
-  failed?: { readonly stage: StageName; readonly status: 'failed' | 'error'; readonly detail: string },
+  failed?: {
+    readonly stage: StageName;
+    readonly status: 'failed' | 'error';
+    readonly detail: string;
+    /** The recorded remedy. Only an errored stage carries one in practice. */
+    readonly hint?: string;
+  },
 ): StageTimelineEntry[] {
   const stopIndex = STAGE_NAMES.indexOf(stoppedAfter);
   return STAGE_NAMES.map((stage, index) => {
     if (failed !== undefined && failed.stage === stage) {
-      return { stage, status: failed.status, durationMs: 120, detail: failed.detail };
+      return {
+        stage,
+        status: failed.status,
+        durationMs: 120,
+        detail: failed.detail,
+        ...(failed.hint === undefined ? {} : { hint: failed.hint }),
+      };
     }
     if (index <= stopIndex || stage === 'teardown') {
       return { stage, status: 'ok' as const, durationMs: index * 10 };
