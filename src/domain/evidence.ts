@@ -39,6 +39,18 @@ import type { GateStatus } from './result.js';
 export const REDACTED = '[REDACTED]';
 
 /**
+ * `[REDACTED` — the marker WITHOUT its closing bracket.
+ *
+ * Not a stylistic split. `ASSIGNMENT_VALUE` excludes `]` from an unquoted value,
+ * so when `redactText` runs over its own output the captured value is
+ * `…=[REDACTED` with the bracket left outside the match. A second-pass check for
+ * the complete marker therefore never fires on exactly the text it exists to
+ * recognise. Matching the head is what makes the idempotency guard below
+ * actually guard.
+ */
+const REDACTION_MARKER_HEAD = REDACTED.slice(0, -1);
+
+/**
  * The six evidence kinds (AD-10, Q47). Closed: widening is an ADR, not an edit.
  *
  * Epic 3 produces `gate`, `command` and `provider`; the other three are produced by the
@@ -424,7 +436,42 @@ export function redactText(raw: string, options?: RedactionOptions): string {
 
     if (!isSensitiveName(name)) {
       if (!quoted) {
-        return `${quote}${name}${quote}${separator}${value}`;
+        // RECURSES, for exactly the reason the quoted arm below does — and it
+        // did not, which was a real leak found by story 4.1's seeded-secret
+        // proof (the first consumer of untrusted SERVICE output).
+        //
+        // An unquoted value runs to the next whitespace, so an innocent bare
+        // assignment SWALLOWS a sensitive one that follows it on the same line
+        // and the scan resumes past the whole match, never examining the inner
+        // text. The shapes that leaked are the ordinary ones a service prints:
+        //
+        //   ANTHROPIC_API_KEY=…          redacted   (matched directly)
+        //   boot: ANTHROPIC_API_KEY=…    LEAKED     ('boot' consumed the rest)
+        //   INFO: ANTHROPIC_API_KEY=…    LEAKED     (every logger writes this)
+        //
+        // Any `<word>: <ENV>=<secret>` line — a log level, a prefix, a phase
+        // name — was enough. Recursing into the value closes it symmetrically
+        // with the quoted arm, and terminates for the same reason: the value is
+        // strictly shorter than the match it came from, because a non-empty
+        // `[:=]` separator is required before it.
+        //
+        // NOT recursed when the value already carries a `[REDACTED]`, and that
+        // guard is required for IDEMPOTENCY rather than for speed — caught by
+        // this fix's own regression test. `ASSIGNMENT_VALUE` excludes `]`, so on
+        // a second pass over `INFO: ANTHROPIC_API_KEY=[REDACTED]` the outer
+        // value captures `ANTHROPIC_API_KEY=[REDACTED` WITHOUT its closing
+        // bracket; the inner pass then sees a sensitive assignment, replaces the
+        // truncated token with a complete one, and the stray `]` outside the
+        // match produces `[REDACTED]]`. Evidence is copied between fields, so a
+        // redactor that grows its own output on every pass is not merely untidy.
+        //
+        // Safe: a value containing `[REDACTED]` is one this function already
+        // processed, and any FURTHER assignment in the same line is
+        // whitespace-separated and therefore matched independently by the global
+        // scan rather than swallowed by this one.
+        return value.includes(REDACTION_MARKER_HEAD)
+          ? `${quote}${name}${quote}${separator}${value}`
+          : `${quote}${name}${quote}${separator}${redactText(value, options)}`;
       }
       // A QUOTED value is consumed whole by the match, so a sensitive assignment nested
       // inside an innocent one — `{"note":"ANTHROPIC_API_KEY=…"}` — would never be

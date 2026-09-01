@@ -70,7 +70,7 @@ development_status:
   epic-3-retrospective: done
 
   epic-4: in-progress
-  4-1-service-lifecycle-readiness: ready-for-dev
+  4-1-service-lifecycle-readiness: done
   4-2-plan-model-compilation-via-plan-author-provider: ready-for-dev
   4-3-deterministic-test-data: ready-for-dev
   4-4-http-probe-executor: ready-for-dev
