@@ -876,16 +876,17 @@ describe('verify — AC3: an infrastructure failure exits 3, never 1', () => {
     expect(stdout).not.toContain('VERDICT: PASS');
     expect(stdout).not.toContain('VERDICT: FAIL');
 
-    // KNOWN GAP, reported to story 3.1 on 2026-09-01: the worktree CONTAINER is
-    // created by an unwrapped `mkdtemp`, so an unusable TMPDIR escapes as a raw
-    // Node errno with no `hint` to carry — the operator is told "ENOTDIR ...
-    // mkdtemp" and not "check free space and permissions on the OS temp
-    // directory", which is the wording story 3.1 already publishes for the
-    // failure one step later. Asserted at what is guaranteed TODAY, with the gap
-    // named here rather than hidden by an assertion nobody wrote: exactly one
-    // ERROR line, and the hint count left unasserted until the wrap lands.
-    const { errors } = houseStyleLines(stderr);
+    // The remedy, not just the diagnosis. This assertion was deferred while the
+    // worktree container was created by an unwrapped `mkdtemp`: an unusable
+    // TMPDIR escaped as a raw Node errno with no hint, so the operator was told
+    // "ENOTDIR ... mkdtemp" — an internal call — and not what to fix. Reported
+    // to story 3.1, wrapped in #36, enabled here. Exit 3 means "fix the
+    // environment and rerun", so the message saying WHICH part of the
+    // environment is the whole value of the code.
+    const { errors, hints } = houseStyleLines(stderr);
     expect(errors).toHaveLength(1);
+    expect(hints).toHaveLength(1);
+    expect(hintLine(stderr)).toContain('OS temp directory');
   });
 
   it('leaves the source repository untouched when the worktree fails', async () => {
