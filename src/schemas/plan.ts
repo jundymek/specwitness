@@ -863,6 +863,33 @@ export interface PlanDraft {
 }
 
 /**
+ * The ids a plan is allowed to reference, read from the target project's config.
+ *
+ * Passed in as plain strings rather than as a config value because `src/schemas/**` is core
+ * and may not import `src/config/**` (AD-1). The CLI edge loads config once and passes what
+ * is needed down, exactly as it does for the provider descriptor.
+ *
+ * WHY THIS IS CHECKED AT THE GATE. An id the project never declared is not a shape error a
+ * reader can fix by hand; it is a draft referencing something that does not exist. Checking
+ * it inside the draft schema means the AD-2 gate feeds "there is no service 'api'; declared
+ * services are: backend, frontend" back into the next attempt (FR-14), so the provider
+ * corrects itself instead of the failure surfacing hours later as an execution-time
+ * `ConfigError`.
+ *
+ * The PERSISTED schema deliberately does NOT check this: it has no config, and a plan must
+ * stay parseable on a machine whose config has since changed so that the mismatch can be
+ * REPORTED rather than becoming a parse crash. A hand-edited plan naming an undeclared id
+ * is caught at execution by the merged `getObservationCommand` and by story 4.1's service
+ * resolver, both of which refuse and name the declared ids.
+ */
+export interface DeclaredIds {
+  /** Keys under `services:`, verbatim. Story 4.1 confirmed the key IS the service id. */
+  readonly serviceIds: readonly string[];
+  /** Keys under `observations:` — the one map of declared commands a plan may reference. */
+  readonly commandIds: readonly string[];
+}
+
+/**
  * The CONTRACT-AWARE draft schema handed to the AD-2 gate as `responseSchema`.
  *
  * Three rules can only be expressed against a specific contract, and all three are the
@@ -887,8 +914,67 @@ export interface PlanDraft {
  * (FR-14). A draft that dropped a criterion is told exactly which one and retries; a
  * post-hoc check would only fail after the budget was spent.
  */
-export function planDraftSchemaFor(contract: Contract): z.ZodType<PlanDraft> {
+export function planDraftSchemaFor(
+  contract: Contract,
+  declared: DeclaredIds,
+): z.ZodType<PlanDraft> {
   const byId = new Map(contract.spec.criteria.map((criterion) => [criterion.id, criterion]));
+  const services = new Set(declared.serviceIds);
+  const commands = new Set(declared.commandIds);
+
+  /**
+   * Reports a probe referencing an id the project never declared, listing what IS declared.
+   *
+   * The candidate list is the project's declared keys verbatim — not "every key that could
+   * have matched the id pattern". `Identifier` is stricter than the config's key type, so a
+   * project key containing a space is legal config and unreferenceable from a plan; telling
+   * an operator their id is unknown beside a list that silently omitted such a key would
+   * send them looking for a typo that is not there. (Raised by story 4.1's agent at cohort
+   * intent-sync.)
+   */
+  const checkProbeIds = (
+    probes: readonly ProbeSpec[],
+    ctx: z.RefinementCtx,
+    at: readonly (string | number)[],
+  ): void => {
+    probes.forEach((probe, index) => {
+      const unknown = (
+        field: 'serviceId' | 'commandId',
+        value: string,
+        kind: string,
+        candidates: readonly string[],
+      ): void => {
+        ctx.addIssue({
+          code: 'custom',
+          path: [...at, index, 'mechanics', field],
+          message:
+            `no ${kind} with id '${value}' is declared in .specwitness/config.yaml` +
+            (candidates.length > 0
+              ? ` — declared ${kind} ids: ${[...candidates].join(', ')}`
+              : ` — this project declares no ${kind}s`),
+        });
+      };
+
+      switch (probe.surface) {
+        case 'http':
+        case 'browser':
+          if (!services.has(probe.mechanics.serviceId)) {
+            unknown('serviceId', probe.mechanics.serviceId, 'service', declared.serviceIds);
+          }
+          break;
+        case 'observation':
+        case 'shell':
+          if (!commands.has(probe.mechanics.commandId)) {
+            unknown('commandId', probe.mechanics.commandId, 'observation', declared.commandIds);
+          }
+          break;
+        default: {
+          const unreachable: never = probe;
+          return unreachable;
+        }
+      }
+    });
+  };
 
   const schema = z
     .strictObject({
@@ -900,6 +986,10 @@ export function planDraftSchemaFor(contract: Contract): z.ZodType<PlanDraft> {
 
       draft.criteria.forEach((entry, index) => {
         const criterion = byId.get(entry.criterionId);
+
+        if (entry.disposition === 'automated') {
+          checkProbeIds(entry.probes, ctx, ['criteria', index, 'probes']);
+        }
 
         if (criterion === undefined) {
           ctx.addIssue({
