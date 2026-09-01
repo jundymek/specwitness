@@ -1,3 +1,5 @@
+import { setTimeout } from 'node:timers/promises';
+
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -31,6 +33,37 @@ function at(invocations: readonly ShimInvocation[], index: number): ShimInvocati
     throw new Error(`shim recorded no invocation at index ${index} (got ${invocations.length})`);
   }
   return invocation;
+}
+
+/**
+ * Waits until the shim has recorded at least one invocation.
+ *
+ * Waits for the EVENT, not for a duration, and that distinction is the whole
+ * point of this helper. The shim records synchronously as its first act
+ * (`fs.appendFileSync`, before it hangs or exits), so "has it recorded yet" is
+ * really "has Node finished starting up yet" — and under a saturated machine
+ * that can take seconds. Any assertion that gives startup a fixed budget is a
+ * race against the load on the box, which is not a property of this codebase.
+ *
+ * The ceiling is generous on purpose: it exists only so a shim that never
+ * starts at all fails with a clear message instead of hanging the suite, and it
+ * is never reached on a machine that is merely busy.
+ */
+async function waitForInvocation(
+  shim: { invocations(): Promise<ShimInvocation[]> },
+  ceilingMs = 30_000,
+): Promise<ShimInvocation[]> {
+  const deadline = Date.now() + ceilingMs;
+  for (;;) {
+    const invocations = await shim.invocations();
+    if (invocations.length > 0) {
+      return invocations;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`shim recorded nothing within ${ceilingMs}ms — it never started`);
+    }
+    await setTimeout(20);
+  }
 }
 
 describe('claude PATH shim (fixture self-test)', () => {
@@ -173,20 +206,50 @@ describe('claude PATH shim (fixture self-test)', () => {
       expect(run.exitCode).toBe(1);
     });
 
-    it('hanging: does not exit, and is killed by the caller timeout', async () => {
+    it('hanging: records what it was asked, then never exits on its own', async () => {
+      // This asserted `timedOut` against a fixed 2s budget and failed roughly
+      // two runs in three under full-suite load — the shim was killed before
+      // Node had finished starting, so it had recorded nothing and the argv
+      // assertion blew up. The bound had already been raised once (300ms ->
+      // 2000ms) for exactly this reason; raising it again buys time until the
+      // next machine rather than removing the race.
+      //
+      // Nothing is lost by dropping `timedOut`. This file is a fixture
+      // self-test: its job is that the `hanging` mode behaves as the adapter
+      // tests assume — it records, and it does not exit. That a hung CLI is
+      // bounded and surfaces as a ProviderError is a PRODUCT property, and it
+      // is asserted where it belongs, in
+      // `tests/integration/providers/claude-code-cli.test.ts` ("times out a
+      // hung CLI and reports it as a provider failure"). Asserting execa's
+      // timeout semantics here proved neither the fixture nor the product.
       const shim = await writeClaudeShim('hanging');
-      // The timeout must comfortably exceed Node's own startup, or the shim is
-      // killed before it can record and this assertion fails intermittently —
-      // which is exactly what happened at 300ms. A hanging shim never exits, so
-      // a generous bound still proves the timeout without slowing the suite.
-      const run = await execa(shim.binary, ['-p', '--output-format', 'json', 'x'], {
-        timeout: 2_000,
-        reject: false,
-      });
-      expect(run.timedOut).toBe(true);
-      // It still recorded what it was asked to do before hanging.
-      const invocation = at(await shim.invocations(), 0);
-      expect(invocation.argv).toContain('-p');
+      const run = execa(shim.binary, ['-p', '--output-format', 'json', 'x'], { reject: false });
+
+      try {
+        // Race-free: waits for the record to appear rather than assuming it
+        // appeared inside a deadline.
+        const invocation = at(await waitForInvocation(shim), 0);
+        expect(invocation.argv).toContain('-p');
+
+        // Now that the record exists, startup is provably finished, so this
+        // short window is not racing anything: it only asks whether a process
+        // that has already begun its work goes on to exit. A hanging shim never
+        // resolves; any other mode would have resolved long before here.
+        const exited = await Promise.race([
+          run.then(
+            () => true,
+            () => true,
+          ),
+          setTimeout(250).then(() => false),
+        ]);
+        expect(exited).toBe(false);
+      } finally {
+        run.kill('SIGKILL');
+      }
+
+      // And it is killable, which is what any caller bounding it depends on.
+      const result = await run;
+      expect(result.isTerminated).toBe(true);
     });
   });
 });
