@@ -75,7 +75,7 @@ development_status:
   4-3-deterministic-test-data: review
   4-4-http-probe-executor: ready-for-dev
   4-5-observation-probes-before-after-invariants: review
-  4-6-shell-probes: ready-for-dev
+  4-6-shell-probes: done
   4-7-ai-free-behavioral-verify-end-to-end: ready-for-dev
   epic-4-retrospective: optional
 
