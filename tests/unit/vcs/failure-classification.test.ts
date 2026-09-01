@@ -398,17 +398,26 @@ describe('removal only ever touches worktrees SpecWitness created', () => {
       }
     }
 
-    // Nothing was left behind in the operator's checkout — asserted on the
-    // DIRECTORY, not only on `git status`.
+    // Nothing of OURS was left behind in the operator's checkout — asserted on
+    // the DIRECTORY, not only on `git status`.
     //
-    // Both assertions are here on purpose, and the order matters. Measured:
-    // git does not report an EMPTY untracked directory (an empty `scratch/` is
-    // silent; a `scratch/` with a file in it shows `?? scratch/`). So the
-    // status check alone would miss a leaked empty `mkdtemp` container — which
-    // is exactly what a broken guard leaves behind. Reading the directory
-    // catches that; the status check still earns its place by catching any
-    // FILE the attempt might have written.
-    expect(await readdir(tmpInsideCheckout)).toEqual([]);
+    // Both assertions are here on purpose. Measured: git does not report an
+    // EMPTY untracked directory (an empty `scratch/` is silent; a `scratch/`
+    // with a file in it shows `?? scratch/`). So the status check alone would
+    // miss a leaked empty `mkdtemp` container, which is exactly what a broken
+    // guard leaves behind. Reading the directory catches that; the status check
+    // still earns its place by catching any FILE the attempt might have written.
+    //
+    // Asserted as "no container of ours" rather than "completely empty": with
+    // `TMPDIR` pointed here, macOS may drop its own cache files (`xcrun_db` and
+    // friends) into the directory when anything spawns a tool. An emptiness
+    // assertion would then fail for a reason that has nothing to do with this
+    // code, making the suite platform-dependent — and a test that fails for the
+    // wrong reason teaches the next reader to ignore it.
+    const strays = (await readdir(tmpInsideCheckout)).filter((name) =>
+      name.startsWith('specwitness-worktree-'),
+    );
+    expect(strays).toEqual([]);
     expect((await git(linked, 'status', '--porcelain')).trim()).toBe('');
 
     // And leave the fixture as we found it, so nothing downstream inherits it.
