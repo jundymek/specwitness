@@ -702,3 +702,137 @@ describe('verify — AC2: a failing gate is FAIL, exit 1, matching ADR-003', () 
     expect(persist?.status).toBe('error');
   });
 });
+
+/**
+ * AC3 — the infrastructure arm, in BOTH of its variants, demonstrating the
+ * three-way classification live (FR-22).
+ *
+ * The AC's parenthetical says "corrupt ref" and story 3.1's own AC1 names the
+ * missing-ref-with-`git fetch`-hint case. They are two different code paths and
+ * both are here: a ref that does not exist fails at RESOLVE, at the edge, before
+ * a run exists; a worktree that cannot be created fails INSIDE the pipeline,
+ * after one does. Both are InfraError, both exit 3, and neither may ever be 1.
+ *
+ * "Never 1" is asserted separately from "is 3" on purpose. They are the same
+ * fact today and they are not the same assertion: if a future refactor changes
+ * what is thrown, `toBe(3)` fails loudly while a lone `not.toBe(1)` would still
+ * pass for a run that had started exiting 64, or 13.
+ */
+describe('verify — AC3: an infrastructure failure exits 3, never 1', () => {
+  it('refuses a --head ref that does not exist, and says SpecWitness never fetches', async () => {
+    const project = await fixture();
+
+    const { exitCode, stdout, stderr } = await runCli(
+      ['verify', 'epic-1', '--head', 'refs/heads/no-such-branch'],
+      { cwd: project.root },
+    );
+
+    expect(exitCode).toBe(3);
+    expect(exitCode).not.toBe(1);
+    expect(errorLine(stderr)).toContain("cannot resolve head ref 'refs/heads/no-such-branch'");
+    // The remedy AND the promise: the operator runs the fetch, because a verdict
+    // that depended on network state would not be reproducible, and fetching
+    // would write to a repository this product keeps read-only (AD-8).
+    expect(hintLine(stderr)).toContain('git fetch');
+    expect(hintLine(stderr)).toContain('never fetches');
+    // Nothing ran, so there is no report at all.
+    expect(stdout).toBe('');
+  });
+
+  it('does not fetch while failing to resolve that ref', async () => {
+    const project = await fixture();
+    const refsBefore = await project.refs();
+
+    await runCli(['verify', 'epic-1', '--head', 'refs/heads/no-such-branch'], {
+      cwd: project.root,
+    });
+
+    // The assertion behind the hint's promise. A fetch would be a WRITE to the
+    // source repository, in the story whose whole point is that there are none.
+    expect(await project.refs()).toBe(refsBefore);
+    expect(await project.status()).toBe('');
+  });
+
+  it('refuses before creating a run, since the failure precedes one', async () => {
+    const project = await fixture();
+
+    await runCli(['verify', 'epic-1', '--head', 'refs/heads/no-such-branch'], {
+      cwd: project.root,
+    });
+
+    expect(await readdir(join(project.root, '.specwitness', 'runs'))).toEqual([]);
+  });
+
+  it('exits 3 with a hint when the worktree cannot be created', async () => {
+    const project = await fixture();
+
+    // TMPDIR points at a path that is not a directory, so `mkdtemp` cannot make
+    // the container the worktree lives in. The failure is REAL — the OS refuses
+    // it — rather than a simulation of one, which is the same reason story 2.5
+    // produces a missing binary by emptying PATH instead of faking ENOENT.
+    const notADirectory = join(project.root, 'README.md');
+
+    const { exitCode, stdout, stderr } = await runCli(['verify', 'epic-1'], {
+      cwd: project.root,
+      env: { ...process.env, TMPDIR: notADirectory } as Record<string, string>,
+    });
+
+    expect(exitCode).toBe(3);
+    expect(exitCode).not.toBe(1);
+
+    // A verdict must NOT appear: SpecWitness reached no conclusion about the
+    // branch, and saying anything else would be a claim it cannot support.
+    expect(stdout).toContain('VERDICT: (none) — infra error:');
+    expect(stdout).not.toContain('VERDICT: PASS');
+    expect(stdout).not.toContain('VERDICT: FAIL');
+
+    // KNOWN GAP, reported to story 3.1 on 2026-09-01: the worktree CONTAINER is
+    // created by an unwrapped `mkdtemp`, so an unusable TMPDIR escapes as a raw
+    // Node errno with no `hint` to carry — the operator is told "ENOTDIR ...
+    // mkdtemp" and not "check free space and permissions on the OS temp
+    // directory", which is the wording story 3.1 already publishes for the
+    // failure one step later. Asserted at what is guaranteed TODAY, with the gap
+    // named here rather than hidden by an assertion nobody wrote: exactly one
+    // ERROR line, and the hint count left unasserted until the wrap lands.
+    const { errors } = houseStyleLines(stderr);
+    expect(errors).toHaveLength(1);
+  });
+
+  it('leaves the source repository untouched when the worktree fails', async () => {
+    const project = await fixture();
+    const before = await project.status();
+    const notADirectory = join(project.root, 'README.md');
+
+    await runCli(['verify', 'epic-1'], {
+      cwd: project.root,
+      env: { ...process.env, TMPDIR: notADirectory } as Record<string, string>,
+    });
+
+    expect(await project.status()).toBe(before);
+  });
+
+  it('records the failure in the persisted run with no verdict at all', async () => {
+    const project = await fixture();
+    const notADirectory = join(project.root, 'README.md');
+
+    const { stdout } = await runCli(['verify', 'epic-1', '--json'], {
+      cwd: project.root,
+      env: { ...process.env, TMPDIR: notADirectory } as Record<string, string>,
+    });
+
+    const document = JSON.parse(stdout) as RunDocument;
+
+    // The two arms are mutually exclusive by construction (AD-6); this asserts
+    // the run took the one it should have.
+    expect(document.outcome.infraError).toBeDefined();
+    expect(document.outcome.verdict).toBeUndefined();
+    expect(document.outcome.gateFailed).toBeUndefined();
+
+    // And the timeline says WHERE it died, which for an infra run is the only
+    // thing that does.
+    const worktree = document.stages.find((stage) => stage.stage === 'worktree');
+    expect(worktree?.status).toBe('error');
+    const gates = document.stages.find((stage) => stage.stage === 'gates');
+    expect(gates?.status).toBe('skipped');
+  });
+});
