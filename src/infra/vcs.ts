@@ -294,6 +294,36 @@ interface GitCall {
 }
 
 /**
+ * True only for a path shaped like one `addWorktree` created.
+ *
+ * `<container>/worktree`, where the container's name begins with
+ * `specwitness-worktree-`. That is the exact shape `addWorktree` mints, and
+ * nothing else has it.
+ *
+ * This is an OWNERSHIP check, and it guards a data-loss path rather than a
+ * tidiness one. `removeWorktreeAt` exists for story 3.2's `clean`, which
+ * replays a run manifest after a crash — and `parseRunManifest`'s own header
+ * warns that such a file "may have been edited by hand". A stale or tampered
+ * entry naming a real checkout would otherwise reach `git worktree remove
+ * --force`, which deletes a DIRTY worktree without complaint. On this very
+ * machine that means nine agent worktrees full of uncommitted work, one
+ * corrupt manifest away from being erased.
+ *
+ * Deliberately NOT checked here: whether the path is under `os.tmpdir()`.
+ * `TMPDIR` can differ between the run that created the worktree and the later
+ * `clean` that reaps it, and a reaper that stopped recognising its own
+ * worktrees because an environment variable moved would be a worse failure
+ * than the one this prevents. The container-name convention is specific enough
+ * on its own.
+ */
+export function isSpecWitnessWorktreePath(worktreePath: string): boolean {
+  const segments = worktreePath.split(sep);
+  const leaf = segments.at(-1);
+  const container = segments.at(-2);
+  return leaf === WORKTREE_DIR && container !== undefined && container.startsWith(CONTAINER_PREFIX);
+}
+
+/**
  * True for a git object id: 40 hex characters (SHA-1) or 64 (SHA-256).
  *
  * Both are current. `git init --object-format=sha256` produces a repository
@@ -878,13 +908,22 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     const container = await resolveReal(await mkdtemp(join(tempRoot, CONTAINER_PREFIX)));
     const worktreePath = join(container, WORKTREE_DIR);
 
-    // Belt and braces: if some future tmpdir configuration ever pointed inside
-    // the repository, the invariant is checked rather than trusted.
-    if (isInside(root.mainWorktreeRoot, container)) {
+    // Belt and braces: if a tmpdir configuration ever points inside a tree we
+    // promised not to touch, the invariant is checked rather than trusted.
+    //
+    // BOTH roots, not just the main one. The operator may have invoked from a
+    // LINKED worktree — this project's own agents always do — and a `TMPDIR`
+    // resolving inside that checkout would put SpecWitness directories in the
+    // workspace the operator is looking at, visible in their `git status`.
+    // Checking only `mainWorktreeRoot` would miss exactly the case FR-19 is
+    // written about: "my workspace is never touched".
+    const forbidden = [root.mainWorktreeRoot, root.worktreeRoot];
+    const violated = forbidden.find((tree) => isInside(tree, container));
+    if (violated !== undefined) {
       await rm(container, { recursive: true, force: true });
       throw new InfraError(
-        `refusing to create a worktree inside the source repository: ${container}`,
-        'the OS temp directory resolves inside the repository being verified; set TMPDIR to a location outside it',
+        `refusing to create a worktree inside ${violated}: ${container}`,
+        'the OS temp directory resolves inside the tree being verified or the one you invoked from; set TMPDIR to a location outside both',
       );
     }
 
@@ -957,6 +996,28 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // reaping the entries that are still live.
     if (!(await isRegistered(root, worktreePath))) {
       return;
+    }
+
+    // OWNERSHIP, checked only once we know there is something to DESTROY.
+    //
+    // The ordering matters and resolves a real tension between two promises
+    // made to story 3.2. "An already-absent worktree is a no-op" keeps `clean`
+    // reaping past entries that were already reaped; "refuse what SpecWitness
+    // did not create" stops a stale or hand-edited manifest from reaching
+    // `git worktree remove --force`, which deletes a DIRTY checkout without
+    // complaint. Checked in this order, both hold: an unregistered path
+    // destroys nothing so it is a no-op whatever its shape, while a REGISTERED
+    // path that is not ours is refused loudly.
+    //
+    // Without that guard, one corrupt manifest could erase a developer's
+    // workspace — on this machine, nine agent worktrees full of uncommitted
+    // work.
+    const resolved = await resolveReal(worktreePath);
+    if (!isSpecWitnessWorktreePath(resolved)) {
+      throw new InfraError(
+        `refusing to remove a worktree SpecWitness did not create: ${worktreePath}`,
+        `only worktrees under a '${CONTAINER_PREFIX}*' container are removed; if this path came from a run manifest, that manifest is stale or was edited`,
+      );
     }
 
     const call = await runGit(

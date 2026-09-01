@@ -156,7 +156,12 @@ describe('AC2 proof 3 — SIGKILL mid-run', () => {
 
     const statusBefore = (await git(repo.path, 'status', '--porcelain')).trim();
 
-    const container = join(repo.scratch, 'killed-container');
+    // Named the way `addWorktree` names its containers, because that is what
+    // this child simulates — and because `removeWorktreeAt` reaps only a
+    // registered worktree shaped like one SpecWitness created. A fixture using
+    // some other name would "prove" the leftover is reapable under a rule the
+    // real reaper does not follow.
+    const container = join(repo.scratch, 'specwitness-worktree-killed');
     await mkdir(container, { recursive: true });
     const worktreePath = join(container, 'worktree');
     const manifestPath = join(run.dir, MANIFEST_FILENAME);

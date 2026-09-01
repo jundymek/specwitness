@@ -12,7 +12,7 @@
  * them to us as ordinary values.
  */
 
-import { rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,7 +27,14 @@ import type { RepoRoot } from '../../../src/domain/vcs.js';
 import { SystemClock } from '../../../src/infra/clock.js';
 import { createProcessRunner } from '../../../src/infra/process-runner.js';
 import { createGitVcs } from '../../../src/infra/vcs.js';
-import { git, makeRepo, recordNothing, scratchDir, type FixtureRepo } from './fixture-repo.js';
+import {
+  addLinkedWorktree,
+  git,
+  makeRepo,
+  recordNothing,
+  scratchDir,
+  type FixtureRepo,
+} from './fixture-repo.js';
 
 const scratches: string[] = [];
 const containers: string[] = [];
@@ -256,7 +263,11 @@ describe('worktree paths containing a newline', () => {
     // is the worst available outcome: `mainWorktreeRoot` comes from the first
     // record, so a wrong parse means verifying a tree nobody asked about, and
     // registration checks silently stop finding the worktree.
-    const weird = join(repo.scratch, 'a\nb');
+    // Shaped like one `addWorktree` mints — container prefix, `worktree` leaf —
+    // but with a newline inside the container name, so this exercises the
+    // parser AND the ownership check AND removal, rather than parsing alone.
+    const container = join(repo.scratch, 'specwitness-worktree-a\nb');
+    const weird = join(container, 'worktree');
     await git(repo.path, 'worktree', 'add', '--quiet', '--detach', weird, repo.headSha);
 
     const entries = await createGitVcs({ runner: real }).listWorktrees(root);
@@ -272,6 +283,91 @@ describe('worktree paths containing a newline', () => {
     await createGitVcs({ runner: real }).removeWorktreeAt(root, weird);
     const after = await createGitVcs({ runner: real }).listWorktrees(root);
     expect(after).toHaveLength(1);
+  });
+});
+
+describe('removal only ever touches worktrees SpecWitness created', () => {
+  it('refuses to remove a linked worktree it did not create', async () => {
+    const { repo, root } = await repoWithRoot('own-foreign');
+    // Somebody else's checkout, registered in the same repository — exactly the
+    // shape of this machine's nine agent worktrees.
+    const foreign = join(repo.scratch, 'someones-work');
+    await git(repo.path, 'worktree', 'add', '--quiet', '--detach', foreign, repo.headSha);
+    await writeFile(join(foreign, 'uncommitted.txt'), 'hours of work\n', 'utf8');
+
+    // `clean` replays a manifest, and `parseRunManifest`'s own header warns the
+    // file "may have been edited by hand". A stale or tampered entry naming a
+    // real checkout would otherwise reach `git worktree remove --force`, which
+    // deletes a DIRTY worktree without complaint. That is unrecoverable data
+    // loss, so ownership is checked rather than assumed.
+    await expect(
+      createGitVcs({ runner: real }).removeWorktreeAt(root, foreign),
+    ).rejects.toThrow(InfraError);
+
+    // Still registered, and the uncommitted work is still there.
+    const entries = await createGitVcs({ runner: real }).listWorktrees(root);
+    expect(entries.map((entry) => entry.path)).toContain(foreign);
+    expect(await readFile(join(foreign, 'uncommitted.txt'), 'utf8')).toBe('hours of work\n');
+  });
+
+  it('still removes a worktree it did create', async () => {
+    const { repo, root } = await repoWithRoot('own-mine');
+    const created = await createGitVcs({ runner: real }).addWorktree(
+      root,
+      repo.headSha,
+      recordNothing,
+    );
+    containers.push(created.container);
+
+    // The other half — the guard must not block the legitimate case, or `clean`
+    // would stop reaping the very worktrees it exists for.
+    await createGitVcs({ runner: real }).removeWorktreeAt(root, created.path);
+
+    const entries = await createGitVcs({ runner: real }).listWorktrees(root);
+    expect(entries.map((entry) => entry.path)).not.toContain(created.path);
+  });
+
+  it('refuses to create a worktree inside the LINKED tree the operator invoked from', async () => {
+    const repo = await makeRepo('own-tmpdir');
+    scratches.push(repo.scratch);
+    const linked = await addLinkedWorktree(repo, 'operator-checkout');
+
+    const resolved = await createGitVcs({ runner: real }).resolveRoot({ cwd: linked });
+    expect(resolved.outcome).toBe('resolved');
+    if (resolved.outcome !== 'resolved') return;
+    expect(resolved.root.linkedWorktree).toBe(true);
+
+    // `os.tmpdir()` honours TMPDIR, so an operator whose temp dir sits inside
+    // their own checkout would get SpecWitness directories in the workspace
+    // they are looking at — visible in their `git status`, which is precisely
+    // what AC2 forbids. Checking only the MAIN worktree misses this, and the
+    // agents on this machine all work from linked checkouts.
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = join(linked, 'scratch');
+    await mkdir(process.env.TMPDIR, { recursive: true });
+    try {
+      await expect(
+        createGitVcs({ runner: real }).addWorktree(resolved.root, repo.headSha, recordNothing),
+      ).rejects.toThrow(/refusing to create a worktree inside/);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = previous;
+      }
+    }
+
+    // And nothing was left behind in the operator's checkout.
+    expect((await git(linked, 'status', '--porcelain')).trim()).toBe('');
+  });
+
+  it('refuses the main worktree outright', async () => {
+    const { repo, root } = await repoWithRoot('own-main');
+
+    // The worst possible manifest entry.
+    await expect(
+      createGitVcs({ runner: real }).removeWorktreeAt(root, repo.path),
+    ).rejects.toThrow(InfraError);
   });
 });
 
