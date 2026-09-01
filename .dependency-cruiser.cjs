@@ -192,6 +192,39 @@ module.exports = {
       },
     },
     {
+      name: 'report-layer',
+      comment:
+        'AD-11/AD-1: src/report/** is application-layer and the STRICTEST of them — the ' +
+        "spine's layer graph shows only `REP -> DOM`. It may import src/domain/**, " +
+        'src/schemas/**, its own siblings and npm packages. Nothing else, and — unlike ' +
+        '`ingest-core-only` — no side-effectful Node built-in either. That last part is ' +
+        'the rule\'s real subject: AD-11 says the terminal and JSON renderers derive ' +
+        'everything from one RunResult and compute no facts of their own, and this is ' +
+        'that promise expressed structurally rather than left to review. A renderer that ' +
+        'cannot open a file, read the config or reach the pipeline cannot look up a fact ' +
+        'the model does not carry — so the human report and the machine document cannot ' +
+        'drift apart, which is the failure AD-11 exists to prevent. It is a security ' +
+        'control too: a renderer that cannot import `node:fs` cannot read a credential ' +
+        'off disk in order to print it. `cli` is deliberately not re-listed here — ' +
+        '`nothing-imports-cli` already covers it, and a guard duplicated is a guard with ' +
+        'two places to weaken. The one import this rule was negotiated over: story 3.5 ' +
+        "puts the `result.json` serializer in `src/schemas/result.ts` and NOT in " +
+        '`src/infra/run-store.ts`, because a serializer inside an adapter is one the JSON ' +
+        'renderer could not legally call — and `--json` would then need a second ' +
+        'serializer, which is exactly how two byte sequences appear where the harness ' +
+        'contract requires one. `tests/unit/dependency-rules.test.ts` pins both ' +
+        'directions.',
+      severity: 'error',
+      from: { path: '^src/report/' },
+      to: {
+        // Two matchers, OR-ed: every other `src/` layer, plus the side-effect
+        // built-ins. npm packages match neither and stay permitted, as do pure
+        // built-ins like `node:path` — string work is not I/O.
+        path: ['^src/', builtinPattern],
+        pathNot: ['^src/(domain|schemas|report)/'],
+      },
+    },
+    {
       name: 'no-circular',
       comment:
         'A cycle means the layer boundary is already gone and the modules can no longer ' +
