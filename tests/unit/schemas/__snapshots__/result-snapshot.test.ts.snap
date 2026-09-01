@@ -147,7 +147,7 @@ exports[`the persisted result.json shape (AC3, NFR-7) > matches the recorded sna
       "kind": "gate",
       "capturedAt": "2026-08-30T14:25:01.123Z",
       "gateId": "lint",
-      "displayCommand": "pnpm eslint . --max-warnings 0",
+      "displayCommand": "curl -H \\"Authorization: [REDACTED]\\" http://localhost:3000/health",
       "status": "fail",
       "exitCode": 1,
       "stdout": {

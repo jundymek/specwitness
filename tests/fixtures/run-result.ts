@@ -58,7 +58,15 @@ function everyEvidenceKind(): Evidence[] {
       gateId: 'lint',
       // Added when `displayCommand` became required (story 3.3 follow-up): without it a
       // stored run says which gate failed but not what actually ran.
-      displayCommand: 'pnpm eslint . --max-warnings 0',
+      //
+      // It carries a credential DELIBERATELY. The document now proves redaction on two
+      // paths rather than one, and this is the likelier of the two in practice: a gate is
+      // far more likely to be a `curl -H "Authorization: Bearer ..."` smoke check than to
+      // print a key to stdout. Since this fixture is the document everyone reads to learn
+      // the shape, carrying a secret in both places also teaches which fields are
+      // dangerous. (Story 3.5's agent asked for this; taken here because the field lands
+      // in the same PR, so the weaker fixture never exists on the epic branch.)
+      displayCommand: `curl -H "Authorization: Bearer ${SEEDED_SECRET}" http://localhost:3000/health`,
       status: 'fail',
       exitCode: 1,
       stdout: `ANTHROPIC_API_KEY=${SEEDED_SECRET}\n> Authorization: Bearer ${SEEDED_SECRET}\n`,
