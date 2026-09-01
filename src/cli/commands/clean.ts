@@ -58,17 +58,27 @@ import {
 } from '../../infra/process-identity.js';
 import { createProcessRunner, terminateProcessGroup } from '../../infra/process-runner.js';
 import { RunStore } from '../../infra/run-store.js';
-import { removeWorktreeAtPath } from '../../infra/worktree-removal.js';
+import { removeWorktreeAtPath } from '../../infra/vcs.js';
 
 /**
  * The effects `clean` performs on the world, injected so the liveness matrix is
  * testable without spawning anything.
  *
- * `removeWorktree` is a ONE-FUNCTION SEAM on purpose: story 3.1 (alice) owns
- * worktree removal and is in the same wave, so her `src/infra/vcs.ts` does not
- * exist on this branch. Whichever of us merges second deletes the temporary
- * default in `src/infra/worktree-removal.ts` and passes hers here. Agreed in
- * cohort intent-sync; the seam is one function wide so that rewire is one line.
+ * `removeWorktree` is a ONE-FUNCTION SEAM: story 3.1 (alice) owns worktree
+ * removal, and it is injected so the liveness matrix is testable without git.
+ * Both stories were wave A, so this branch carried a temporary local default
+ * until hers merged; she landed first, so — per the agreement made in cohort
+ * intent-sync — this branch deleted its copy and now calls
+ * `removeWorktreeAtPath` from `src/infra/vcs.ts`. One definition of "removed"
+ * on the epic branch.
+ *
+ * Her contract, which `clean` depends on: an UNREGISTERED path is a no-op
+ * rather than an error (manifest replay hits that constantly); a registered
+ * worktree SpecWitness did not create is REFUSED, because
+ * `git worktree remove --force` deletes a dirty checkout without complaint and
+ * `clean` feeds it paths from a file `parseRunManifest`'s own header warns may
+ * have been hand-edited. `clean` reports that refusal per-run, leaves the run
+ * unreaped so a later run retries, and keeps replaying the other runs.
  */
 export interface CleanEffects {
   probeProcessGroups(pgids: readonly number[]): Promise<ReadonlyMap<number, ProcessGroupProbe>>;
@@ -153,7 +163,14 @@ export function defaultCleanEffects(projectRoot: string, runner: ProcessRunner):
   return {
     probeProcessGroups: (pgids) => probeProcessGroups(runner, pgids, projectRoot),
     terminateProcessGroup: (pgid) => terminateProcessGroup(pgid),
-    removeWorktree: (worktreePath) => removeWorktreeAtPath(runner, projectRoot, worktreePath),
+    // Story 3.1's implementation (alice), now that hers is merged. She landed
+    // first, so per the agreement made in cohort intent-sync the second to
+    // merge deletes their copy and calls the other's — that is this line, and
+    // `src/infra/worktree-removal.ts` is gone with it. One definition of
+    // "removed" on the epic branch, which is the whole point: two would
+    // eventually disagree.
+    removeWorktree: (worktreePath) =>
+      removeWorktreeAtPath(projectRoot, worktreePath, { runner }),
   };
 }
 

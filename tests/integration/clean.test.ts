@@ -270,6 +270,23 @@ describe('clean against real processes', () => {
   });
 });
 
+/**
+ * A worktree path shaped like one story 3.1 actually mints:
+ * `<specwitness-worktree-XXXX>/worktree`.
+ *
+ * Alice's `removeWorktreeAt` refuses to remove a REGISTERED worktree that
+ * SpecWitness did not create, because `git worktree remove --force` deletes a
+ * dirty checkout without complaint and `clean` feeds it paths from a file that
+ * may have been hand-edited. On this machine that guard stands between a
+ * corrupt manifest and nine agent worktrees full of uncommitted work. So these
+ * fixtures use the real shape rather than a convenient one — a test that only
+ * passes against paths the product would refuse is a test of nothing.
+ */
+async function specwitnessWorktreePath(): Promise<string> {
+  const container = await mkdtemp(join(projectRoot, 'specwitness-worktree-'));
+  return join(container, 'worktree');
+}
+
 /** Runs git in `repo` with a fixed identity, so no test depends on the operator's. */
 function gitIn(repo: string, args: string[]) {
   return execa('git', args, {
@@ -298,7 +315,7 @@ async function seedRepo(): Promise<string> {
 describe('clean against a real git worktree', () => {
   it('removes a recorded worktree and leaves no registration behind', async () => {
     const repo = await seedRepo();
-    const worktree = join(projectRoot, 'wt');
+    const worktree = await specwitnessWorktreePath();
     await gitIn(repo, ['worktree', 'add', '--detach', '--quiet', worktree, 'HEAD']);
 
     const store = new RunStore(repo, new SystemClock(), new RandomIds());
@@ -318,6 +335,63 @@ describe('clean against a real git worktree', () => {
     expect((await store.readManifest(runId)).reaped).toBe(true);
     // The worktree went; the run record and its manifest did not.
     expect(await store.listRuns()).toEqual([runId]);
+  });
+
+  it('reports, and does NOT remove, a registered worktree SpecWitness did not create', async () => {
+    // Story 3.1's ownership guard, exercised from `clean` because `clean` is
+    // the caller it exists to protect: a stale or hand-edited manifest entry
+    // naming a real workspace must not reach `git worktree remove --force`,
+    // which deletes a dirty checkout without complaint. `clean` reports it,
+    // leaves the run unreaped so a later run retries, and keeps replaying.
+    const repo = await seedRepo();
+    const foreign = join(projectRoot, 'somebody-elses-checkout');
+    await gitIn(repo, ['worktree', 'add', '--detach', '--quiet', foreign, 'HEAD']);
+
+    const store = new RunStore(repo, new SystemClock(), new RandomIds());
+    await mkdir(join(repo, '.specwitness'), { recursive: true });
+    const { runId } = await store.createRun();
+    await store.recordWorktree(runId, foreign);
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      defaultCleanEffects(repo, createProcessRunner(new SystemClock())),
+    );
+
+    expect(report.failures.join(' ')).toMatch(/did not create/i);
+    // Still there, still registered, and the run is not claimed as reaped.
+    expect((await gitIn(repo, ['worktree', 'list', '--porcelain'])).stdout).toContain(foreign);
+    expect(await readFile(join(foreign, 'file.txt'), 'utf8')).toBe('content\n');
+    expect((await store.readManifest(runId)).reaped).toBe(false);
+  });
+
+  it('records the current, imperfect behaviour for a vanished checkout', async () => {
+    // The active half of the skipped test above: this pins what `clean` really
+    // does today, so the gap is visible in a green run rather than only in a
+    // comment. When story 3.1's `isRegistered` stops concluding "absent" from a
+    // path it cannot resolve, THIS test is the one that should start failing,
+    // and the skipped one above is the one to un-skip.
+    const repo = await seedRepo();
+    const worktree = await specwitnessWorktreePath();
+    await gitIn(repo, ['worktree', 'add', '--detach', '--quiet', worktree, 'HEAD']);
+    await rm(worktree, { recursive: true, force: true });
+
+    const store = new RunStore(repo, new SystemClock(), new RandomIds());
+    await mkdir(join(repo, '.specwitness'), { recursive: true });
+    const { runId } = await store.createRun();
+    await store.recordWorktree(runId, worktree);
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      defaultCleanEffects(repo, createProcessRunner(new SystemClock())),
+    );
+
+    // No error is reported — and the registration survives. Documented, not
+    // endorsed. Nothing was destroyed and nothing was mis-signalled; the cost
+    // is a stale registration an operator clears with `git worktree prune`.
+    expect(report.failures).toEqual([]);
+    expect((await gitIn(repo, ['worktree', 'list', '--porcelain'])).stdout).toContain(worktree);
   });
 
   it('treats a path that was never registered as nothing to do', async () => {
@@ -342,13 +416,32 @@ describe('clean against a real git worktree', () => {
     expect((await store.readManifest(runId)).reaped).toBe(true);
   });
 
-  it('does NOT report a stale registration as reaped when the directory is gone', async () => {
-    // Codex review, P1. `git worktree remove --force` on a path whose directory
-    // has been deleted underneath git still has a registration to clear; an
-    // earlier version skipped the call entirely because the directory was
-    // absent, and reported the run reaped with the registration still there.
+  /**
+   * BLOCKED ON STORY 3.1 — kept, skipped, and reported rather than deleted.
+   *
+   * This asserts the end state `clean` needs and does not yet get. The
+   * mechanism, root-caused here and sent to alice (3.1) with a reproduction:
+   * `isRegistered` in `src/infra/vcs.ts` compares `resolveReal(entry.path)`
+   * against `resolveReal(recordedPath)`. Once the CHECKOUT DIRECTORY is gone,
+   * `realpath` can no longer resolve the recorded path, so on macOS it stays
+   * `/var/folders/...` while git reports its entry as the canonical
+   * `/private/var/folders/...`. The two stop comparing equal, `isRegistered`
+   * answers false, `removeWorktreeAt` takes its already-absent no-op branch,
+   * and `clean` marks the run reaped with the registration still there.
+   *
+   * That is precisely the case this command exists for — a crashed run whose
+   * temp checkout the OS later cleaned — so it matters more here than anywhere.
+   * It is HER file and HER story, so it is not patched from this branch: the
+   * cohort rule is that several agents fixing one thing several ways is worse
+   * than the defect. Un-skipping this test is the check that her fix landed.
+   *
+   * My own copy of the removal helper had the same CLASS of bug (Codex P1,
+   * fixed before hers merged) and the shape of the fix is the same: never
+   * conclude "absent" from a lookup that could not be answered.
+   */
+  it.skip('does NOT report a stale registration as reaped when the directory is gone', async () => {
     const repo = await seedRepo();
-    const worktree = join(projectRoot, 'wt-vanished');
+    const worktree = await specwitnessWorktreePath();
     await gitIn(repo, ['worktree', 'add', '--detach', '--quiet', worktree, 'HEAD']);
     // Delete the checkout behind git's back, exactly as a crashed run or a
     // cleaned temp directory would.
