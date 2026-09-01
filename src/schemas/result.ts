@@ -428,6 +428,27 @@ export function toRunResultDocument(result: RunResult): RunResultDocument {
 }
 
 /**
+ * The exact inverse of `toRunResultDocument`: drops `schemaVersion` and nothing else.
+ *
+ * It lives here, beside its inverse, rather than at each call site — for three reasons,
+ * agreed with story 3.6 before either module was written. Nobody should have to discover
+ * that dropping one key is all it takes; if the document ever grows a second non-model
+ * key, exactly one place changes; and it keeps `RunResultDocument` out of `src/report/**`
+ * entirely, so a renderer's signature stays `(result: RunResult) => string`.
+ *
+ * WHY A CAST IS SAFE HERE AND NOT A SHORTCUT. The document schema is derived from the
+ * model field by field, and the ONLY key the document adds is `schemaVersion`; the
+ * compiler checks that in `toRunResultDocument`, which builds a `RunResultDocument` out of
+ * a `RunResult` without a cast. So the two types differ by exactly that key, and removing
+ * it yields a `RunResult` by construction. If a future edit adds a second document-only
+ * key, `toRunResultDocument` stops compiling first — which is the point.
+ */
+export function toRunResult(document: RunResultDocument): RunResult {
+  const { schemaVersion: _version, ...result } = document;
+  return result as RunResult;
+}
+
+/**
  * THE serializer. The only `RunResult` → bytes function in the repository.
  *
  * `JSON.stringify` drops `undefined`-valued keys, which is the behaviour the optional

@@ -21,6 +21,7 @@ import {
   RUN_RESULT_VERSION,
   parseRunResult,
   serializeRunResult,
+  toRunResult,
   toRunResultDocument,
 } from '../../../src/schemas/result.js';
 import { SCHEMA_VERSIONS } from '../../../src/schemas/versions.js';
@@ -127,6 +128,49 @@ describe('serializeRunResult — the one byte sequence (AC1)', () => {
 
     expect(reSerialized).not.toBe(text);
     expect(JSON.parse(reSerialized)).toEqual(JSON.parse(text));
+  });
+});
+
+describe('toRunResult is the exact inverse of toRunResultDocument (AC1)', () => {
+  it('round-trips the model unchanged', () => {
+    const original = fullyPopulatedRunResult();
+
+    expect(toRunResult(toRunResultDocument(original))).toEqual(original);
+  });
+
+  it('drops schemaVersion and nothing else', () => {
+    // The one key the document adds. If it ever dropped a second, a renderer would be
+    // handed a model missing a fact and AD-11 would be violated silently.
+    const document = toRunResultDocument(fullyPopulatedRunResult());
+
+    const model = toRunResult(document) as unknown as Record<string, unknown>;
+
+    expect(Object.keys(model)).toEqual(
+      Object.keys(document).filter((key) => key !== 'schemaVersion'),
+    );
+  });
+
+  it('recovers the model faithfully from a document read back off the wire', () => {
+    // The realistic path: `report` parses a stored file and hands the model to a renderer.
+    // Every VALUE survives, which is all a renderer needs.
+    const original = fullyPopulatedRunResult();
+    const parsed = parseRunResult(serializeRunResult(original), PATH);
+
+    expect(toRunResult(parsed)).toEqual(original);
+  });
+
+  it('but re-serializing the recovered model does NOT reproduce the file bytes', () => {
+    // The same zod key-order property, reached through `toRunResult` — recorded here
+    // because this is the path someone would take if they "simplified" `report --json`
+    // into parse → toRunResult → serialize. It yields a document with identical values
+    // and a different byte sequence, and story 3.7's end-to-end byte-equality assertion
+    // is what would fail. Echoing the stored bytes is what avoids it.
+    const original = fullyPopulatedRunResult();
+    const text = serializeRunResult(original);
+    const recovered = serializeRunResult(toRunResult(parseRunResult(text, PATH)));
+
+    expect(recovered).not.toBe(text);
+    expect(JSON.parse(recovered)).toEqual(JSON.parse(text));
   });
 });
 
