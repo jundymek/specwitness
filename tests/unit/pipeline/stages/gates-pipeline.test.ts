@@ -211,6 +211,56 @@ describe('the real gates stage, through the real pipeline: AC2 — a failing gat
   });
 });
 
+describe('the real gates stage, through the real pipeline: a durability failure never rewrites a FAIL', () => {
+  it('stays exit 1 with gateFailed when the evidence write fails', async () => {
+    // The property at the level where it actually bites. A gate exits non-zero
+    // and the run directory is full: the branch is still demonstrably broken,
+    // and reporting exit 3 would tell a harness to retry a branch that will
+    // never build. Same rule the pipeline applies to a decided outcome, applied
+    // one level down where the outcome is first established.
+    let writeAttempts = 0;
+    const exploding = async (): Promise<string> => {
+      writeAttempts += 1;
+      throw new Error('ENOSPC: no space left on device');
+    };
+    // The FAILING gate must produce output, or no write is attempted at all and
+    // this test passes without exercising the path — `persistStream` skips the
+    // writer for an empty stream, correctly, since an empty file would be an
+    // artifact implying output that never existed. Caught by planting the
+    // pre-fix code and watching this test stay green when it should have gone
+    // red.
+    //
+    // The PASSING gate must NOT produce output, and that is the interesting
+    // half: a passing gate whose write fails is a deliberate InfraError (no
+    // conclusion has been reached yet), so giving it output would end the run
+    // as infra before the failing gate ever ran — testing the opposite of what
+    // this asserts.
+    const runner = recordingRunner(
+      processResult(),
+      processResult({ exitCode: 1, stderr: '2 type errors' }),
+    );
+
+    const result = await verify({
+      gates: declaredGates(THREE),
+      runner,
+      writeEvidence: exploding,
+    });
+
+    // The writer really was reached — without this the assertions below would
+    // hold for a run in which nothing was ever written.
+    expect(writeAttempts).toBeGreaterThan(0);
+
+    expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+    expect(result.outcome.infraError).toBeUndefined();
+    expect(statusOf(result, 'gates')).toBe('failed');
+    expect(result.gates).toEqual([
+      { gateId: 'install', status: 'pass', durationMs: 7 },
+      { gateId: 'lint', status: 'fail', durationMs: 7 },
+      { gateId: 'build', status: 'skipped' },
+    ]);
+  });
+});
+
 describe('the real gates stage, through the real pipeline: AC3 — a gate that cannot start', () => {
   it('produces an infra outcome with NO verdict — exit 3, not exit 1', async () => {
     // The single most damaging confusion available in this story. A verdict here

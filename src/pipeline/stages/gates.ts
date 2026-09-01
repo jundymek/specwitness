@@ -171,13 +171,24 @@ async function persistStream(
   return deps.writeEvidence(gateEvidenceRelativePath(gateId, index, stream), redactText(raw));
 }
 
+/** The relative paths of whichever full-output files were written. */
+export interface StreamPaths {
+  stdoutFullPath?: string;
+  stderrFullPath?: string;
+}
+
+/** A short, printable reason from an unknown thrown value. */
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** `{stdoutFullPath, stderrFullPath}`, each key present only when a file was written. */
 async function persistStreams(
   deps: GatesStageDeps,
   gateId: string,
   index: number,
   result: ProcessResult,
-): Promise<{ stdoutFullPath?: string; stderrFullPath?: string }> {
+): Promise<StreamPaths> {
   const [stdoutFullPath, stderrFullPath] = await Promise.all([
     persistStream(deps, gateId, index, 'stdout', result.stdout),
     persistStream(deps, gateId, index, 'stderr', result.stderr),
@@ -390,6 +401,8 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
       }
 
       let failedAt: number | undefined;
+      /** Appended to the failure detail when the full output could not be written. */
+      let failureNote = '';
 
       for (const [index, gate] of deps.gates.entries()) {
         if (failedAt !== undefined) {
@@ -425,7 +438,43 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
         const result = await deps.runner.run(options);
         const status = await classify(deps, context, gate, index, result, binary);
 
-        const paths = await persistStreams(deps, gate.id, index, result);
+        // THE VERDICT-RELEVANT FACT IS RECORDED FIRST, before anything that can
+        // fail. Evidence is corroboration; this is the conclusion.
+        //
+        // `durationMs` from the runner's own measurement, which uses the
+        // injected Clock (AD-9) — never a second clock read here.
+        context.run.gates.push(gateResult(gate.id, status, result.durationMs));
+        if (status === 'fail') {
+          failedAt = index;
+        }
+
+        // Once a gate has FAILED the conclusion is established, and a
+        // durability failure must not rewrite it — the same rule the pipeline
+        // applies to a decided outcome, one level down. Writing evidence before
+        // recording the result meant a full disk turned a demonstrable product
+        // FAIL into exit 3, which tells a harness "the environment is broken,
+        // retry" and the retry merges a branch that will never build. That is
+        // the precise accident this story exists to prevent, and it was here.
+        //
+        // A gate that PASSED is different and deliberately still throws: no
+        // conclusion has been reached yet, the run is not owed a verdict, and
+        // "we could not record what we observed" is an honest infrastructure
+        // failure rather than a green light.
+        let paths: StreamPaths = {};
+        let evidenceNote = '';
+        try {
+          paths = await persistStreams(deps, gate.id, index, result);
+        } catch (error) {
+          if (status !== 'fail') {
+            throw error;
+          }
+          evidenceNote = `; the gate's full output could not be written (${reasonOf(error)})`;
+        }
+
+        // Pushed even when the file write failed: `gateEvidence` performs no
+        // I/O, so the bounded inline output — the part a report actually shows —
+        // survives. Only the pointer to the full copy is lost, and its absence
+        // is already expressible (`fullPath` is optional).
         context.run.evidence.push(
           gateEvidence({
             capturedAt: context.clock.now().toISOString(),
@@ -442,12 +491,8 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
           }),
         );
 
-        // `durationMs` from the runner's own measurement, which uses the
-        // injected Clock (AD-9) — never a second clock read here.
-        context.run.gates.push(gateResult(gate.id, status, result.durationMs));
-
         if (status === 'fail') {
-          failedAt = index;
+          failureNote = evidenceNote;
         }
       }
 
@@ -461,7 +506,8 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
       // outcome competing with the aggregate stage.
       const failed = deps.gates[failedAt] as GateConfig;
       return stageProductNegative(
-        `gate '${failed.id}' failed; ${deps.gates.length - failedAt - 1} later gate(s) skipped`,
+        `gate '${failed.id}' failed; ${deps.gates.length - failedAt - 1} later gate(s) skipped` +
+          failureNote,
       );
     },
   };

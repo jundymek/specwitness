@@ -549,6 +549,82 @@ describe('gates stage: AC1/AC2 — evidence', () => {
     expect(evidence.stdout.fullPath).not.toBe(evidence.stderr.fullPath);
   });
 
+  it('keeps a FAILING gate a failure when the evidence write blows up', async () => {
+    // The rule the pipeline applies to a decided outcome, one level down: once
+    // a gate has failed, the conclusion is established and a durability failure
+    // must not rewrite it. Writing evidence BEFORE recording the result meant a
+    // full disk turned a demonstrable product FAIL into exit 3 — which tells a
+    // harness "the environment is broken, retry", and the retry merges a branch
+    // that will never build.
+    const exploding = Object.assign(
+      async () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+      { writes: [] as { name: string; contents: string }[] },
+    );
+    const runner = recordingRunner(processResult({ exitCode: 1, stdout: 'boom' }));
+    const context = stageContext();
+
+    const result = await createGatesStage(deps(runner, exploding)).run(context);
+
+    expect(result.status).toBe('product-negative');
+    expect(context.run.gates).toEqual([{ gateId: 'lint', status: 'fail', durationMs: 7 }]);
+  });
+
+  it('says in the detail that the full output could not be written', async () => {
+    // Recorded rather than swallowed. The conclusion stands, but a reader must
+    // be able to tell why the evidence pointer is missing.
+    const exploding = Object.assign(
+      async () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+      { writes: [] as { name: string; contents: string }[] },
+    );
+    const runner = recordingRunner(processResult({ exitCode: 1, stdout: 'boom' }));
+
+    const result = await createGatesStage(deps(runner, exploding)).run(stageContext());
+
+    expect(result.detail).toContain('could not be written');
+    expect(result.detail).toContain('ENOSPC');
+  });
+
+  it('still records the INLINE evidence when the file write failed', async () => {
+    // `gateEvidence` performs no I/O, so the bounded inline output — the part a
+    // report actually shows — survives. Only the pointer to the full copy is
+    // lost, and its absence is already expressible.
+    const exploding = Object.assign(
+      async () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+      { writes: [] as { name: string; contents: string }[] },
+    );
+    const runner = recordingRunner(processResult({ exitCode: 1, stdout: 'compile error' }));
+    const context = stageContext();
+
+    await createGatesStage(deps(runner, exploding)).run(context);
+
+    const evidence = context.run.evidence.find((e) => e.kind === 'gate') as GateEvidence;
+    expect(evidence.stdout.text).toContain('compile error');
+    expect(evidence.stdout.fullPath).toBeUndefined();
+  });
+
+  it('DOES fail closed when a PASSING gate cannot have its evidence written', async () => {
+    // The deliberate asymmetry. No conclusion has been reached yet, the run is
+    // not owed a verdict, and "we could not record what we observed" is an
+    // honest infrastructure failure rather than a green light.
+    const exploding = Object.assign(
+      async () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+      { writes: [] as { name: string; contents: string }[] },
+    );
+    const runner = recordingRunner(processResult({ exitCode: 0, stdout: 'ok' }));
+
+    await expect(createGatesStage(deps(runner, exploding)).run(stageContext())).rejects.toThrow(
+      /ENOSPC/,
+    );
+  });
+
   it('writes no file for an empty stream', async () => {
     const writer = recordingWriter();
     const runner = recordingRunner(processResult({ stdout: 'out', stderr: '' }));
