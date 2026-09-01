@@ -441,3 +441,54 @@ describe('the worktree directory is a real checkout', () => {
     expect(entries.map((entry) => entry.path)).not.toContain(created.path);
   });
 });
+
+describe('a registration whose checkout is gone is still a registration', () => {
+  it('removes it rather than reporting success and leaving it behind', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-missing-checkout');
+    const created = trackContainer(await vcs().addWorktree(root, repo.headSha, recordNothing));
+
+    // The ordinary shape of what `clean` replays: a crashed run whose temp
+    // checkout the OS (or anything else) later removed, while git's
+    // registration survived — which is precisely what `git worktree prune`
+    // exists for.
+    await rm(created.path, { recursive: true, force: true });
+    const before = await vcs().listWorktrees(root);
+    expect(before.map((entry) => entry.path)).toContain(created.path);
+
+    // Addressed by a NON-canonical spelling of the same path, because that is
+    // what a caller can hold. `os.tmpdir()` returns the symlink form on macOS
+    // (`/var/folders/…`) while git records and reports the resolved one
+    // (`/private/var/folders/…`), so any caller that joined a path from
+    // `tmpdir()` rather than from `realpath(tmpdir())` has this spelling. The
+    // function must not care which spelling it is handed.
+    const asCallerSpelledIt = created.path.startsWith('/private/')
+      ? created.path.slice('/private'.length)
+      : created.path;
+
+    await vcs().removeWorktreeAt(root, asCallerSpelledIt);
+
+    // Reported by bob (3.2) with the mechanism, which is worth keeping: once
+    // the leaf is gone `realpath` can no longer resolve the recorded path, so a
+    // resolver that silently falls back to a LEXICAL path leaves it as
+    // `/var/folders/…` while git reports the canonical `/private/var/folders/…`.
+    // The two stop comparing equal, the registration lookup answers "absent",
+    // and removal takes its no-op branch and returns SUCCESS — so `clean` marks
+    // the run reaped with the registration still there.
+    //
+    // Same class as this module's first defect: never conclude "absent" from a
+    // lookup that could not be answered.
+    const after = await vcs().listWorktrees(root);
+    expect(after.map((entry) => entry.path)).not.toContain(created.path);
+  });
+
+  it('is still a no-op for a path that was never registered at all', async () => {
+    const { repo, root } = await repoWithRoot('wt-at-never-registered');
+
+    // The other half, so the fix cannot be "always attempt a removal": a path
+    // that genuinely names nothing must still resolve quietly, or `clean` stops
+    // replaying the moment it meets an already-reaped entry.
+    await expect(
+      vcs().removeWorktreeAt(root, join(repo.scratch, 'specwitness-worktree-never', 'worktree')),
+    ).resolves.toBeUndefined();
+  });
+});
