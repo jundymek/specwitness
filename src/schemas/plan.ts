@@ -507,23 +507,27 @@ const PlanCriterionSchema = z
         return;
       }
 
-      // AN OBSERVATION WRAPS AN ACTION, AND A WRAP IS NOT AN ACTION.
+      // AN OBSERVATION WRAPS AN ACTION, AND AN OBSERVATION IS NOT AN ACTION.
       //
-      // The target must not itself be a wrapping observation. That single rule closes two
-      // holes at once: a cycle (`a` around `b`, `b` around `a`), where executing either
-      // requires executing the other first; and a chain of wraps, whose nesting order no
-      // executor has been told. Restricting the target to a non-wrapping probe is stricter
-      // than cycle detection and far easier to explain, and it costs nothing real — two
-      // observations may still wrap the SAME action probe, which is the case that actually
-      // occurs (rows created AND audit rows written, around one request).
+      // The target must be an http, browser or shell probe — never another observation, of
+      // any kind. One rule, and it closes three holes at once: a cycle (`a` around `b`, `b`
+      // around `a`), where executing either requires executing the other first; a chain of
+      // wraps, whose nesting order no executor has been told; and the case that is merely
+      // meaningless rather than unrunnable — wrapping a standalone snapshot, i.e. "take a
+      // snapshot before and after taking a snapshot", which measures nothing at all.
       //
-      // Raised by the Codex review pass.
+      // It costs nothing real: two observations may still wrap the SAME action probe, which
+      // is the case that actually occurs (rows created AND audit rows written, around one
+      // request).
+      //
+      // The narrower "not a WRAPPING observation" version of this rule shipped first and was
+      // sharpened here after a second Codex pass pointed out the third hole.
       const target = entry.probes[seen.get(probe.mechanics.around) as number];
-      if (target?.surface === 'observation' && target.mechanics.around !== undefined) {
+      if (target?.surface === 'observation') {
         ctx.addIssue({
           code: 'custom',
           path: ['probes', index, 'mechanics', 'around'],
-          message: `'${probe.mechanics.around}' is itself a wrapping observation; an observation must wrap an action probe, not another wrap — point both at the probe whose effect you are measuring`,
+          message: `'${probe.mechanics.around}' is another observation; an observation wraps an ACTION (http, browser or shell) whose effect its before/after snapshots measure — wrapping a snapshot measures nothing`,
         });
       }
     });
@@ -1112,6 +1116,50 @@ export function planDraftSchemaFor(
   // Also uncast: the declared `z.ZodType<PlanDraft>` return type is what proves the draft
   // schema still produces exactly a `PlanDraft`.
   return schema;
+}
+
+/**
+ * Can a plan reference a config key with this name at all?
+ *
+ * The plan's id pattern is deliberately STRICTER than the config's key type: `src/config/
+ * schema.ts` accepts any non-empty string as a `services:` or `observations:` key, while a
+ * plan's `serviceId` / `commandId` must be an id-shaped token, because that constraint is
+ * what stops a command line being smuggled through the field (see `Identifier`).
+ *
+ * So a project CAN declare a key no plan is able to reference. **Loosening the pattern is
+ * not the answer** — it is a security control, and the epic's whole boundary rests on it.
+ * What matters is that the asymmetry is DIAGNOSED rather than discovered: without this, the
+ * plan-author would be told about a key it cannot use, draft a probe naming it, and burn the
+ * entire retry budget learning that. The CLI edge withholds such keys from the prompt and
+ * tells the operator, by name, with the fix.
+ *
+ * Raised by story 4.1's agent at cohort intent-sync, and again by the Codex review pass.
+ */
+export function isReferenceableId(value: string): boolean {
+  return Identifier.safeParse(value).success;
+}
+
+/** One declared config key that no plan could name. */
+export interface UnreferenceableId {
+  readonly kind: 'service' | 'observation';
+  readonly id: string;
+}
+
+/**
+ * Every declared key a plan could not reference, services first.
+ *
+ * Pure, so the CLI edge can render it and `compilePlan` can filter on it without either
+ * re-deriving what "referenceable" means.
+ */
+export function unreferenceableIds(declared: DeclaredIds): readonly UnreferenceableId[] {
+  return [
+    ...declared.serviceIds
+      .filter((id) => !isReferenceableId(id))
+      .map((id) => ({ kind: 'service', id }) as const),
+    ...declared.commandIds
+      .filter((id) => !isReferenceableId(id))
+      .map((id) => ({ kind: 'observation', id }) as const),
+  ];
 }
 
 /* ── the staleness refusal (AC3) ────────────────────────────────────────────────────── */

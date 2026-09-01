@@ -75,7 +75,13 @@ import { RandomIds } from '../../infra/ids.js';
 import { createProcessRunner } from '../../infra/process-runner.js';
 import { providerForRole } from '../../providers/index.js';
 import { parseContract } from '../../schemas/contract.js';
-import { assertPlanMatchesContract, parsePlan, serializePlan } from '../../schemas/plan.js';
+import {
+  assertPlanMatchesContract,
+  isReferenceableId,
+  parsePlan,
+  serializePlan,
+  unreferenceableIds,
+} from '../../schemas/plan.js';
 import type { DeclaredIds } from '../../schemas/plan.js';
 import { readProviderProvenance } from '../contract/provenance.js';
 import { printWarning } from '../print-error.js';
@@ -171,7 +177,7 @@ export async function runPlan(
   // filesystem mutation (FR-14, "never a partial artifact").
   const { plan, attempts } = await compilePlan({
     loadedContract,
-    declared: declaredIds(config),
+    declared: declaredIds(config, printWarning),
     provider,
     clock,
     ids,
@@ -198,11 +204,35 @@ export async function runPlan(
  * `observations:` is the one map of declared commands a plan may reference — used by both
  * the observation surface (4.5) and the shell surface (4.6), which differ in what they
  * assert on rather than in where their command comes from.
+ *
+ * KEYS A PLAN CANNOT NAME ARE WITHHELD, AND SAID OUT LOUD. The config accepts any non-empty
+ * string as a key; a plan's id fields are stricter, because that strictness is what stops a
+ * command line being smuggled through `commandId` (see `Identifier` in
+ * `src/schemas/plan.ts`). A project may therefore declare `services: {"public api": ...}`,
+ * which no plan can reference. Passing such a key into the prompt anyway is the bad outcome:
+ * the provider drafts a probe naming it, the gate rejects it, and the entire retry budget is
+ * spent learning something the prompt could have known. So it is filtered out and the
+ * operator is told, by name, with the fix.
  */
-function declaredIds(config: SpecwitnessConfig): DeclaredIds {
-  return {
+function declaredIds(config: SpecwitnessConfig, warn: (message: string) => void): DeclaredIds {
+  const all: DeclaredIds = {
     serviceIds: Object.keys(config.services),
     commandIds: Object.keys(config.observations),
+  };
+
+  for (const { kind, id } of unreferenceableIds(all)) {
+    warn(
+      `${kind} "${id}" cannot be referenced from a plan: a plan names config ids as ` +
+        'letters, digits, underscore, dot or hyphen, starting with a letter or digit — the ' +
+        'restriction is what stops a command line being smuggled through an id field. ' +
+        `Criteria needing this ${kind} will be recorded as needing human review. Rename the ` +
+        'key in .specwitness/config.yaml to make it usable.',
+    );
+  }
+
+  return {
+    serviceIds: all.serviceIds.filter(isReferenceableId),
+    commandIds: all.commandIds.filter(isReferenceableId),
   };
 }
 

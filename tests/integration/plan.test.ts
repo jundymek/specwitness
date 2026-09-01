@@ -340,6 +340,35 @@ describe('plan <epic> — refusals', () => {
     expect(result.stderr).not.toContain('--force');
   });
 
+  /**
+   * The plan's id pattern is stricter than the config's key type, deliberately — it is what
+   * stops a command line being smuggled through `commandId`. A project may therefore declare
+   * a key no plan can name. The bad outcome is not the restriction; it is DISCOVERING it by
+   * watching the provider burn its whole retry budget on a probe the gate will reject.
+   *
+   * Raised by story 4.1's agent at cohort intent-sync and again by the Codex review pass.
+   */
+  it('warns by name about a declared key no plan could reference, and still compiles', async () => {
+    const root = await project(VALID);
+    await writeFile(
+      join(root, '.specwitness', 'config.yaml'),
+      config(VALID).replace(
+        'observations:\n',
+        'observations:\n  scripts/company count:\n    run: ./scripts/count.sh\n',
+      ),
+      'utf8',
+    );
+
+    const result = await run(root, 'plan', '7');
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain('scripts/company count');
+    expect(result.stderr).toContain('cannot be referenced from a plan');
+    // The compilation still succeeds: the unusable key is withheld from the prompt rather
+    // than turned into a refusal, because the rest of the contract is still plannable.
+    expect(await plansDir(root)).toEqual(['epic-7.yaml']);
+  });
+
   it('refuses in a project that was never initialised', async () => {
     const root = await mkdtemp(join(tmpdir(), 'specwitness-plan-bare-'));
     created.push(root);

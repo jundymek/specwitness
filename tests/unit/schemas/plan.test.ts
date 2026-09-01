@@ -368,6 +368,46 @@ describe('an observation wrap must be executable (Q34)', () => {
     expectRefusedAt(document, 'plan.criteria.0.probes.0.mechanics.around');
   });
 
+  it('rejects wrapping a standalone observation — a snapshot is not an action', () => {
+    // The stronger form of the rule below, raised by the second Codex pass. "Take a snapshot
+    // before and after taking a snapshot" measures nothing: the wrapped probe has to be the
+    // ACTION whose effect the two snapshots bracket.
+    const inner = observationOn({ commandId: 'company-count', args: [] }, 'snapshot') as Record<
+      string,
+      unknown
+    >;
+    inner.id = 'inner';
+    const outer = observationOn(
+      { commandId: 'company-count', args: [], around: 'inner' },
+      'delta',
+    ) as Record<string, unknown>;
+    outer.id = 'outer';
+
+    const document = asDocument(
+      planFor(CONTRACT, { criteria: [automated('E7-01', inner as never, outer as never)] }),
+    );
+
+    expectRefusedAt(document, 'plan.criteria.0.probes.1.mechanics.around');
+  });
+
+  it.each([
+    ['http', HTTP_PROBE],
+    ['shell', SHELL_PROBE],
+    ['browser', BROWSER_PROBE],
+  ])('accepts an observation wrapping a %s action probe', (_surface, action) => {
+    const wrap = observationOn(
+      { commandId: 'company-count', args: [], around: action.id },
+      'delta',
+    ) as Record<string, unknown>;
+    wrap.id = 'wrap';
+
+    const document = asDocument(
+      planFor(CONTRACT, { criteria: [automated('E7-01', action, wrap as never)] }),
+    );
+
+    expect(check(document).success).toBe(true);
+  });
+
   it('rejects wrapping a probe that is itself a wrap', () => {
     const inner = observationOn(
       { commandId: 'company-count', args: [], around: 'health-endpoint' },
