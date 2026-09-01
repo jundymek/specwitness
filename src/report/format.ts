@@ -26,6 +26,7 @@
  */
 
 import type { CriterionStatus, GateStatus } from '../domain/result.js';
+import type { StageStatus } from '../domain/stage.js';
 import { type RunOutcome, isVerdictOutcome } from '../domain/run-outcome.js';
 
 /**
@@ -110,4 +111,31 @@ export function verdictLine(outcome: RunOutcome): string {
     return `VERDICT: ${outcome.verdict} — gate '${outcome.gateFailed}' failed`;
   }
   return `VERDICT: ${outcome.verdict}`;
+}
+
+/**
+ * How one pipeline stage came out.
+ *
+ * A third vocabulary rather than a reuse of the other two, because
+ * `StageStatus` asks a different question: `failed` means the stage produced a
+ * product-relevant negative outcome and the run still reached a verdict, while
+ * `error` means it threw and the run could not reach one at all. Collapsing
+ * them into the gate words would erase precisely the distinction the two-armed
+ * stage result exists to make unrepresentable.
+ */
+export function stageMark(status: StageStatus): string {
+  switch (status) {
+    case 'ok':
+      return '✓ ok';
+    case 'failed':
+      return '✗ failed';
+    case 'error':
+      return '! error';
+    case 'skipped':
+      return '– skipped';
+    default: {
+      const unreachable: never = status;
+      return unreachable;
+    }
+  }
 }
