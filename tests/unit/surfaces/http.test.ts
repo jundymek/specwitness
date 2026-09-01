@@ -1,0 +1,987 @@
+/**
+ * Story 4.4 — the http surface executor.
+ *
+ * Every test here drives a REAL fixture HTTP server on an EPHEMERAL port. There is no
+ * mocking library and no `nock`: a real socket is both more honest and cheaper than a
+ * dependency the Stack table does not pin, and the classification tests in particular are
+ * only meaningful if they PRODUCE the state rather than assert over a mocked outcome value
+ * (spec: "AC3's test must produce the state, not mock it").
+ *
+ * `listen(0)` then read the assigned port, following `tests/integration/services.test.ts`:
+ * the auto-review runs `pnpm test` in this worktree concurrently with the agent (H-8), so a
+ * hardcoded port fails against a concurrent copy of this same suite.
+ *
+ * No subprocess is spawned anywhere in this file.
+ */
+
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createSocketServer, type Server as SocketServer } from 'node:net';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import {
+  deriveCriterionResult,
+  type ContractCriterionRef,
+  type ProbeAttempt,
+} from '../../../src/domain/criterion-result.js';
+import { InfraError } from '../../../src/domain/errors.js';
+import type { Evidence, HttpEvidence } from '../../../src/domain/evidence.js';
+import type { Assertion, HttpAssertionTarget, HttpProbe } from '../../../src/domain/plan.js';
+import type { Clock } from '../../../src/domain/ports.js';
+import { HttpSurfaceExecutor, type HttpExecutorDeps } from '../../../src/surfaces/http.js';
+
+/* ── fixtures ───────────────────────────────────────────────────────────────────────── */
+
+const openServers: (Server | SocketServer)[] = [];
+
+afterEach(async () => {
+  // A leaked listener holds a port and the next run fails somewhere else entirely.
+  await Promise.all(
+    openServers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        }),
+    ),
+  );
+});
+
+interface RecordedRequest {
+  readonly method: string;
+  readonly url: string;
+  readonly headers: Record<string, string>;
+  readonly body: string;
+}
+
+type Handler = (request: IncomingMessage, response: ServerResponse) => void;
+
+/** A fixture server on an ephemeral port; returns its base URL and what it received. */
+async function fixture(handler: Handler): Promise<{
+  baseUrl: string;
+  received: RecordedRequest[];
+}> {
+  const received: RecordedRequest[] = [];
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
+    request.on('end', () => {
+      const headers: Record<string, string> = {};
+      for (const [name, value] of Object.entries(request.headers)) {
+        headers[name] = Array.isArray(value) ? value.join(', ') : (value ?? '');
+      }
+      received.push({
+        method: request.method ?? '',
+        url: request.url ?? '',
+        headers,
+        body: Buffer.concat(chunks).toString('utf8'),
+      });
+      handler(request, response);
+    });
+  });
+  openServers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('the fixture server did not report a port');
+  }
+  return { baseUrl: `http://127.0.0.1:${address.port}`, received };
+}
+
+/** Answers a JSON body with status 200 unless told otherwise. */
+async function jsonFixture(
+  body: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+): Promise<{ baseUrl: string; received: RecordedRequest[] }> {
+  return await fixture((_request, response) => {
+    response.writeHead(status, { 'content-type': 'application/json', ...headers });
+    response.end(JSON.stringify(body));
+  });
+}
+
+/**
+ * A port with NOTHING listening: bind one, read it, close it.
+ *
+ * This produces connection-refused honestly rather than guessing an unused port — the
+ * guess is the version that goes flaky on a busy machine.
+ */
+async function closedPort(): Promise<number> {
+  const server = createSocketServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('the fixture listener did not report a port');
+  }
+  const { port } = address;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+/** Accepts the socket and never answers. For the timeout test. */
+async function blackHole(): Promise<string> {
+  const server = createServer(() => {
+    // Deliberately no response: the socket is accepted and then held open.
+  });
+  openServers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('the fixture server did not report a port');
+  }
+  return `http://127.0.0.1:${address.port}`;
+}
+
+/* ── executor harness ───────────────────────────────────────────────────────────────── */
+
+const FIXED_NOW = new Date('2026-09-01T12:00:00.000Z');
+
+/** Advances a fixed number of ms per call, so `durationMs` is exact rather than a shape. */
+function steppingClock(stepMs = 7): Clock {
+  let calls = 0;
+  return {
+    now(): Date {
+      const at = new Date(FIXED_NOW.getTime() + calls * stepMs);
+      calls += 1;
+      return at;
+    },
+  };
+}
+
+interface Harness {
+  readonly executor: HttpSurfaceExecutor;
+  readonly written: { name: string; contents: string }[];
+  readonly recorded: Evidence[];
+}
+
+function harness(overrides: Partial<HttpExecutorDeps> = {}): Harness {
+  const written: { name: string; contents: string }[] = [];
+  const recorded: Evidence[] = [];
+  const executor = new HttpSurfaceExecutor({
+    clock: steppingClock(),
+    writeEvidence: async (name, contents) => {
+      written.push({ name, contents });
+      return name;
+    },
+    recordEvidence: (evidence) => {
+      recorded.push(evidence);
+    },
+    ...overrides,
+  });
+  return { executor, written, recorded };
+}
+
+function assertion(
+  target: HttpAssertionTarget,
+  comparison: Assertion<HttpAssertionTarget>['comparison'],
+  expected: string,
+  description = 'an expectation',
+): Assertion<HttpAssertionTarget> {
+  return { description, target, comparison, expected };
+}
+
+function probe(
+  assertions: readonly Assertion<HttpAssertionTarget>[],
+  mechanics: Partial<HttpProbe['mechanics']> = {},
+): HttpProbe {
+  return {
+    id: 'probe-1',
+    surface: 'http',
+    mechanics: { serviceId: 'backend', method: 'GET', path: '/health', ...mechanics },
+    assertions,
+  };
+}
+
+async function run(
+  executor: HttpSurfaceExecutor,
+  baseUrl: string,
+  spec: HttpProbe,
+  attempt?: number,
+): Promise<ProbeAttempt> {
+  return await executor.execute({
+    criterionId: 'E4-01',
+    surface: 'http',
+    params: attempt === undefined ? { probe: spec, baseUrl } : { probe: spec, baseUrl, attempt },
+  });
+}
+
+const AUTOMATED: ContractCriterionRef = {
+  criterionId: 'E4-01',
+  statement: 'the health endpoint reports ready',
+  severity: 'critical',
+  verifiability: 'automated',
+};
+
+/* ── Task 1: the executor shape ─────────────────────────────────────────────────────── */
+
+describe('the executor shape (AC1)', () => {
+  it('declares the http surface', () => {
+    expect(harness().executor.surface).toBe('http');
+  });
+
+  it('returns a ProbeAttempt and nothing resembling a verdict', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(Object.keys(attempt).sort()).toEqual(
+      ['assertionEvaluations', 'attempt', 'durationMs', 'evidence', 'observations'].sort(),
+    );
+    expect(attempt).not.toHaveProperty('status');
+    expect(attempt).not.toHaveProperty('flaky');
+  });
+
+  it('stamps the 1-based attempt from the request, defaulting to 1', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const spec = probe([assertion({ source: 'status' }, 'equals', '200')]);
+    const { executor } = harness();
+
+    expect((await run(executor, baseUrl, spec)).attempt).toBe(1);
+    expect((await run(executor, baseUrl, spec, 3)).attempt).toBe(3);
+  });
+
+  it('measures durationMs from the injected Clock, as a whole number', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const attempt = await run(
+      harness({ clock: steppingClock(11) }).executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    // The stepping clock advances exactly 11ms between the two reads the executor makes.
+    expect(attempt.durationMs).toBe(11);
+    expect(Number.isInteger(attempt.durationMs)).toBe(true);
+  });
+});
+
+/* ── Task 1: malformed params are a WIRING defect, not an environment failure ───────── */
+
+describe('malformed params (a wiring defect, never an execError)', () => {
+  const cases: { why: string; params: Record<string, unknown> }[] = [
+    { why: 'no probe at all', params: { baseUrl: 'http://127.0.0.1:1' } },
+    {
+      why: 'no baseUrl',
+      params: { probe: probe([assertion({ source: 'status' }, 'equals', '200')]) },
+    },
+    {
+      why: 'a probe for another surface',
+      params: {
+        probe: { id: 'p', surface: 'shell', mechanics: {}, assertions: [] },
+        baseUrl: 'http://127.0.0.1:1',
+      },
+    },
+    {
+      why: 'an absolute path, which AD-3 forbids a plan from expressing',
+      params: {
+        probe: probe([assertion({ source: 'status' }, 'equals', '200')], {
+          path: 'http://evil.example/x',
+        }),
+        baseUrl: 'http://127.0.0.1:1',
+      },
+    },
+    {
+      why: 'an attempt number below 1',
+      params: {
+        probe: probe([assertion({ source: 'status' }, 'equals', '200')]),
+        baseUrl: 'http://127.0.0.1:1',
+        attempt: 0,
+      },
+    },
+  ];
+
+  for (const { why, params } of cases) {
+    it(`throws InfraError rather than returning an execError: ${why}`, async () => {
+      await expect(
+        harness().executor.execute({ criterionId: 'E4-01', surface: 'http', params }),
+      ).rejects.toBeInstanceOf(InfraError);
+    });
+  }
+
+  it('never issues a request when the params are malformed', async () => {
+    const { baseUrl, received } = await jsonFixture({ ok: true });
+    await expect(
+      harness().executor.execute({
+        criterionId: 'E4-01',
+        surface: 'http',
+        params: { probe: probe([]), baseUrl },
+      }),
+    ).rejects.toBeInstanceOf(InfraError);
+
+    expect(received).toHaveLength(0);
+  });
+});
+
+/* ── Task 2: request construction ───────────────────────────────────────────────────── */
+
+describe('request construction (AC1, AD-3)', () => {
+  it('sends the declared method, path, headers and body to the server', async () => {
+    const { baseUrl, received } = await jsonFixture({ ok: true });
+    await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')], {
+        method: 'POST',
+        path: '/orders?dry=1',
+        headers: { 'x-trace': 'abc' },
+        body: '{"sku":"A-1"}',
+      }),
+    );
+
+    expect(received).toHaveLength(1);
+    const [request] = received;
+    expect(request?.method).toBe('POST');
+    expect(request?.url).toBe('/orders?dry=1');
+    expect(request?.headers['x-trace']).toBe('abc');
+    expect(request?.body).toBe('{"sku":"A-1"}');
+  });
+
+  it('joins the caller-resolved base URL with the declared path, base path included', async () => {
+    const { baseUrl, received } = await jsonFixture({ ok: true });
+    await run(
+      harness().executor,
+      `${baseUrl}/api/v2`,
+      probe([assertion({ source: 'status' }, 'equals', '200')], { path: '/orders' }),
+    );
+
+    // A base URL carrying a path prefix keeps it: `/api/v2` + `/orders`. Naive
+    // `new URL(path, base)` resolution would discard the prefix and probe `/orders`.
+    expect(received[0]?.url).toBe('/api/v2/orders');
+  });
+
+  it('never follows a redirect off the declared service', async () => {
+    const elsewhere = await fixture((_request, response) => {
+      response.writeHead(200);
+      response.end('should never be reached');
+    });
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(302, { location: `${elsewhere.baseUrl}/stolen` });
+      response.end();
+    });
+
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '302')]),
+    );
+
+    expect(attempt.assertionEvaluations[0]?.satisfied).toBe(true);
+    expect(elsewhere.received).toHaveLength(0);
+  });
+});
+
+/* ── Task 2: mechanical assertion evaluation ────────────────────────────────────────── */
+
+describe('mechanical assertion evaluation (AC1)', () => {
+  it('records EVERY assertion, satisfied ones included', async () => {
+    const { baseUrl } = await jsonFixture({ name: 'widget', count: 3 });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([
+        assertion({ source: 'status' }, 'equals', '200', 'status is 200'),
+        assertion({ source: 'jsonPath', path: 'name' }, 'equals', 'widget', 'name is widget'),
+        assertion({ source: 'jsonPath', path: 'count' }, 'greaterThan', '1', 'count exceeds 1'),
+      ]),
+    );
+
+    expect(attempt.assertionEvaluations).toHaveLength(3);
+    expect(attempt.assertionEvaluations.every((each) => each.satisfied)).toBe(true);
+    expect(attempt.assertionEvaluations.map((each) => each.description)).toEqual([
+      'status is 200',
+      'name is widget',
+      'count exceeds 1',
+    ]);
+  });
+
+  it('names both values when a status assertion is unsatisfied', async () => {
+    const { baseUrl } = await jsonFixture({}, 503);
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(attempt.assertionEvaluations[0]).toMatchObject({
+      satisfied: false,
+      expected: '200',
+      actual: '503',
+    });
+  });
+
+  it('names both values when a JSON-path value is wrong', async () => {
+    const { baseUrl } = await jsonFixture({ data: { items: [{ id: 'a-1' }, { id: 'b-2' }] } });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'jsonPath', path: '$.data.items[1].id' }, 'equals', 'z-9')]),
+    );
+
+    expect(attempt.assertionEvaluations[0]).toMatchObject({
+      satisfied: false,
+      expected: 'z-9',
+      actual: 'b-2',
+    });
+  });
+
+  it('evaluates header assertions case-insensitively, both ways', async () => {
+    const { baseUrl } = await jsonFixture({}, 200, { 'x-flavour': 'vanilla' });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([
+        assertion({ source: 'header', name: 'X-Flavour' }, 'equals', 'vanilla'),
+        assertion({ source: 'header', name: 'x-flavour' }, 'equals', 'chocolate'),
+      ]),
+    );
+
+    expect(attempt.assertionEvaluations[0]?.satisfied).toBe(true);
+    expect(attempt.assertionEvaluations[1]).toMatchObject({
+      satisfied: false,
+      expected: 'chocolate',
+      actual: 'vanilla',
+    });
+  });
+
+  it('evaluates a body assertion against the response text', async () => {
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('service is healthy');
+    });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([
+        assertion({ source: 'body' }, 'contains', 'healthy'),
+        assertion({ source: 'body' }, 'notContains', 'degraded'),
+      ]),
+    );
+
+    expect(attempt.assertionEvaluations.every((each) => each.satisfied)).toBe(true);
+  });
+
+  it('supports the six merged comparisons', async () => {
+    const { baseUrl } = await jsonFixture({ n: 5, s: 'alpha-beta' });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([
+        assertion({ source: 'jsonPath', path: 'n' }, 'equals', '5'),
+        assertion({ source: 'jsonPath', path: 'n' }, 'notEquals', '6'),
+        assertion({ source: 'jsonPath', path: 's' }, 'contains', 'beta'),
+        assertion({ source: 'jsonPath', path: 's' }, 'notContains', 'gamma'),
+        assertion({ source: 'jsonPath', path: 'n' }, 'greaterThan', '4'),
+        assertion({ source: 'jsonPath', path: 'n' }, 'lessThan', '6'),
+      ]),
+    );
+
+    expect(attempt.assertionEvaluations.map((each) => each.satisfied)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  it('leaves a numeric comparison unsatisfied when a side is not a number, without crashing', async () => {
+    const { baseUrl } = await jsonFixture({ s: 'not-a-number' });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'jsonPath', path: 's' }, 'greaterThan', '4')]),
+    );
+
+    expect(attempt.assertionEvaluations[0]?.satisfied).toBe(false);
+    expect(attempt.assertionEvaluations[0]?.actual).toContain('not-a-number');
+  });
+});
+
+/* ── Task 2: absent values are unsatisfied, never an execError ──────────────────────── */
+
+describe('a value that is not there (AC1)', () => {
+  it('treats an unresolved JSON path as unsatisfied, not as an execError', async () => {
+    const { baseUrl } = await jsonFixture({ data: {} });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'jsonPath', path: '$.data.missing' }, 'equals', 'x')]),
+    );
+
+    expect(attempt.execError).toBeUndefined();
+    expect(attempt.assertionEvaluations[0]?.satisfied).toBe(false);
+    expect(attempt.assertionEvaluations[0]?.actual).toMatch(/did not resolve/i);
+  });
+
+  it('treats an absent header as unsatisfied, not as an execError', async () => {
+    const { baseUrl } = await jsonFixture({});
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'header', name: 'x-request-id' }, 'equals', 'abc')]),
+    );
+
+    expect(attempt.execError).toBeUndefined();
+    expect(attempt.assertionEvaluations[0]?.satisfied).toBe(false);
+    expect(attempt.assertionEvaluations[0]?.actual).toMatch(/no such header/i);
+  });
+
+  it('never mints a pass from an absence, even for a negative comparison', async () => {
+    const { baseUrl } = await jsonFixture({ data: {} });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([
+        assertion({ source: 'jsonPath', path: '$.data.missing' }, 'notEquals', 'x'),
+        assertion({ source: 'header', name: 'x-absent' }, 'notContains', 'y'),
+      ]),
+    );
+
+    // A value that does not exist cannot satisfy an expectation ABOUT that value. The
+    // alternative mints a PASS out of nothing, which is the one direction this product
+    // must never fail in.
+    expect(attempt.assertionEvaluations.map((each) => each.satisfied)).toEqual([false, false]);
+  });
+
+  it('treats a non-JSON body under a jsonPath assertion as unsatisfied, naming the content type', async () => {
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><title>login</title>');
+    });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'jsonPath', path: 'token' }, 'equals', 'x')]),
+    );
+
+    expect(attempt.execError).toBeUndefined();
+    const [evaluation] = attempt.assertionEvaluations;
+    expect(evaluation?.satisfied).toBe(false);
+    expect(evaluation?.actual).toContain('text/html');
+    expect(evaluation?.actual).toContain('<!doctype html>');
+  });
+});
+
+/* ── Task 2: an unsupported JSON path is a TOOLING gap, never a product failure ─────── */
+
+describe('JSON-path syntax outside the implemented subset', () => {
+  const unsupported = ['$..id', '$.items[*].id', '$.items[?(@.id)]', '$.items[0:2]'];
+
+  for (const path of unsupported) {
+    it(`refuses '${path}' before any request is issued`, async () => {
+      const { baseUrl, received } = await jsonFixture({ items: [] });
+      await expect(
+        run(
+          harness().executor,
+          baseUrl,
+          probe([assertion({ source: 'jsonPath', path }, 'equals', 'x')]),
+        ),
+      ).rejects.toBeInstanceOf(InfraError);
+
+      // Refused at params time, so nothing was observed and nothing can be misread as a
+      // product failure. An executor limitation is never evidence about the branch.
+      expect(received).toHaveLength(0);
+    });
+  }
+});
+
+/* ── Task 3: the classification split — the story's most important behaviour ────────── */
+
+describe('could not look vs looked and saw wrong (AC3)', () => {
+  it('classifies connection refused as an execError with a hint', async () => {
+    const port = await closedPort();
+    const attempt = await run(
+      harness().executor,
+      `http://127.0.0.1:${port}`,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(attempt.execError?.message).toBeTruthy();
+    expect(attempt.execError?.hint).toBeTruthy();
+  });
+
+  it('classifies a DNS failure as an execError', async () => {
+    const attempt = await run(
+      harness().executor,
+      'http://specwitness-no-such-host.invalid',
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(attempt.execError).toBeDefined();
+  });
+
+  it('classifies a socket timeout as an execError, with the timeout injected in ms', async () => {
+    const baseUrl = await blackHole();
+    const attempt = await run(
+      harness({ timeoutMs: 50 }).executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(attempt.execError?.message).toMatch(/timed out|timeout/i);
+  });
+
+  it('emits NO assertion evaluation on the exec-error path', async () => {
+    const port = await closedPort();
+    const attempt = await run(
+      harness().executor,
+      `http://127.0.0.1:${port}`,
+      probe([
+        assertion({ source: 'status' }, 'equals', '200'),
+        assertion({ source: 'jsonPath', path: 'ok' }, 'equals', 'true'),
+      ]),
+    );
+
+    // Two assertions were declared and NEITHER is reported: they ran against nothing.
+    // Emitting them "for completeness" would manufacture product evidence out of an
+    // infrastructure failure.
+    expect(attempt.assertionEvaluations).toEqual([]);
+  });
+
+  it('derives criterion `error`, NOT `fail`, from a refused connection', async () => {
+    const port = await closedPort();
+    const attempt = await run(
+      harness().executor,
+      `http://127.0.0.1:${port}`,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    const derived = deriveCriterionResult(AUTOMATED, [attempt]);
+    expect(derived.status).toBe('error');
+    expect(derived.status).not.toBe('fail');
+    expect(derived.actual).toBeTruthy();
+  });
+
+  it('derives criterion `error`, NOT `fail`, from a timeout', async () => {
+    const baseUrl = await blackHole();
+    const attempt = await run(
+      harness({ timeoutMs: 50 }).executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
+  });
+
+  it('records NOTHING when it observed nothing — no evidence, no member', async () => {
+    const port = await closedPort();
+    const { executor, written, recorded } = harness();
+    const attempt = await run(
+      executor,
+      `http://127.0.0.1:${port}`,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(attempt.evidence).toEqual([]);
+    expect(written).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it('derives `fail`, not `error`, when the probe DID look and saw the wrong value', async () => {
+    const { baseUrl } = await jsonFixture({}, 500);
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(attempt.execError).toBeUndefined();
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('fail');
+  });
+});
+
+/* ── Task 3: the one case where an exec error DID observe something ─────────────────── */
+
+describe('a timeout AFTER the headers arrived (the observed-yet-errored case)', () => {
+  it('captures the partial response, sets execError, and still evaluates nothing', async () => {
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      // Headers and a first chunk land; the body is then never finished.
+      response.write('{"partial":');
+    });
+
+    const { executor, recorded } = harness({ timeoutMs: 120 });
+    const attempt = await run(
+      executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    // It could not COMPLETE the observation, so the criterion must be `error`...
+    expect(attempt.execError).toBeDefined();
+    expect(attempt.assertionEvaluations).toEqual([]);
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
+
+    // ...but a real status, real headers and real bytes WERE observed, and they are the
+    // diagnostic. Evidence follows whether an observation exists, not whether the attempt
+    // errored (cohort rule, settled at intent-sync with 4.5 and 4.6).
+    expect(recorded).toHaveLength(1);
+    const [member] = recorded as [HttpEvidence];
+    expect(member.response.status).toBe(200);
+    expect(member.response.body.text).toContain('"partial"');
+    expect(member.explanation).toBeTruthy();
+    expect(attempt.evidence.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+/* ── Task 4: evidence, and the redaction that must happen at capture ────────────────── */
+
+describe('evidence capture (AC2, AD-10)', () => {
+  it('records the typed member through the merged constructor and refs a file', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const { executor, written, recorded } = harness();
+    const attempt = await run(
+      executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(recorded).toHaveLength(1);
+    const [member] = recorded as [HttpEvidence];
+    expect(member.kind).toBe('http');
+    expect(member.request.method).toBe('GET');
+    expect(member.response.status).toBe(200);
+    expect(member.capturedAt).toBe(FIXED_NOW.toISOString());
+
+    // At least one ref on every attempt that observed something (FR-28), pointing at a
+    // file that was actually written.
+    expect(attempt.evidence.length).toBeGreaterThanOrEqual(1);
+    expect(written.map((each) => each.name)).toContain(attempt.evidence[0]?.path);
+    expect(attempt.evidence.every((ref) => ref.kind === 'http')).toBe(true);
+  });
+
+  it('keeps evidence paths relative to the run directory (Q48)', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const { executor, written } = harness();
+    const attempt = await run(
+      executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    for (const ref of attempt.evidence) {
+      expect(ref.path.startsWith('/')).toBe(false);
+      expect(ref.path).not.toContain('..');
+      expect(ref.path).not.toContain('\\');
+      expect(ref.path.startsWith('evidence/')).toBe(true);
+    }
+    expect(written.every((each) => each.name.startsWith('evidence/'))).toBe(true);
+  });
+
+  it('keeps each attempt’s evidence separate, so a retry cannot clobber it', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const { executor, written } = harness();
+    const spec = probe([assertion({ source: 'status' }, 'equals', '200')]);
+
+    await run(executor, baseUrl, spec, 1);
+    await run(executor, baseUrl, spec, 2);
+
+    const names = written.map((each) => each.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('never collides across criteria that reuse a probe id', async () => {
+    // `plan.ts` enforces probe-id uniqueness only WITHIN a criterion — its own comment says
+    // "Probe ids identify a probe within its criterion" — so two criteria may each hold a
+    // probe called `health`. A filename built from the probe id alone would give both the
+    // same file, and the first criterion's evidence ref would then point at the second
+    // criterion's content: evidence attributed to the wrong criterion, which is worse than
+    // no evidence at all.
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const { executor, written } = harness();
+    const spec = probe([assertion({ source: 'status' }, 'equals', '200')]);
+
+    for (const criterionId of ['E4-01', 'E4-02']) {
+      await executor.execute({
+        criterionId,
+        surface: 'http',
+        params: { probe: spec, baseUrl, attempt: 1 },
+      });
+    }
+
+    const names = written.map((each) => each.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('never collides between two probe ids that slugify or truncate alike', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const { executor, written } = harness();
+
+    // Same criterion, distinct ids sharing a 64-character prefix (`Identifier` allows 128).
+    const shared = 'p'.repeat(70);
+    for (const id of [`${shared}alpha`, `${shared}beta`]) {
+      await executor.execute({
+        criterionId: 'E4-01',
+        surface: 'http',
+        params: {
+          probe: { ...probe([assertion({ source: 'status' }, 'equals', '200')]), id },
+          baseUrl,
+          attempt: 1,
+        },
+      });
+    }
+
+    const names = written.map((each) => each.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('derives the same evidence path twice for the same probe, so a re-run does not diff', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const spec = probe([assertion({ source: 'status' }, 'equals', '200')]);
+
+    const first = harness();
+    await run(first.executor, baseUrl, spec, 1);
+    const second = harness();
+    await run(second.executor, baseUrl, spec, 1);
+
+    expect(second.written.map((each) => each.name)).toEqual(first.written.map((each) => each.name));
+  });
+
+  it('caps the inline body and points the truncation marker at the full copy', async () => {
+    const long = 'x'.repeat(20_000);
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end(long);
+    });
+    const { executor, written, recorded } = harness();
+    const attempt = await run(
+      executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    const [member] = recorded as [HttpEvidence];
+    expect(member.response.body.truncated).toBe(true);
+    expect(member.response.body.totalBytes).toBe(20_000);
+    expect(member.response.body.text.length).toBeLessThan(20_000);
+    expect(member.response.body.fullPath).toBeDefined();
+
+    // The pointer names a file that was actually written, and it carries the WHOLE body.
+    const full = written.find((each) => each.name === member.response.body.fullPath);
+    expect(full?.contents).toBe(long);
+    expect(attempt.evidence.map((ref) => ref.path)).toContain(member.response.body.fullPath);
+  });
+
+  it('writes no full copy for an empty body, but still refs the member', async () => {
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(204);
+      response.end();
+    });
+    const { executor, written } = harness();
+    const attempt = await run(
+      executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    // An empty file is an artifact implying output that never existed (gates.ts's rule) —
+    // but the ATTEMPT still observed a real status, so FR-28's ref is present anyway.
+    expect(written).toHaveLength(1);
+    expect(attempt.evidence).toHaveLength(1);
+  });
+});
+
+/* ── Task 4: the seeded-secret proof ────────────────────────────────────────────────── */
+
+describe('seeded secrets never reach a stored artifact (AC2, NFR-3)', () => {
+  const SECRET = 'sw-secret-9f2c1ad4e7b6';
+
+  it('leaks the secret nowhere: not inline, not in the full copy, not in expected/actual', async () => {
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        'set-cookie': `session=${SECRET}; HttpOnly`,
+        'x-upstream-token': SECRET,
+      });
+      response.end(JSON.stringify({ api_key: SECRET, note: `token=${SECRET}` }));
+    });
+
+    const { executor, written, recorded } = harness();
+    const attempt = await run(
+      executor,
+      baseUrl,
+      probe(
+        [
+          // Deliberately unsatisfied, so `expected`/`actual` are populated and travel into
+          // the derived result — the other path a captured credential could take.
+          assertion({ source: 'jsonPath', path: 'api_key' }, 'equals', 'expected-value'),
+          assertion({ source: 'body' }, 'contains', 'nothing-like-this'),
+        ],
+        {
+          path: `/session?api_key=${SECRET}`,
+          headers: { authorization: `Bearer ${SECRET}`, cookie: `sid=${SECRET}` },
+        },
+      ),
+    );
+
+    const derived = deriveCriterionResult(AUTOMATED, [attempt]);
+
+    // ASSERT THE SECRET IS ABSENT, never that a marker is PRESENT: output carrying
+    // `[REDACTED]` with the secret still beside it survives review in a way a raw leak
+    // does not, and a marker-presence assertion passes green straight over it
+    // (Epic 3 retro §7).
+    const artifacts = [
+      JSON.stringify(recorded),
+      JSON.stringify(attempt),
+      JSON.stringify(derived),
+      ...written.map((each) => each.contents),
+      ...written.map((each) => each.name),
+    ];
+
+    for (const artifact of artifacts) {
+      expect(artifact).not.toContain(SECRET);
+    }
+  });
+
+  it('redacts the URL, so a query-string token cannot ride beside a redacted header', async () => {
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const { executor, recorded } = harness();
+
+    await run(
+      executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')], {
+        path: `/x?api_key=${SECRET}&page=2`,
+      }),
+    );
+
+    const [member] = recorded as [HttpEvidence];
+    expect(member.request.url).not.toContain(SECRET);
+    // The non-secret part of the URL survives: over-redaction produces evidence nobody can
+    // read, and people respond to unreadable evidence by opening the unredacted file.
+    expect(member.request.url).toContain('/x?');
+  });
+
+  it('redacts a secret carried in an error message', async () => {
+    const port = await closedPort();
+    const attempt = await run(
+      harness().executor,
+      `http://127.0.0.1:${port}`,
+      probe([assertion({ source: 'status' }, 'equals', '200')], {
+        path: `/x?token=${SECRET}`,
+      }),
+    );
+
+    expect(JSON.stringify(attempt.execError)).not.toContain(SECRET);
+  });
+
+  it('honours caller-supplied extra patterns for a secret with no assignment shape', async () => {
+    const opaque = 'zzzz-opaque-credential-zzzz';
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end(`the value is ${opaque} and nothing else`);
+    });
+    const { executor, recorded, written } = harness({
+      redaction: { extraPatterns: [new RegExp(opaque, 'g')] },
+    });
+
+    await run(executor, baseUrl, probe([assertion({ source: 'status' }, 'equals', '200')]));
+
+    expect(JSON.stringify(recorded)).not.toContain(opaque);
+    for (const file of written) {
+      expect(file.contents).not.toContain(opaque);
+    }
+  });
+});
