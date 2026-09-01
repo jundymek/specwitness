@@ -124,20 +124,25 @@ function endOfBareToken(line: string, from: number): number {
  *     empty string (a closed empty quote) and a whole-line fallback yields the
  *     literal three characters.
  */
-function readExecutable(line: string, from: number): { token: string; next: number } {
+function readExecutable(
+  line: string,
+  from: number,
+): { token: string; next: number; unterminated: boolean } {
+  let unterminated = false;
   const char = line[from];
 
   if (char !== undefined && QUOTES.has(char)) {
     const closing = line.indexOf(char, from + 1);
     if (closing !== -1) {
-      return { token: line.slice(from + 1, closing), next: closing + 1 };
+      return { token: line.slice(from + 1, closing), next: closing + 1, unterminated: false };
     }
+    unterminated = true;
     // Unclosed: fall through and read it bare, quote included — exactly what
     // doctor reports as the token it could not resolve.
   }
 
   const end = endOfBareToken(line, from);
-  return { token: line.slice(from, end), next: end };
+  return { token: line.slice(from, end), next: end, unterminated };
 }
 
 /**
@@ -148,7 +153,10 @@ function readExecutable(line: string, from: number): { token: string; next: numb
  * rather than swallowing the rest of the line — the same honest degradation
  * rule 3 applies to the executable.
  */
-function readArgument(line: string, from: number): { token: string; next: number } {
+function readArgument(
+  line: string,
+  from: number,
+): { token: string; next: number; unterminated: boolean } {
   let buffer = '';
   let quote: string | undefined;
   let index = from;
@@ -185,14 +193,15 @@ function readArgument(line: string, from: number): { token: string; next: number
 
   if (quote !== undefined) {
     const end = endOfBareToken(line, from);
-    return { token: line.slice(from, end), next: end };
+    return { token: line.slice(from, end), next: end, unterminated: true };
   }
 
-  return { token: buffer, next: index };
+  return { token: buffer, next: index, unterminated: false };
 }
 
-function tokenize(line: string): string[] {
+function tokenize(line: string): { tokens: string[]; unterminated: boolean } {
   const tokens: string[] = [];
+  let unterminated = false;
   let index = 0;
 
   while (index < line.length) {
@@ -209,10 +218,11 @@ function tokenize(line: string): string[] {
     // An empty quoted token is a REAL argument (`cmd '' x`); dropping it would
     // silently change the command the operator declared.
     tokens.push(read.token);
+    unterminated = unterminated || read.unterminated;
     index = read.next;
   }
 
-  return tokens;
+  return { tokens, unterminated };
 }
 
 /**
@@ -275,6 +285,25 @@ export function usesUnsupportedEscaping(commandLine: string): boolean {
 }
 
 /**
+ * Does this command line leave a quote unterminated?
+ *
+ * `node -e 'console.log("hello world")` — a missing closing quote — degrades to
+ * a bare token and splits at the whitespace, so the child receives several
+ * arguments where the operator wrote one. It then commonly exits non-zero, and
+ * a MALFORMED CONFIGURATION is reported as a product failure of the branch.
+ *
+ * That is the same wrong answer the escape guard exists to prevent, reached by a
+ * different route, so it gets the same treatment: refuse before spawning, exit 3,
+ * and name the cause. The degradation itself stays in the tokenizer — it is what
+ * keeps `splitCommandLine` total and keeps its executable token agreeing with
+ * doctor's `firstToken`, which reports the same malformed token as unresolvable.
+ * The refusal is the STAGE's, not the splitter's.
+ */
+export function hasUnterminatedQuote(commandLine: string): boolean {
+  return tokenize(commandLine).unterminated;
+}
+
+/**
  * Resolve a command line into the binary to spawn and its arguments.
  *
  * Total: every string produces a value, including `''` and whitespace-only
@@ -283,6 +312,6 @@ export function usesUnsupportedEscaping(commandLine: string): boolean {
  * could not run the gate, which is not the same as the branch being broken.
  */
 export function splitCommandLine(commandLine: string): SplitCommand {
-  const [binary, ...args] = tokenize(commandLine);
+  const [binary, ...args] = tokenize(commandLine).tokens;
   return { binary: binary ?? '', args };
 }

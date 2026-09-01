@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { firstToken } from '../../../../src/cli/doctor/checks/commands-resolvable.js';
 import {
+  hasUnterminatedQuote,
   splitCommandLine,
   usesUnsupportedEscaping,
 } from '../../../../src/pipeline/stages/gate-command.js';
@@ -321,5 +322,38 @@ describe('usesUnsupportedEscaping: the ambiguity is detected, not guessed at', (
     for (const command of ['pnpm lint', 'node -e "a b"', "jest --p='x y'"]) {
       expect(usesUnsupportedEscaping(command)).toBe(false);
     }
+  });
+});
+
+describe('hasUnterminatedQuote: a malformed command is detected, not executed', () => {
+  it('flags an unclosed quote in an argument', () => {
+    expect(hasUnterminatedQuote('node -e \'console.log("hello world")')).toBe(true);
+  });
+
+  it('flags an unclosed quote on the executable', () => {
+    expect(hasUnterminatedQuote('"unterminated a b')).toBe(true);
+  });
+
+  it('does NOT flag well-formed commands, quoted or not', () => {
+    for (const command of [
+      'pnpm lint',
+      'node -e "process.exit(0)"',
+      "jest --testPathPattern='a b'",
+      '"/opt/my tools/runner" --ci',
+      'tool --label="hello world" --other c',
+    ]) {
+      expect(hasUnterminatedQuote(command)).toBe(false);
+    }
+  });
+
+  it('leaves splitCommandLine total and doctor-agreeing regardless', () => {
+    // The DEGRADATION stays in the tokenizer: that is what keeps the splitter
+    // total and keeps its executable token agreeing with doctor, which reports
+    // the same malformed token as unresolvable. Only the STAGE refuses.
+    expect(splitCommandLine('"unterminated a b')).toEqual({
+      binary: '"unterminated',
+      args: ['a', 'b'],
+    });
+    expect(splitCommandLine('"unterminated a b').binary).toBe(firstToken('"unterminated a b'));
   });
 });

@@ -96,7 +96,11 @@ import type { GateResult, GateStatus } from '../../domain/result.js';
 import type { Stage, StageContext, StageResult } from '../stage.js';
 import { stageOk, stageProductNegative } from '../stage.js';
 
-import { splitCommandLine, usesUnsupportedEscaping } from './gate-command.js';
+import {
+  hasUnterminatedQuote,
+  splitCommandLine,
+  usesUnsupportedEscaping,
+} from './gate-command.js';
 import { gateEvidenceRelativePath, type GateOutputStream } from './gate-evidence-path.js';
 
 /**
@@ -472,6 +476,21 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
               'ambiguous and is refused rather than guessed at. Use the other quote style, as in ' +
               '-e \'console.log("ok")\', or write a path with forward slashes, which Node accepts ' +
               'on Windows too',
+          );
+        }
+
+        // Same reason as the escape guard, reached by a different route: an
+        // unterminated quote degrades to a bare token and splits at the
+        // whitespace, so the child receives several arguments where the
+        // operator wrote one. It then commonly exits non-zero, and a MALFORMED
+        // CONFIGURATION is reported as a product failure of the branch. Exit 3
+        // naming the cause is the honest answer.
+        if (hasUnterminatedQuote(declared)) {
+          throw new InfraError(
+            `gate '${gate.id}' has an unterminated quote: '${redactText(declared)}'`,
+            `close the quote in gates[${gate.id}].run in .specwitness/config.yaml — ` +
+              'declared commands are split into a binary and arguments without a shell, so an ' +
+              'unclosed quote would silently become several arguments rather than one',
           );
         }
 

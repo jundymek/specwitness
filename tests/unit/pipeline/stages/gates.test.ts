@@ -490,6 +490,22 @@ describe('gates stage: AC3 — a gate that could NOT START is infrastructure', (
     expect(runner.calls).toEqual([]);
   });
 
+  it('refuses an unterminated quote rather than executing a different command', async () => {
+    // Left alone this splits at the whitespace, the child receives arguments
+    // the operator never wrote, it exits non-zero, and a malformed CONFIG is
+    // reported as a broken BRANCH.
+    const runner = recordingRunner();
+    const gates = declaredGates([{ id: 'unit', run: 'node -e \'console.log("hello world")' }]);
+
+    const error = await infraErrorFrom(
+      createGatesStage({ gates, runner, writeEvidence: recordingWriter() }).run(stageContext()),
+    );
+
+    expect(error.message).toMatch(/unterminated quote/);
+    expect(error.hint).toMatch(/close the quote/);
+    expect(runner.calls).toEqual([]);
+  });
+
   it('refuses a declared command with no executable token', async () => {
     // `nonEmptyString` is `min(1)`, which "   " satisfies. Spawning '' would be
     // an unhelpful failure from deep inside execa.
