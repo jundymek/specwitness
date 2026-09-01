@@ -6,7 +6,12 @@ import type { LoadedContract } from '../../../src/authoring/verifiable.js';
 import type { AgentPrompt, AgentProvider } from '../../../src/domain/agent-provider.js';
 import type { Contract } from '../../../src/domain/contract.js';
 import { IntegrityError, ProviderError } from '../../../src/domain/errors.js';
-import { PlanSchema, type DeclaredIds } from '../../../src/schemas/plan.js';
+import {
+  PlanSchema,
+  parsePlan,
+  serializePlan,
+  type DeclaredIds,
+} from '../../../src/schemas/plan.js';
 import { ConstantIds, FixedClock } from '../../fakes/ports.js';
 import { COMPILED_AT, criterion, draftContract, frozenContract } from '../../helpers/plan.js';
 
@@ -226,6 +231,37 @@ describe('AC1: a valid draft compiles into a plan', () => {
       { kind: 'fixed', name: 'companyName', value: 'Acme Test Ltd' },
       { kind: 'volatile', name: 'signupEmail', reason: 'must be unique per run' },
     ]);
+  });
+});
+
+describe('the gate never accepts a draft that would write an unreadable plan', () => {
+  /**
+   * THE WORST OUTCOME AVAILABLE TO THIS COMMAND is not refusing a good draft; it is
+   * PERSISTING A BAD ONE. A plan the compiler happily wrote and the parser then rejects
+   * breaks the plan-to-verify workflow at the next step, with an error naming a file
+   * SpecWitness itself had just produced.
+   *
+   * `src/authoring/contract.ts` records the same rule for contracts in its own header. The
+   * draft schema and the persisted schema must agree constraint for constraint.
+   *
+   * Raised by the fourth Codex review pass: `PlanDataSchema` rejected duplicate binding
+   * names and the draft schema did not.
+   */
+  it('refuses a draft with two data bindings sharing a name', async () => {
+    const draft = JSON.parse(validDraft()) as {
+      data: { bindings: Record<string, unknown>[] };
+    };
+    draft.data.bindings.push({ kind: 'fixed', name: 'companyName', value: 'Other Ltd' });
+
+    await expect(compile(scripted(JSON.stringify(draft)))).rejects.toThrow(ProviderError);
+  });
+
+  it('produces a plan the persisted parser accepts, for every accepted draft', async () => {
+    // The general form of the property above: whatever the gate accepts must round-trip.
+    const { plan } = await compile(scripted(validDraft()));
+    const text = serializePlan(plan);
+
+    expect(parsePlan(text, '.specwitness/plans/epic-7.yaml')).toEqual(plan);
   });
 });
 

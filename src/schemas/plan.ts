@@ -549,6 +549,36 @@ const DataBindingSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('volatile'), name: Identifier, reason: Prose }),
 ]);
 
+/**
+ * The bindings array, uniqueness included.
+ *
+ * SHARED by the persisted schema and the provider-draft schema, and that sharing is the
+ * point rather than a tidiness. When the two were written separately the draft accepted two
+ * bindings with one `name` and the persisted schema rejected them, so `compilePlan` reported
+ * success and wrote a file `parsePlan` refused on the very next read — the compiler breaking
+ * its own workflow with an error naming a file it had just produced.
+ * `src/authoring/contract.ts` records the same rule for contracts: a divergence between a
+ * draft schema and its persisted schema "does not merely reject a good draft; it persists an
+ * unreadable one, which is worse than writing nothing at all".
+ *
+ * Raised by the fourth Codex review pass.
+ */
+const BindingsSchema = z.array(DataBindingSchema).superRefine((bindings, ctx) => {
+  const seen = new Map<string, number>();
+  bindings.forEach((binding, index) => {
+    const first = seen.get(binding.name);
+    if (first !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [index, 'name'],
+        message: `duplicate binding name '${binding.name}' (already used at bindings[${first}]); a reference by name must be unambiguous`,
+      });
+    } else {
+      seen.set(binding.name, index);
+    }
+  });
+});
+
 const PlanDataSchema = z
   .strictObject({
     /**
@@ -558,22 +588,7 @@ const PlanDataSchema = z
      * model's to choose.
      */
     seed: Identifier,
-    bindings: z.array(DataBindingSchema),
-  })
-  .superRefine((data, ctx) => {
-    const seen = new Map<string, number>();
-    data.bindings.forEach((binding, index) => {
-      const first = seen.get(binding.name);
-      if (first !== undefined) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['bindings', index, 'name'],
-          message: `duplicate binding name '${binding.name}' (already used at bindings[${first}]); a reference by name must be unambiguous`,
-        });
-      } else {
-        seen.set(binding.name, index);
-      }
-    });
+    bindings: BindingsSchema,
   });
 
 /* ── the document ───────────────────────────────────────────────────────────────────── */
@@ -1038,7 +1053,7 @@ export function planDraftSchemaFor(
 
   const schema = z
     .strictObject({
-      data: z.strictObject({ bindings: z.array(DataBindingSchema) }),
+      data: z.strictObject({ bindings: BindingsSchema }),
       criteria: z.array(PlanCriterionSchema),
     })
     .superRefine((draft, ctx) => {
@@ -1187,6 +1202,26 @@ export function unreferenceableIds(declared: DeclaredIds): readonly Unreferencea
  * @throws {IntegrityError} when the plan names another epic, when the contract carries no
  *   frozen fingerprint to compare against, or when the fingerprints differ.
  */
+/**
+ * Does this plan record the contract's current fingerprint?
+ *
+ * THE single implementation of the staleness comparison, so the `plan` command's overwrite
+ * rule and the verify-time refusal below cannot answer it differently. `false` also when the
+ * contract carries no frozen fingerprint at all — there is nothing to have matched.
+ *
+ * It answers ONLY that question. A plan may match the fingerprint and still be unusable —
+ * compiled for another epic, or hand-edited until it no longer covers the contract — which
+ * is why `assertPlanMatchesContract` checks more than this and why the command treats those
+ * cases differently from ordinary staleness.
+ */
+export function planContractMatches(plan: Plan, contract: Contract): boolean {
+  return (
+    contract.meta.frozen &&
+    contract.meta.fingerprint !== null &&
+    plan.plan.contract.fingerprint === contract.meta.fingerprint
+  );
+}
+
 export function assertPlanMatchesContract(plan: Plan, contract: Contract): void {
   if (plan.plan.epic !== contract.spec.epic) {
     throw new IntegrityError(
@@ -1202,7 +1237,7 @@ export function assertPlanMatchesContract(plan: Plan, contract: Contract): void 
     );
   }
 
-  if (plan.plan.contract.fingerprint !== contract.meta.fingerprint) {
+  if (!planContractMatches(plan, contract)) {
     throw new IntegrityError(
       `the plan for ${plan.plan.epic} was compiled from a different version of the contract: ` +
         `it records fingerprint ${plan.plan.contract.fingerprint} (contract version ` +

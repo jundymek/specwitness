@@ -79,6 +79,7 @@ import {
   assertPlanMatchesContract,
   isReferenceableId,
   parsePlan,
+  planContractMatches,
   serializePlan,
   unreferenceableIds,
 } from '../../schemas/plan.js';
@@ -282,12 +283,42 @@ async function assertPlanIsReplaceable(
     );
   }
 
+  // ONLY FINGERPRINT STALENESS BYPASSES THE GUARD, and the narrowness is deliberate.
+  //
+  // A stale plan is one this command is SUPPOSED to replace: the stale-plan refusal's own
+  // hint says `re-run specwitness plan`. Everything else that makes a plan unusable is a
+  // different situation with a different remedy, and overwriting it silently would destroy
+  // the evidence of whatever went wrong:
+  //
+  //   - a plan whose own `epic:` says something else is a MISPLACED file. The staleness
+  //     refusal states outright that "recompiling will not reconcile two different epics",
+  //     so recompiling over it would contradict our own error message.
+  //   - a plan that matches the fingerprint but no longer covers the contract has been
+  //     edited or truncated by hand. Recompiling may well be the fix — but it is the
+  //     operator's call, because we cannot tell a truncation from a deliberate edit.
+  //
+  // An earlier version caught every `assertPlanMatchesContract` failure and treated all of
+  // them as staleness. Raised by the fourth Codex review pass.
+  if (existing.plan.epic !== contract.spec.epic) {
+    throw new IntegrityError(
+      `${relative} holds a plan for ${existing.plan.epic}, not for ${epic}`,
+      `this looks like a misplaced file rather than a stale one — recompiling cannot reconcile two different epics. Inspect it with 'git diff ${relative}', or pass --force to replace it`,
+    );
+  }
+
+  if (!planContractMatches(existing, contract)) {
+    // Genuinely stale. This is the remedy `verify` prescribes, so it must not need a flag.
+    return;
+  }
+
   try {
     assertPlanMatchesContract(existing, contract);
-  } catch {
-    // Stale, or compiled for another epic. Recompiling is exactly what `verify` tells the
-    // operator to do in that situation, so it must not require a flag.
-    return;
+  } catch (cause) {
+    throw new IntegrityError(
+      `the plan for ${epic} at ${relative} records the current contract fingerprint but is ` +
+        `no longer consistent with it: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `this plan has been edited or truncated since it was compiled — inspect it with 'git diff ${relative}', restore it with 'git checkout', or pass --force to recompile over it`,
+    );
   }
 
   throw new IntegrityError(

@@ -369,6 +369,57 @@ describe('plan <epic> — refusals', () => {
     expect(await plansDir(root)).toEqual(['epic-7.yaml']);
   });
 
+  /**
+   * A plan file whose own `epic:` says something else is a MISPLACED file, not a stale one.
+   * The staleness refusal says so in as many words — "recompiling will not reconcile two
+   * different epics" — so recompiling over it without asking would contradict our own error
+   * message and destroy the evidence of whatever went wrong.
+   *
+   * Only a FINGERPRINT mismatch bypasses the overwrite guard. Raised by the fourth Codex
+   * review pass.
+   */
+  it('refuses to overwrite a plan that identifies a different epic', async () => {
+    const root = await project(VALID);
+    await run(root, 'plan', '7');
+    const path = join(root, '.specwitness', 'plans', 'epic-7.yaml');
+    // The criterion ids move with the epic: a file that merely renamed the epic line would be
+    // rejected as unparseable (E7-01 does not belong to epic-9), and would then pass this
+    // test for the wrong reason. This is a genuinely MISPLACED plan — internally coherent,
+    // just not this epic's.
+    const misplaced = (await readFile(path, 'utf8'))
+      .replace('epic: epic-7', 'epic: epic-9')
+      .replaceAll('E7-0', 'E9-0');
+    await writeFile(path, misplaced, 'utf8');
+
+    const result = await run(root, 'plan', '7');
+
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('epic-9');
+    expect(result.stderr).toContain('--force');
+    expect(await readFile(path, 'utf8')).toBe(misplaced);
+  });
+
+  /**
+   * Likewise a plan whose fingerprint still matches but whose criteria no longer cover the
+   * contract: it is damaged rather than stale, so the operator is asked before it is
+   * replaced.
+   */
+  it('refuses to overwrite a plan that no longer covers the contract', async () => {
+    const root = await project(VALID);
+    await run(root, 'plan', '7');
+    const path = join(root, '.specwitness', 'plans', 'epic-7.yaml');
+    const full = await readFile(path, 'utf8');
+    const truncated = full.slice(0, full.indexOf('    - criterionId: E7-03')) +
+      full.slice(full.indexOf('meta:'));
+    await writeFile(path, truncated, 'utf8');
+
+    const result = await run(root, 'plan', '7');
+
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('--force');
+    expect(await readFile(path, 'utf8')).toBe(truncated);
+  });
+
   it('refuses in a project that was never initialised', async () => {
     const root = await mkdtemp(join(tmpdir(), 'specwitness-plan-bare-'));
     created.push(root);
