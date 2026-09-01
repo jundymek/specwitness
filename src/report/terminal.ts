@@ -60,11 +60,46 @@ function duration(ms: number): string {
   return `${String(ms).padStart(6)} ms`;
 }
 
-function stageLine(entry: StageTimelineEntry): string {
-  const detail = entry.detail === undefined ? '' : `  ${entry.detail}`;
-  return `  ${stageMark(entry.status).padEnd(MARK_WIDTH)} ${entry.stage.padEnd(ID_WIDTH)} ${duration(
-    entry.durationMs,
-  )}${detail}`;
+/**
+ * One stage row, plus its recorded remedy when the stage errored.
+ *
+ * `hint` is rendered as `recorded hint:` rather than printed bare, and those two
+ * words are the whole point. The hint is written in the imperative — "inspect
+ * the change with 'git diff'" — because it is composed for the person whose run
+ * has just failed, and `verify` prints it to them live on stderr. But
+ * `report <run-id>` re-renders a run that finished at some point in the past
+ * (FR-31, Q52), and an imperative addressed to a reader about a run from three
+ * weeks ago tells them to act on a situation that may no longer exist. The
+ * label turns the instruction back into what it actually is here: a record of
+ * what the run advised at the time — which is how every timestamp and SHA in
+ * this report already reads.
+ *
+ * Rendering it at all, rather than leaving it to the CLI edge, is not the
+ * duplication AD-11 forbids. Both surfaces print the SAME FIELD, so the wording
+ * lives once in `domain/stage.ts` and neither surface composes remedy prose.
+ * The alternative was worse: a remedy that is in the model, in `result.json`
+ * and schema-versioned, but readable only by machines — while the diagnosis of
+ * the very same failure prints two columns to its left.
+ *
+ * Errored stages only. A hint on an `ok` or `skipped` row is advice about a
+ * problem that did not happen, and a report offering remedies for non-problems
+ * teaches its reader to skim.
+ */
+function stageLines(entry: StageTimelineEntry): string[] {
+  // Built as prefix + detail rather than as one template, so the hint below can
+  // indent to `prefix.length` and stay aligned with the detail column whatever
+  // MARK_WIDTH, ID_WIDTH or the duration format do later. Hard-coding that
+  // indent is how a continuation line drifts two columns left of the row it
+  // belongs to — which is exactly what the first version of this did.
+  const prefix = `  ${stageMark(entry.status).padEnd(MARK_WIDTH)} ${entry.stage.padEnd(
+    ID_WIDTH,
+  )} ${duration(entry.durationMs)}  `;
+  const row = `${prefix}${entry.detail ?? ''}`.trimEnd();
+
+  if (entry.status !== 'error' || entry.hint === undefined) {
+    return [row];
+  }
+  return [row, `${' '.repeat(prefix.length)}recorded hint: ${entry.hint}`];
 }
 
 /**
@@ -154,9 +189,15 @@ function plural(count: number, one: string, many: string): string {
 function evidenceLines(evidence: Evidence): string[] {
   switch (evidence.kind) {
     case 'gate': {
+      // The declared command is named, not just the gate id: a reader of a
+      // stored run six months from now has `gateId: 'lint'` and some output,
+      // and learning what actually ran would otherwise mean reconstructing the
+      // config as it was at that revision — which defeats the run directory
+      // being a self-contained record. Redacted at capture like every other
+      // string here; this renderer never re-redacts.
       const head = `  gate ${evidence.gateId} (${evidence.status}, exit ${
         evidence.exitCode ?? 'none'
-      })`;
+      }): ${evidence.displayCommand}`;
       if (evidence.status === 'pass') {
         return [head, ...pointerLines([evidence.stdout, evidence.stderr], '    ')];
       }
@@ -275,7 +316,7 @@ export function renderTerminal(result: RunResult): string {
     label('Started', result.startedAt),
     label('Finished', result.finishedAt),
 
-    ...section('Stages', result.stages.map(stageLine)),
+    ...section('Stages', result.stages.flatMap(stageLines)),
 
     ...section(
       'Gates',
