@@ -24,7 +24,7 @@
  * AD-1: pure. Imports only sibling domain modules.
  */
 
-import type { Severity } from './contract.js';
+import type { Severity, Verifiability } from './contract.js';
 import { redactText } from './evidence.js';
 import type { EvidenceRef, RedactionOptions } from './evidence.js';
 import type { CriterionResult, CriterionStatus } from './result.js';
@@ -114,6 +114,17 @@ export interface ContractCriterionRef {
   readonly criterionId: string;
   readonly statement: string;
   readonly severity: Severity;
+  /**
+   * `automated` or `human`, from the contract.
+   *
+   * Load-bearing, not decorative: a `human` criterion may never auto-PASS (Q39), and this
+   * is the field that makes that enforceable. It was missing from this type at first, so
+   * `verifiability` was dropped at the integrity stage and a contract that correctly used
+   * the feature verified PASS at exit 0 - the machine answering the one question its
+   * author had written down that no machine may answer. Found by story 3.7's agent, whose
+   * exit-2 acceptance criterion it made unsatisfiable.
+   */
+  readonly verifiability: Verifiability;
 }
 
 /**
@@ -184,8 +195,20 @@ export function deriveCriterionResult(
 
   const final = attempts.at(-1);
   if (final === undefined) {
-    // Nothing ran. Inert by definition, and the only case a gates-only run reaches.
-    return { ...base, status: 'skipped' };
+    // Nothing ran. For an `automated` criterion that is `skipped` - inert by definition,
+    // and the case every criterion of a gates-only run reaches.
+    //
+    // For a `human` criterion it is NEEDS_HUMAN, and that distinction is the whole reason
+    // `verifiability` is carried this far. Q39 fixes human verifiability as one of exactly
+    // two NEEDS_HUMAN triggers, and `domain/contract.ts` states the consequence in its own
+    // words: human criteria "always resolve to NEEDS_HUMAN and never auto-PASS - that is
+    // why this is a property of the contract rather than a judgement made later at run
+    // time". `skipped` is inert in aggregation, so returning it here made a contract whose
+    // author had written "no machine may answer this" verify PASS at exit 0.
+    //
+    // It does not wait for Epic 4: nothing about it depends on probes existing. A run that
+    // executed no probes has still not had a person look.
+    return { ...base, status: criterion.verifiability === 'human' ? 'needs_human' : 'skipped' };
   }
 
   const status = outcomeOf(final);
