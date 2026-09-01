@@ -30,6 +30,7 @@ import type { RunEnvironment, RunResult } from '../../../src/domain/run-result.j
 import { exitCodeForOutcome } from '../../../src/cli/exit.js';
 import { runPipeline } from '../../../src/pipeline/run-pipeline.js';
 import { createStages } from '../../../src/pipeline/stages/index.js';
+import { stageProductNegative } from '../../../src/pipeline/stage.js';
 import { FixedClock } from '../../fakes/ports.js';
 
 const ENVIRONMENT: RunEnvironment = {
@@ -161,6 +162,53 @@ describe('the persist stage writes the run so far (AC1)', () => {
 });
 
 describe('a persist failure never rewrites a decided verdict (AC1)', () => {
+  it('keeps a gate FAIL at exit 1, not exit 3 — the case that merges a broken branch', async () => {
+    // THE case this rule exists for. A branch that does not lint is not mergeable; that is
+    // a FAIL and exits 1. If a failed result.json write turned it into exit 3, a harness
+    // would read "the environment is broken, retry" and the retry would merge a branch
+    // that does not build. The PASS variant below is the same rule, but this is the one
+    // with teeth.
+    //
+    // The gates stage is swapped for one that fails, since story 3.4's real one has not
+    // landed. `runPipeline` requires the eleven frozen names in order, so the replacement
+    // keeps the name and only changes the body.
+    const stages = createStages({
+      assertVerifiableContract: frozenContract,
+      persist: {
+        writeResult: async () => {
+          throw new InfraError('disk full', 'free some space');
+        },
+      },
+    }).map((stage) =>
+      stage.name === 'gates'
+        ? {
+            name: 'gates' as const,
+            run: async (context: Parameters<typeof stage.run>[0]) => {
+              context.run.gates.push({ gateId: 'lint', status: 'fail' as const, durationMs: 5 });
+              return stageProductNegative("gate 'lint' failed");
+            },
+          }
+        : stage,
+    );
+
+    const result = await runPipeline({
+      runId: 'run-20260831T200000Z-a3f9',
+      epic: 'epic-3',
+      baseSha: 'b'.repeat(40),
+      headSha: 'c'.repeat(40),
+      environment: ENVIRONMENT,
+      clock: new FixedClock('2026-08-31T20:00:00.000Z'),
+      stages,
+    });
+
+    expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+    expect(exitCodeForOutcome(result.outcome)).toBe(1);
+    // The failing gate's identity survives too — repair automation routes on it.
+    expect(result.outcome.gateFailed).toBe('lint');
+    // And the durability failure is still recorded rather than swallowed.
+    expect(result.stages.find((s) => s.stage === 'persist')?.status).toBe('error');
+  });
+
   it('keeps a PASS a PASS, and exits 0', async () => {
     const { result } = await verifyWith({
       writeResult: async () => {
