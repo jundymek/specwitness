@@ -97,6 +97,7 @@ import type { Stage, StageContext, StageResult } from '../stage.js';
 import { stageOk, stageProductNegative } from '../stage.js';
 
 import {
+  hasGluedExecutableSuffix,
   hasUnterminatedQuote,
   splitCommandLine,
   usesUnsupportedEscaping,
@@ -491,6 +492,20 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
             `close the quote in gates[${gate.id}].run in .specwitness/config.yaml — ` +
               'declared commands are split into a binary and arguments without a shell, so an ' +
               'unclosed quote would silently become several arguments rather than one',
+          );
+        }
+
+        // The worst of the three malformed forms, because it SUCCEEDS: a
+        // quoted executable with text glued onto it runs the quoted binary and
+        // passes the suffix as an argument, where a shell would have run the
+        // concatenation. Nothing about that run looks wrong, and it may not be
+        // the binary the operator declared at all.
+        if (hasGluedExecutableSuffix(declared)) {
+          throw new InfraError(
+            `gate '${gate.id}' has text attached to its quoted executable: '${redactText(declared)}'`,
+            `separate them with a space in gates[${gate.id}].run, or quote the whole path — ` +
+              'as written this would run the quoted binary and pass the rest as an argument, ' +
+              'which may not be the command you intended',
           );
         }
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { firstToken } from '../../../../src/cli/doctor/checks/commands-resolvable.js';
 import {
+  hasGluedExecutableSuffix,
   hasUnterminatedQuote,
   splitCommandLine,
   usesUnsupportedEscaping,
@@ -355,5 +356,45 @@ describe('hasUnterminatedQuote: a malformed command is detected, not executed', 
       args: ['a', 'b'],
     });
     expect(splitCommandLine('"unterminated a b').binary).toBe(firstToken('"unterminated a b'));
+  });
+});
+
+describe('hasGluedExecutableSuffix: a silently-different binary is refused', () => {
+  it('flags text glued onto a quoted executable', () => {
+    // The worst of the malformed forms because it SUCCEEDS: this runs
+    // `/bin/tool` with `suffix`, where a shell would have run
+    // `/bin/toolsuffix`. Nothing about the run looks wrong.
+    expect(hasGluedExecutableSuffix('"/bin/tool"suffix')).toBe(true);
+    expect(hasGluedExecutableSuffix("'/bin/tool'suffix --ci")).toBe(true);
+  });
+
+  it('shows exactly why it is refused rather than reinterpreted', () => {
+    // The tokenizer is NOT changed to swallow the suffix: that would fix this
+    // case and break agreement with doctor, which reads the same token.
+    expect(splitCommandLine('"/bin/tool"suffix')).toEqual({
+      binary: '/bin/tool',
+      args: ['suffix'],
+    });
+    expect(splitCommandLine('"/bin/tool"suffix').binary).toBe(firstToken('"/bin/tool"suffix'));
+  });
+
+  it('does NOT flag a properly separated quoted executable', () => {
+    expect(hasGluedExecutableSuffix('"/opt/my tools/runner" --ci')).toBe(false);
+    expect(hasGluedExecutableSuffix("'/opt/my tools/runner'")).toBe(false);
+  });
+
+  it('does NOT flag a quoted ARGUMENT with a suffix', () => {
+    // Nothing resolves an argument, so there is no wrong binary to run — and
+    // this form is grouped faithfully rather than refused.
+    expect(hasGluedExecutableSuffix('tool --x=a"b c"d')).toBe(false);
+    expect(splitCommandLine('tool --x=a"b c"d')).toEqual({
+      binary: 'tool',
+      args: ['--x=ab cd'],
+    });
+  });
+
+  it('does NOT flag an unquoted executable or an unterminated one', () => {
+    expect(hasGluedExecutableSuffix('pnpm lint')).toBe(false);
+    expect(hasGluedExecutableSuffix('"unterminated a b')).toBe(false);
   });
 });

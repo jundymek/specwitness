@@ -304,6 +304,43 @@ export function hasUnterminatedQuote(commandLine: string): boolean {
 }
 
 /**
+ * Is the executable a quoted token with text glued straight onto it?
+ *
+ * `"/bin/tool"suffix` resolves, under both this tokenizer and doctor's
+ * `firstToken`, to the binary `/bin/tool` with `suffix` as a separate argument.
+ * A shell would have produced the single token `/bin/toolsuffix`. So the form
+ * can run a DIFFERENT BINARY from the one the operator believes they declared,
+ * silently and successfully — which is worse than any failure, because nothing
+ * about the run looks wrong.
+ *
+ * Refused for the same reason as the other two malformed forms, and note what is
+ * NOT done: the executable rule is left exactly as it is. Reading the suffix
+ * into the token would fix this case and break agreement with `firstToken`,
+ * which is merged, owned by story 1.5, and the thing that makes doctor's verdict
+ * predict whether a gate can run. Refusing keeps the two reading the same token
+ * and simply declines to act on an ambiguous one — a disagreement in OUTCOME
+ * (doctor resolves it, this refuses it) that is loud and safe, rather than a
+ * disagreement in interpretation that is silent and not.
+ *
+ * Only a quoted executable counts. A quoted ARGUMENT with a suffix
+ * (`--x=a"b c"d`) is grouped faithfully and is unaffected: nothing resolves an
+ * argument, so there is no wrong binary to run.
+ */
+export function hasGluedExecutableSuffix(commandLine: string): boolean {
+  const trimmed = commandLine.trimStart();
+  const quote = trimmed[0];
+  if (quote !== '"' && quote !== "'") {
+    return false;
+  }
+  const closing = trimmed.indexOf(quote, 1);
+  if (closing === -1) {
+    return false; // unterminated — a different guard's business
+  }
+  const next = trimmed[closing + 1];
+  return next !== undefined && !/\s/.test(next);
+}
+
+/**
  * Resolve a command line into the binary to spawn and its arguments.
  *
  * Total: every string produces a value, including `''` and whitespace-only

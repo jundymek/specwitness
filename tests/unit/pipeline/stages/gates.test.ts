@@ -506,6 +506,18 @@ describe('gates stage: AC3 — a gate that could NOT START is infrastructure', (
     expect(runner.calls).toEqual([]);
   });
 
+  it('refuses text glued onto a quoted executable, before spawning', async () => {
+    const runner = recordingRunner();
+    const gates = declaredGates([{ id: 'unit', run: '"/bin/tool"suffix --ci' }]);
+
+    const error = await infraErrorFrom(
+      createGatesStage({ gates, runner, writeEvidence: recordingWriter() }).run(stageContext()),
+    );
+
+    expect(error.message).toMatch(/text attached to its quoted executable/);
+    expect(runner.calls).toEqual([]);
+  });
+
   it('refuses a declared command with no executable token', async () => {
     // `nonEmptyString` is `min(1)`, which "   " satisfies. Spawning '' would be
     // an unhelpful failure from deep inside execa.
