@@ -1,4 +1,4 @@
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { execa } from 'execa';
@@ -144,6 +144,33 @@ describe('fixture preconditions', () => {
     // The evidence assertion in AC2 needs something unmistakable to look for.
     expect(failing.stdout).toContain(FAILING_GATE_STDOUT);
     expect(failing.stderr).toContain(FAILING_GATE_STDERR);
+  });
+
+  it('offers a gate that fails AFTER making the run directory unwritable', async () => {
+    const project = await fixture({
+      gates: [{ id: 'build', behaviour: 'fail-and-lock-run-dir' }],
+    });
+
+    // Stand in for the run directory `verify` would have created by the time a
+    // gate runs, so the script can be exercised without a pipeline.
+    const runDir = join(project.root, '.specwitness', 'runs', 'run-20260901T000000Z-aaaa');
+    await mkdir(runDir, { recursive: true });
+
+    const result = await execa(process.execPath, ['gates/build.cjs'], {
+      cwd: project.root,
+      reject: false,
+    });
+
+    // Fails as a gate — a product-negative result, decided BEFORE the run
+    // directory becomes unwritable.
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain(FAILING_GATE_STDOUT);
+
+    // And the run directory can no longer be written to, which is what makes the
+    // persist failure happen in the same run rather than in a second one.
+    const mode = (await stat(runDir)).mode & 0o777;
+    expect(mode & 0o200).toBe(0);
+    await expect(writeFile(join(runDir, 'probe.json'), '{}', 'utf8')).rejects.toThrow();
   });
 
   it('declares those gates in the config, in declaration order', async () => {

@@ -25,7 +25,7 @@
  * hand-rolled and could get subtly right for the wrong reason.
  */
 
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,7 +43,23 @@ export const CLI = fileURLToPath(new URL('../../../dist/cli.js', import.meta.url
  * exists for the kill-mid-run proof, and it is the only one that does not end on
  * its own.
  */
-export type GateBehaviour = 'pass' | 'fail' | 'slow' | 'spawn-marker';
+export type GateBehaviour =
+  | 'pass'
+  | 'fail'
+  | 'slow'
+  | 'spawn-marker'
+  /**
+   * Fails AND makes the run directory unwritable first, so the run decides a
+   * verdict and then cannot persist it.
+   *
+   * The property under test is the one pamela (3.3) fixed on her branch and asked
+   * to have proven end to end: once an outcome exists, a later failure records
+   * itself in the timeline and NEVER replaces the outcome. A gate failure that
+   * then fails to write `result.json` must exit **1** with `gateFailed` intact —
+   * not 3. Exit 3 tells a harness "the environment is broken, retry", and the
+   * retry merges a branch that does not build.
+   */
+  | 'fail-and-lock-run-dir';
 
 export interface GateSpec {
   /** Gate id as it appears in the config and in `gateFailed`. */
@@ -110,7 +126,7 @@ export const FAILING_GATE_STDERR = 'GATE-STDERR-MARKER: 1 error in fixture/broke
 /** Written by a `spawn-marker` gate. Its ABSENCE is what the guard tests assert. */
 export const SPAWN_MARKER_FILENAME = 'gate-was-spawned.marker';
 
-function gateScript(behaviour: GateBehaviour): string {
+function gateScript(behaviour: GateBehaviour, runsRoot: string): string {
   switch (behaviour) {
     case 'pass':
       return "process.stdout.write('gate ok\\n');\nprocess.exit(0);\n";
@@ -130,6 +146,32 @@ function gateScript(behaviour: GateBehaviour): string {
       return (
         `require('node:fs').writeFileSync(${JSON.stringify(SPAWN_MARKER_FILENAME)}, 'spawned\\n');\n` +
         'process.exit(0);\n'
+      );
+    case 'fail-and-lock-run-dir':
+      // The runs root is baked in as an absolute path because this script runs
+      // with its cwd inside the DETACHED WORKTREE, which knows nothing about the
+      // project root. Newest run directory = the run currently executing: run ids
+      // begin with a compact UTC timestamp, so a plain string sort is newest-last
+      // (the same ordering `RunStore.listRuns` relies on).
+      //
+      // Mode 0o500 removes write permission, so creating the staged temp file
+      // inside the run directory fails — the finalize fails after the gate result
+      // is already on the accumulator. Doing it from inside the gate means one
+      // process, one run, and no timing race between the test and the run.
+      return (
+        "const fs = require('node:fs');\n" +
+        "const path = require('node:path');\n" +
+        `const runsRoot = ${JSON.stringify(runsRoot)};\n` +
+        'const runs = fs.readdirSync(runsRoot).filter((name) => name.startsWith(\'run-\')).sort();\n' +
+        'const newest = runs[runs.length - 1];\n' +
+        'if (newest === undefined) {\n' +
+        "  process.stderr.write('fixture: no run directory to lock\\n');\n" +
+        '  process.exit(2);\n' +
+        '}\n' +
+        'fs.chmodSync(path.join(runsRoot, newest), 0o500);\n' +
+        `process.stdout.write(${JSON.stringify(`${FAILING_GATE_STDOUT}\n`)});\n` +
+        `process.stderr.write(${JSON.stringify(`${FAILING_GATE_STDERR}\n`)});\n` +
+        'process.exit(1);\n'
       );
     default: {
       const unreachable: never = behaviour;
@@ -207,6 +249,20 @@ project:
 ${declared}`;
 }
 
+/**
+ * Puts every run directory back to a removable mode.
+ *
+ * Only `fail-and-lock-run-dir` produces a locked one, but this runs
+ * unconditionally: a cleanup that only works for the fixture that needed it is a
+ * cleanup that silently stops working when a case is copied.
+ */
+async function restoreRunDirectoryModes(runsRoot: string): Promise<void> {
+  const entries = await readdir(runsRoot).catch(() => [] as string[]);
+  await Promise.all(
+    entries.map((entry) => chmod(join(runsRoot, entry), 0o700).catch(() => undefined)),
+  );
+}
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const result = await execa('git', args, {
     cwd,
@@ -255,7 +311,13 @@ export async function buildFixture(options: FixtureOptions = {}): Promise<Fixtur
   const baseBranch = options.baseBranch ?? 'master';
 
   const root = await mkdtemp(join(tmpdir(), 'specwitness-verify-fixture-'));
+  const runsRoot = join(root, '.specwitness', 'runs');
   const cleanup = async () => {
+    // A `fail-and-lock-run-dir` gate leaves a 0o500 run directory behind, and rm
+    // cannot delete the entries inside one. Restore the mode first so teardown
+    // never leaks a temp directory — the suite that leaked nine processes in
+    // Epic 2 is the reason this is done rather than assumed.
+    await restoreRunDirectoryModes(runsRoot);
     await rm(root, { recursive: true, force: true });
   };
 
@@ -273,7 +335,7 @@ export async function buildFixture(options: FixtureOptions = {}): Promise<Fixtur
     await mkdir(join(root, 'gates'), { recursive: true });
     for (const gate of gates) {
       const path = join(root, 'gates', `${gate.id}.cjs`);
-      await writeFile(path, gateScript(gate.behaviour), 'utf8');
+      await writeFile(path, gateScript(gate.behaviour, runsRoot), 'utf8');
       await chmod(path, 0o644);
     }
 
