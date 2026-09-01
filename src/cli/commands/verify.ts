@@ -31,7 +31,7 @@
  * there is no provider in this file to call.
  */
 
-import { relative, resolve } from 'node:path';
+import { relative } from 'node:path';
 
 import type { Command } from 'commander';
 
@@ -100,7 +100,26 @@ async function verify(
   const baseFlag = requireFlagValue('--base', options.base);
   const headFlag = requireFlagValue('--head', options.head);
 
-  const projectRoot = explicitRoot === undefined ? cwd : resolve(cwd, explicitRoot);
+  // THE REPOSITORY IS RESOLVED FIRST, and everything project-relative hangs off
+  // it. `--root` names the repository; without it the `Vcs` port walks up from
+  // the current directory, which is what makes `specwitness verify` work from a
+  // subdirectory the way `git` does — and what the `--root` help text promises.
+  //
+  // Reading `.specwitness/` out of the raw cwd instead (the first version of
+  // this file) failed from any subdirectory with "no config file at
+  // <subdir>/.specwitness/config.yaml", advertising upward discovery and not
+  // doing it. Found by review.
+  //
+  // `worktreeRoot`, NOT `mainWorktreeRoot`: from inside a LINKED worktree the
+  // project is the tree you invoked from, so its `.specwitness/` and its run
+  // directory are the ones that apply. The main worktree is what error messages
+  // NAME as the source repository and what AD-8 proves untouched — a different
+  // question, agreed with story 3.1, and the case every agent in this cohort
+  // actually works in.
+  const runner = createProcessRunner(new SystemClock());
+  const vcs = createGitVcs({ runner });
+  const root = await resolveRoot(vcs, { explicitRoot, cwd });
+  const projectRoot = root.worktreeRoot;
 
   // Loaded once, at the edge, and passed down (spine Consistency Conventions).
   const config = loadConfig(projectRoot);
@@ -111,10 +130,6 @@ async function verify(
   // is not valid YAML, or not a contract, fails here as an IntegrityError from
   // story 2.2's parser rather than as a mystery inside a stage.
   const loaded = await loadContract(projectRoot, epic);
-
-  const runner = createProcessRunner(new SystemClock());
-  const vcs = createGitVcs({ runner });
-  const root = await resolveRoot(vcs, { explicitRoot, cwd });
 
   // Refs are resolved HERE, not in the pipeline: `Vcs.resolveRef` never fetches
   // and the pipeline spawns no git, so the SHAs a run is about are fixed before

@@ -1,5 +1,6 @@
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -256,6 +257,44 @@ describe('verify — usage errors exit 64 (ADR-002)', () => {
 
       expect(exitCode).toBe(3);
       expect(stdout).toContain('epic-1');
+    }
+  });
+});
+
+describe('verify — the repository is discovered, not assumed', () => {
+  it('works from a SUBDIRECTORY, the way git does', async () => {
+    const project = await fixture();
+    const deep = join(project.root, 'src', 'deep');
+    await mkdir(deep, { recursive: true });
+
+    const { exitCode, stdout } = await runCli(['verify', 'epic-1', '--json'], { cwd: deep });
+
+    // Reading `.specwitness/` out of the raw cwd advertised upward discovery in
+    // the --root help text and did not do it: every invocation from a
+    // subdirectory failed with "no config file at <subdir>/.specwitness/...".
+    // Found by review, not by this suite — which is why the case is here now.
+    expect(exitCode).toBe(0);
+
+    const document = JSON.parse(stdout) as RunDocument;
+    expect(document.outcome.verdict).toBe('PASS');
+    // The run belongs to the repository, not to the directory it was typed in.
+    expect(document.environment.runDirectory.startsWith('.specwitness/runs/')).toBe(true);
+    expect(await readdir(join(project.root, '.specwitness', 'runs'))).toHaveLength(1);
+  });
+
+  it('honours --root over the current directory', async () => {
+    const project = await fixture();
+    const elsewhere = await mkdtemp(join(tmpdir(), 'specwitness-elsewhere-'));
+
+    try {
+      const { exitCode } = await runCli(['verify', 'epic-1', '--root', project.root], {
+        cwd: elsewhere,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(await readdir(join(project.root, '.specwitness', 'runs'))).toHaveLength(1);
+    } finally {
+      await rm(elsewhere, { recursive: true, force: true });
     }
   });
 });
