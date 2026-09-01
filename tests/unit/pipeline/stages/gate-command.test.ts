@@ -280,17 +280,24 @@ describe('usesUnsupportedEscaping: the ambiguity is detected, not guessed at', (
     expect(usesUnsupportedEscaping("sh -c 'it\\'s'")).toBe(true);
   });
 
-  it('does NOT flag a path separator sitting before a CLOSING quote', () => {
-    // `tool "C:\\work\\"` is an ordinary Windows directory argument. It
-    // tokenizes correctly as `C:\\work\\`, so refusing it would reject a valid
-    // command as an infrastructure failure — the same class of wrong answer
-    // this stage exists to avoid, arriving from the guard rather than the gate.
-    const windows = 'tool "C:\\work\\"';
-    expect(usesUnsupportedEscaping(windows)).toBe(false);
-    expect(splitCommandLine(windows)).toEqual({
-      binary: 'tool',
-      args: ['C:\\work\\'],
-    });
+  it('flags a path separator before a quote too, deliberately', () => {
+    // A Windows directory argument ending in a separator would have tokenized
+    // correctly, and an earlier revision let it through for that reason. That
+    // narrowing was reverted: the same lookahead that admitted this admitted
+    // `"a\\" b"`, which mis-groups SILENTLY and surfaces as a product FAIL.
+    //
+    // Refusing a valid command is loud, diagnosable and one edit from fixed.
+    // Failing to refuse an ambiguous one blames the branch for a configuration
+    // problem, which is the one wrong answer this story exists to prevent. When
+    // a rule must be wrong at the edges, it should be wrong in the direction
+    // that shouts.
+    expect(usesUnsupportedEscaping('tool "C:\\work\\"')).toBe(true);
+  });
+
+  it('flags an escaped quote that is followed by whitespace', () => {
+    // The case the narrowed rule missed: `"a\\" b"` closes at the escaped quote,
+    // splits, and hands the child an argument nobody wrote.
+    expect(usesUnsupportedEscaping('node -e "a\\" b"')).toBe(true);
   });
 
   it('does NOT flag a backslash that is not before a quote', () => {

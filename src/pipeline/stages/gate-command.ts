@@ -242,19 +242,36 @@ function tokenize(line: string): string[] {
  *     escaping, expansion and operators are not, and the boundary is easier to
  *     hold at a stated limit than at a gradient.
  *
- * NARROWED so it does not fire on a path separator. A Windows directory
- * argument whose backslash merely sits before the CLOSING quote tokenizes
- * correctly and must not be refused — rejecting a valid command as an
- * infrastructure failure is the same class of wrong answer this stage exists
- * to avoid. So the detector fires only when the quote is followed by more
- * content in the argument, which is the shape that actually mis-groups, as
- * opposed to the shape that merely ends a token.
+ * DELIBERATELY BROAD: any backslash immediately before a quote is refused.
  *
- * A backslash anywhere else — a regex, a path mid-argument — is an ordinary
- * character and stays one.
+ * An earlier revision narrowed this to quotes followed by more content, so
+ * that an ordinary Windows argument like a directory ending in a separator
+ * would pass. That narrowing was wrong, and reverting it is the point of this
+ * comment rather than an accident of it.
+ *
+ * A backslash before a quote is genuinely AMBIGUOUS under a tokenizer with no
+ * escape convention, and every rule for telling "intended escape" from
+ * "literal backslash" is a guess. Each guess has a gap, and the two gaps are
+ * not equally costly:
+ *
+ *  - Refusing a valid command is LOUD. Exit 3, a message naming the cause, and
+ *    an operator who rewrites the argument. Recoverable in one edit.
+ *  - Failing to refuse an ambiguous one is SILENT. The argument mis-groups, the
+ *    child receives something the operator never wrote, it exits non-zero, and
+ *    the run reports a PRODUCT FAIL — a configuration problem blamed on the
+ *    branch. That is the single wrong answer this whole story exists to
+ *    prevent.
+ *
+ * So the broad rule is kept even though it refuses commands that would have
+ * tokenized correctly. The workaround is stated in the hint and costs nothing:
+ * use the other quote style, or write the path with forward slashes, which
+ * Node accepts on Windows too.
+ *
+ * A backslash anywhere else — a regex, a path mid-argument, a separator not
+ * adjacent to a quote — is an ordinary character and stays one.
  */
 export function usesUnsupportedEscaping(commandLine: string): boolean {
-  return /\\[\"'](?!\s|$)/.test(commandLine);
+  return /\\["']/.test(commandLine);
 }
 
 /**

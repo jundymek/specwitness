@@ -468,8 +468,10 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
             // verbatim. Same leak the spawn-failed diagnosis already closes.
             `gate '${gate.id}' uses backslash-escaped quotes, which are not supported: ` +
               `'${redactText(declared)}'`,
-            'declared commands are executed without a shell, so a backslash is not an escape — ' +
-              'use the other quote style instead, as in: -e \'console.log("ok")\'',
+            'declared commands are executed without a shell, so a backslash before a quote is ' +
+              'ambiguous and is refused rather than guessed at. Use the other quote style, as in ' +
+              '-e \'console.log("ok")\', or write a path with forward slashes, which Node accepts ' +
+              'on Windows too',
           );
         }
 
