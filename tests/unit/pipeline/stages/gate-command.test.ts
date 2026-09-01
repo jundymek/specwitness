@@ -2,7 +2,10 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import { firstToken } from '../../../../src/cli/doctor/checks/commands-resolvable.js';
-import { splitCommandLine } from '../../../../src/pipeline/stages/gate-command.js';
+import {
+  splitCommandLine,
+  usesUnsupportedEscaping,
+} from '../../../../src/pipeline/stages/gate-command.js';
 
 /**
  * The `DeclaredCommand` -> `binary` + `argv` split (AD-3).
@@ -101,11 +104,12 @@ describe('splitCommandLine: the ordinary shapes', () => {
     // RESOLVES the executable, so that token must be read exactly as doctor
     // reads it; nothing resolves an argument, so grouping it faithfully costs
     // no agreement. A single rule cannot do both.
-    // Only the EXECUTABLE is pinned. A first token with an embedded quote is
-    // malformed, no grouping of the remainder is more correct than another, and
-    // asserting one would pin behaviour nobody relies on — the property that
-    // matters is that doctor and the runner still name the same executable, so
-    // both fail on it in the same way.
+    //
+    // Only the EXECUTABLE is pinned here. A first token with an embedded quote
+    // is malformed, no grouping of the remainder is more correct than another,
+    // and asserting one would pin behaviour nobody relies on — what matters is
+    // that doctor and the runner still name the same token, so both fail on it
+    // the same way.
     const malformed = 'x"y z" --label="a b"';
     expect(splitCommandLine(malformed).binary).toBe(firstToken(malformed));
     expect(splitCommandLine(malformed).binary).toBe('x"y');
@@ -264,5 +268,38 @@ describe('splitCommandLine: reassembly keeps every token', () => {
     // `''` is a real, meaningful argument to many CLIs. Dropping it would
     // silently change the command the operator declared.
     expect(splitCommandLine("cmd '' x")).toEqual({ binary: 'cmd', args: ['', 'x'] });
+  });
+});
+
+describe('usesUnsupportedEscaping: the ambiguity is detected, not guessed at', () => {
+  it('flags a backslash-escaped double quote', () => {
+    expect(usesUnsupportedEscaping('node -e "console.log(\\"ok\\")"')).toBe(true);
+  });
+
+  it('flags a backslash-escaped single quote', () => {
+    expect(usesUnsupportedEscaping("sh -c 'it\\'s'")).toBe(true);
+  });
+
+  it('does NOT flag a backslash that is not before a quote', () => {
+    // A Windows path or a regex is an ordinary argument and must stay one.
+    expect(usesUnsupportedEscaping('tool --path C:\\Users\\dev')).toBe(false);
+    expect(usesUnsupportedEscaping('grep --regex \\d+')).toBe(false);
+  });
+
+  it('does NOT flag the alternate-quote form, which works today', () => {
+    // The whole reason escaping is refused rather than implemented: there is
+    // already a way to express the same command, and it tokenizes correctly.
+    const supported = 'node -e \'console.log("ok")\'';
+    expect(usesUnsupportedEscaping(supported)).toBe(false);
+    expect(splitCommandLine(supported)).toEqual({
+      binary: 'node',
+      args: ['-e', 'console.log("ok")'],
+    });
+  });
+
+  it('does NOT flag ordinary commands', () => {
+    for (const command of ['pnpm lint', 'node -e "a b"', "jest --p='x y'"]) {
+      expect(usesUnsupportedEscaping(command)).toBe(false);
+    }
   });
 });

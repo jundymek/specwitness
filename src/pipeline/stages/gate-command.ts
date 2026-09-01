@@ -216,6 +216,40 @@ function tokenize(line: string): string[] {
 }
 
 /**
+ * Does this command line use backslash escaping of a quote?
+ *
+ * WHY THIS IS DETECTED AND REFUSED RATHER THAN SUPPORTED.
+ *
+ * `node -e "console.log(\\"ok\\")"` is a command an operator can reasonably
+ * write, and this tokenizer would mis-group it: the escaped quote closes the
+ * segment, the argument is corrupted, the child exits non-zero — and the run
+ * reports a **product FAIL**. A configuration problem blamed on the branch is
+ * the worst answer this stage can give, so the ambiguity is refused loudly and
+ * classified as what it is.
+ *
+ * Refused rather than implemented, deliberately, for three reasons:
+ *
+ *  1. **There is already a working way to express it.** `-e 'console.log("ok")'`
+ *     tokenizes correctly today, because the other quote style groups the whole
+ *     value. Escaping is a convenience with an alternative, not a capability
+ *     gap — unlike quote GROUPING, without which an argument containing a space
+ *     cannot be expressed at all. That is the line between the two.
+ *  2. **Doctor's `firstToken` has no escape handling either.** Adding it here
+ *     would make the two disagree about the executable for a first token
+ *     containing an escape, reintroducing exactly what the property test guards.
+ *  3. **Each increment of this kind ends at a shell parser**, in a product whose
+ *     security posture is that there is no shell. Grouping was necessary;
+ *     escaping, expansion and operators are not, and the boundary is easier to
+ *     hold at a stated limit than at a gradient.
+ *
+ * Only a backslash immediately before a quote counts. A backslash anywhere else
+ * — a Windows path, a regex — is an ordinary character and stays one.
+ */
+export function usesUnsupportedEscaping(commandLine: string): boolean {
+  return /\\["\']/.test(commandLine);
+}
+
+/**
  * Resolve a command line into the binary to spawn and its arguments.
  *
  * Total: every string produces a value, including `''` and whitespace-only

@@ -96,7 +96,7 @@ import type { GateResult, GateStatus } from '../../domain/result.js';
 import type { Stage, StageContext, StageResult } from '../stage.js';
 import { stageOk, stageProductNegative } from '../stage.js';
 
-import { splitCommandLine } from './gate-command.js';
+import { splitCommandLine, usesUnsupportedEscaping } from './gate-command.js';
 import { gateEvidenceRelativePath, type GateOutputStream } from './gate-evidence-path.js';
 
 /**
@@ -453,10 +453,25 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
           continue;
         }
 
-        const { binary, args } = splitCommandLine(commandText(gate.run));
+        const declared = commandText(gate.run);
+
+        // Refused BEFORE spawning, because the alternative is worse than a
+        // refusal: a backslash-escaped quote mis-groups, the child gets a
+        // corrupted argument, it exits non-zero, and the run reports a product
+        // FAIL — a configuration problem blamed on the branch. Exit 3 naming
+        // the actual cause is the honest answer, and the fix is one character.
+        if (usesUnsupportedEscaping(declared)) {
+          throw new InfraError(
+            `gate '${gate.id}' uses backslash-escaped quotes, which are not supported: '${declared}'`,
+            'declared commands are executed without a shell, so a backslash is not an escape — ' +
+              'use the other quote style instead, as in: -e \'console.log("ok")\'',
+          );
+        }
+
+        const { binary, args } = splitCommandLine(declared);
         if (binary === '') {
           throw new InfraError(
-            `gate '${gate.id}' declares a command with no executable: '${commandText(gate.run)}'`,
+            `gate '${gate.id}' declares a command with no executable: '${declared}'`,
             `set gates[${gate.id}].run in .specwitness/config.yaml to a command starting with a binary`,
           );
         }

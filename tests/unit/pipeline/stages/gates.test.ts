@@ -454,6 +454,24 @@ describe('gates stage: AC3 — a gate that could NOT START is infrastructure', (
     expect(runner.calls).toEqual([]);
   });
 
+  it('refuses a backslash-escaped quote rather than corrupting the argument', async () => {
+    // Left alone this mis-groups, the child receives a corrupted argument, it
+    // exits non-zero, and the run reports a PRODUCT FAIL — a configuration
+    // problem blamed on the branch, which is the worst answer this stage can
+    // give. Exit 3 naming the real cause is the honest one.
+    const runner = recordingRunner();
+    const gates = declaredGates([{ id: 'unit', run: 'node -e "console.log(\\"ok\\")"' }]);
+
+    const error = await infraErrorFrom(
+      createGatesStage({ gates, runner, writeEvidence: recordingWriter() }).run(stageContext()),
+    );
+
+    expect(error.message).toMatch(/backslash-escaped quotes/);
+    expect(error.hint).toMatch(/other quote style/);
+    // Refused BEFORE spawning: a corrupted command must never reach a child.
+    expect(runner.calls).toEqual([]);
+  });
+
   it('refuses a declared command with no executable token', async () => {
     // `nonEmptyString` is `min(1)`, which "   " satisfies. Spawning '' would be
     // an unhelpful failure from deep inside execa.
