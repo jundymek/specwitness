@@ -6,6 +6,7 @@ import type { ProcessRunner } from '../../../src/domain/process-runner.js';
 import type { RunEnvironment, RunResult } from '../../../src/domain/run-result.js';
 import { STAGE_NAMES } from '../../../src/domain/stage.js';
 import type { StageName } from '../../../src/domain/stage.js';
+import { EXIT, exitCodeForOutcome } from '../../../src/cli/exit.js';
 import { ContractNotFrozenError } from '../../../src/schemas/contract.js';
 import { assertVerifiableContract } from '../../../src/authoring/verifiable.js';
 import type { LoadedContract } from '../../../src/authoring/verifiable.js';
@@ -448,5 +449,120 @@ describe('the teardown stage', () => {
     });
 
     await expect(stage.run({} as StageContext)).rejects.toThrow('worktree busy');
+  });
+});
+
+describe('a contract with a human criterion reaches NEEDS_HUMAN (Q39, exit 2)', () => {
+  // The arm of the exit table Epic 3 could not otherwise reach, and story 3.7 proves it
+  // live through the built binary. Before this fix the same contract verified PASS at
+  // exit 0: `verifiability` was dropped at the integrity stage, so a human criterion
+  // derived as `skipped`, and `skipped` is inert in aggregation.
+
+  function contractWithHumanCriterion(): Contract {
+    const base = frozenContract();
+    return {
+      ...base,
+      spec: {
+        ...base.spec,
+        criteria: [
+          ...base.spec.criteria,
+          {
+            id: 'E3-09',
+            statement: 'the error copy reads as a human wrote it',
+            kind: 'human',
+            severity: 'normal',
+            verifiability: 'human',
+          },
+        ],
+      },
+    };
+  }
+
+  it('ends NEEDS_HUMAN, which maps to exit 2', async () => {
+    const { result } = await verify(() => contractWithHumanCriterion());
+
+    expect(result.outcome).toEqual({ verdict: 'NEEDS_HUMAN' });
+    expect(exitCodeForOutcome(result.outcome)).toBe(EXIT.NEEDS_HUMAN);
+  });
+
+  it('reports the human criterion as needs_human and the rest as skipped', async () => {
+    const { result } = await verify(() => contractWithHumanCriterion());
+
+    const statuses = Object.fromEntries(
+      result.criteria.map((criterion) => [criterion.criterionId, criterion.status]),
+    );
+
+    expect(statuses).toEqual({ 'E3-01': 'skipped', 'E3-02': 'skipped', 'E3-09': 'needs_human' });
+  });
+
+  it('still PASSes at exit 0 when every criterion is automated', async () => {
+    // The other half, so the fix cannot be "everything is needs_human now".
+    const { result } = await verify(() => frozenContract());
+
+    expect(result.outcome).toEqual({ verdict: 'PASS' });
+    expect(exitCodeForOutcome(result.outcome)).toBe(EXIT.PASS);
+  });
+
+  it('spawns nothing to decide it — it is a fact about the contract', async () => {
+    const { result, spawns } = await verify(() => contractWithHumanCriterion());
+
+    expect(result.outcome.verdict).toBe('NEEDS_HUMAN');
+    expect(spawns).toBe(0);
+  });
+});
+
+describe('the tampered-contract remedy reaches the run (story 3.7 finding)', () => {
+  it('carries story 2.6 hint, and it does not say --freeze', async () => {
+    // Why this is not cosmetic. Told only that content "no longer matches", the obvious
+    // next move for an operator is `--freeze` — which launders the tamper and destroys
+    // the only evidence it happened. ADR-005 exists to prevent exactly that, and 2.6's
+    // hint is how it is prevented in practice: inspect the diff, `--amend` if the change
+    // is legitimate, otherwise restore from Git. Before this fix it never left the stage.
+    const tampered: LoadedContract = {
+      present: true,
+      epic: 'epic-3',
+      path: '.specwitness/contracts/epic-3.yaml',
+      contract: { ...frozenContract(), spec: { ...frozenContract().spec, version: 99 } },
+    };
+
+    const { result } = await verify(() => assertVerifiableContract(tampered));
+    const entry = result.stages.find((candidate) => candidate.stage === 'integrity');
+
+    expect(result.outcome).toEqual({ infraError: 'integrity' });
+    expect(entry?.hint).toContain('--amend');
+    expect(entry?.hint).not.toContain('--freeze');
+  });
+
+  it('gives the never-frozen contract its OWN hint, which DOES say --freeze', async () => {
+    // The distinction 2.6 built three refusals for: a draft should be frozen, a tamper
+    // must not be. Both classify `integrity`; only the hints tell them apart, so the
+    // hints have to survive.
+    const draft: LoadedContract = {
+      present: true,
+      epic: 'epic-3',
+      path: '.specwitness/contracts/epic-3.yaml',
+      contract: {
+        ...frozenContract(),
+        meta: { ...frozenContract().meta, frozen: false, fingerprint: null, frozenAt: null },
+      },
+    };
+
+    const { result } = await verify(() => assertVerifiableContract(draft));
+    const entry = result.stages.find((candidate) => candidate.stage === 'integrity');
+
+    expect(entry?.hint).toContain('--freeze');
+  });
+
+  it('gives the absent contract its own hint too', async () => {
+    const absent: LoadedContract = {
+      present: false,
+      epic: 'epic-3',
+      path: '.specwitness/contracts/epic-3.yaml',
+    };
+
+    const { result } = await verify(() => assertVerifiableContract(absent));
+    const entry = result.stages.find((candidate) => candidate.stage === 'integrity');
+
+    expect(entry?.hint).toContain('specwitness contract');
   });
 });

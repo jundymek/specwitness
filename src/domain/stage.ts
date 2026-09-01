@@ -83,4 +83,22 @@ export interface StageTimelineEntry {
    * rendered and persisted.
    */
   readonly detail?: string;
+  /**
+   * The AD-7 `HINT:` from the error that ended this stage — how to fix it — when there
+   * was one.
+   *
+   * Separate from `detail` because the house style is a PAIR: `ERROR: <what>` and
+   * `HINT: <how to fix>`. Without this field the diagnosis survived a run and the remedy
+   * did not: `runPipeline` turns a stage's throw into an outcome, so the CLI edge's
+   * ERROR/HINT printer never runs, and an exit-3 run printed zero bytes to stderr
+   * (measured through the built binary by story 3.7's agent).
+   *
+   * The case that makes it more than cosmetic is the tampered contract. Story 2.6 wrote
+   * that remedy deliberately — inspect the diff, then `--amend` if legitimate, otherwise
+   * restore from Git — because the obvious move for an operator told only that content
+   * "no longer matches" is `--freeze`, which launders the tamper and destroys the only
+   * evidence it happened. ADR-005 exists to prevent exactly that, and the hint is how it
+   * is prevented in practice.
+   */
+  readonly hint?: string;
 }

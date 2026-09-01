@@ -625,3 +625,74 @@ describe('runPipeline — the snapshot the persist stage needs (Codex review, P1
     );
   });
 });
+
+describe('the AD-7 HINT survives into the run (story 3.7 finding)', () => {
+  // Measured through the built binary before this: an exit-3 run printed ZERO bytes to
+  // stderr. The pipeline turns a stage's throw into an OUTCOME, so nothing is thrown out
+  // of the command and the CLI edge's ERROR/HINT printer never runs — and the hint had no
+  // field to travel in. The diagnosis survived; the remedy did not.
+
+  it('carries the hint from a thrown AD-7 error onto the stage entry', async () => {
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      integrity: fakeStage('integrity', ran, async () => {
+        throw new IntegrityError(
+          'the contract for epic-3 was edited after it was frozen',
+          "inspect the change with 'git diff', then record it with '--amend'",
+        );
+      }),
+    });
+
+    const result = await run(stages);
+    const entry = result.stages.find((candidate) => candidate.stage === 'integrity');
+
+    // The pair the house style requires: what, and how to fix it.
+    expect(entry?.detail).toContain('edited after it was frozen');
+    expect(entry?.hint).toContain('--amend');
+  });
+
+  it('leaves the hint absent when the error carried none', async () => {
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: fakeStage('gates', ran, async () => {
+        throw new InfraError('boom');
+      }),
+    });
+
+    const result = await run(stages);
+
+    expect(result.stages.find((entry) => entry.stage === 'gates')?.hint).toBeUndefined();
+  });
+
+  it('redacts the hint, which can quote a path or a command', async () => {
+    const seeded = `ANTHROPIC_API_KEY=${['sk', 'ant'].join('-')}-hintleak`;
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: fakeStage('gates', ran, async () => {
+        throw new InfraError('the gate could not start', `retry with ${seeded} in the env`);
+      }),
+    });
+
+    const result = await run(stages);
+
+    expect(JSON.stringify(result.stages)).not.toContain('hintleak');
+    expect(result.stages.find((entry) => entry.stage === 'gates')?.hint).toContain('[REDACTED]');
+  });
+
+  it('carries a hint from a teardown failure too, without changing the outcome', async () => {
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      aggregate: passingAggregate(ran),
+      teardown: fakeStage('teardown', ran, async () => {
+        throw new InfraError('could not remove the worktree', 'run `specwitness clean`');
+      }),
+    });
+
+    const result = await run(stages);
+
+    expect(result.outcome).toEqual({ verdict: 'PASS' });
+    expect(result.stages.find((entry) => entry.stage === 'teardown')?.hint).toContain(
+      'specwitness clean',
+    );
+  });
+});
