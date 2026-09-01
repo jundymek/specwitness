@@ -156,6 +156,17 @@ async function verify(
     stages: createStages({
       assertVerifiableContract: () => assertVerifiableContract(loaded),
       worktree: { vcs, recorder: store, root },
+      // The declared gates, executed in the worktree. `writeEvidence` is bound
+      // to the run so the stage cannot address another run's directory, and
+      // `onProcessGroup` records each pgid durably — which is what lets
+      // `specwitness clean` reap a run killed mid-gate.
+      gates: {
+        gates: config.gates,
+        runner,
+        writeEvidence: (relativeName, contents) =>
+          store.writeEvidenceFile(created.runId, relativeName, contents),
+        onProcessGroup: (pgid) => store.recordProcessGroup(created.runId, pgid),
+      },
       // Write 1 of two: the crash-durable snapshot, at position 10 of 11. It is
       // what survives a kill DURING teardown. `onComplete` below writes the
       // complete document afterwards — one writer, one serializer, two moments.

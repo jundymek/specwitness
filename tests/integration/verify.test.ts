@@ -1,5 +1,5 @@
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -147,7 +147,7 @@ describe('fixture preconditions', () => {
     expect(failing.stderr).toContain(FAILING_GATE_STDERR);
   });
 
-  it('offers a gate that fails AFTER making the run directory unwritable', async () => {
+  it('offers a gate that fails AFTER blocking the run result write', async () => {
     const project = await fixture({
       gates: [{ id: 'build', behaviour: 'fail-and-lock-run-dir' }],
     });
@@ -162,16 +162,19 @@ describe('fixture preconditions', () => {
       reject: false,
     });
 
-    // Fails as a gate — a product-negative result, decided BEFORE the run
-    // directory becomes unwritable.
+    // Fails as a gate — a product-negative result, decided BEFORE the result
+    // write is blocked.
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain(FAILING_GATE_STDOUT);
 
-    // And the run directory can no longer be written to, which is what makes the
-    // persist failure happen in the same run rather than in a second one.
-    const mode = (await stat(runDir)).mode & 0o777;
-    expect(mode & 0o200).toBe(0);
-    await expect(writeFile(join(runDir, 'probe.json'), '{}', 'utf8')).rejects.toThrow();
+    // The block is narrow on purpose: the run directory stays writable, so
+    // evidence capture and aggregation still work and the outcome IS decided.
+    // Only the rename onto `result.json` can fail, because that name is now a
+    // directory.
+    expect((await stat(join(runDir, 'result.json'))).isDirectory()).toBe(true);
+    await expect(
+      writeFile(join(runDir, 'evidence-probe.txt'), 'still writable', 'utf8'),
+    ).resolves.toBeUndefined();
   });
 
   it('declares those gates in the config, in declaration order', async () => {
@@ -404,5 +407,298 @@ describe('verify — a human-verifiability criterion yields NEEDS_HUMAN, exit 2 
     const { exitCode } = await runCli(['verify', 'epic-1'], { cwd: project.root });
 
     expect(exitCode).toBe(0);
+  });
+});
+
+/** The shape of the persisted document, narrowed to what these tests assert on. */
+interface RunDocument {
+  readonly runId: string;
+  readonly outcome: { verdict?: string; infraError?: string; gateFailed?: string };
+  readonly stages: { stage: string; status: string; detail?: string; hint?: string }[];
+  readonly gates: { gateId: string; status: string }[];
+  readonly criteria: { criterionId: string; status: string }[];
+  readonly evidence: { kind: string; gateId?: string; stdout?: { text: string; fullPath?: string } }[];
+  readonly environment: { runDirectory: string; worktreePath: string | null };
+}
+
+/** A listing of a directory tree with sizes and mtimes — for "nothing was written". */
+async function fingerprintTree(dir: string): Promise<string> {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  const rows = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile())
+      .map(async (entry) => {
+        const full = join(entry.parentPath, entry.name);
+        const info = await stat(full);
+        return `${relative(dir, full)} ${info.size} ${info.mtimeMs}`;
+      }),
+  );
+  return rows.sort().join('\n');
+}
+
+/**
+ * AC1 — a contract-bearing project with passing gates verifies PASS, exit 0,
+ * with a persisted run whose bytes are the ones printed.
+ *
+ * The assertions that matter most here are the NEGATIVE ones. A test that only
+ * checked `exitCode === 0` would pass if every run returned 0, and a test that
+ * only checked `verdict === 'PASS'` would pass for a run in which nothing
+ * executed — which is exactly the state story 3.4 made unrepresentable and this
+ * suite has to keep unrepresentable.
+ */
+describe('verify — AC1: green gates verify PASS, exit 0, with a persisted run', () => {
+  it('exits 0 with verdict PASS and no failure marker of any kind', async () => {
+    const project = await fixture({
+      gates: [
+        { id: 'lint', behaviour: 'pass' },
+        { id: 'build', behaviour: 'pass' },
+      ],
+    });
+
+    const { exitCode, stdout } = await runCli(['verify', 'epic-1', '--json'], {
+      cwd: project.root,
+    });
+
+    expect(exitCode).toBe(0);
+
+    const document = JSON.parse(stdout) as RunDocument;
+    expect(document.outcome.verdict).toBe('PASS');
+    expect(document.outcome.gateFailed).toBeUndefined();
+    expect(document.outcome.infraError).toBeUndefined();
+  });
+
+  it('actually EXECUTED the declared gates rather than skipping past them', async () => {
+    const project = await fixture({
+      gates: [
+        { id: 'lint', behaviour: 'pass' },
+        { id: 'build', behaviour: 'pass' },
+      ],
+    });
+
+    const { stdout } = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+    const document = JSON.parse(stdout) as RunDocument;
+
+    // A run in which nothing was checked and a run in which everything passed
+    // are the two states this product must never confuse (story 3.4's words).
+    expect(document.gates.map((gate) => [gate.gateId, gate.status])).toEqual([
+      ['lint', 'pass'],
+      ['build', 'pass'],
+    ]);
+    // And the honest report story 3.4 emits when nobody wired it must be absent:
+    // its presence would mean my wiring is missing, not that my gates passed.
+    expect(stdout).not.toContain('no gate runner was wired');
+  });
+
+  it('reports every criterion as skipped, because nothing probes them in this epic', async () => {
+    const project = await fixture();
+
+    const { stdout } = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+    const document = JSON.parse(stdout) as RunDocument;
+
+    expect(document.criteria.length).toBeGreaterThan(0);
+    expect(document.criteria.every((criterion) => criterion.status === 'skipped')).toBe(true);
+  });
+
+  it('persists a run whose bytes are EXACTLY what --json printed', async () => {
+    const project = await fixture();
+
+    const { stdout } = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+    const document = JSON.parse(stdout) as RunDocument;
+
+    const resultPath = join(project.root, document.environment.runDirectory, 'result.json');
+    const persisted = await readFile(resultPath, 'utf8');
+
+    // BYTE equality, not "parses to the same object": the harness may diff, hash
+    // or cache the document (Q53/Q55). Both sides come from one serializer, so
+    // this holds by construction — and this assertion is what catches the day
+    // somebody adds a second path.
+    expect(stdout).toBe(persisted);
+  });
+
+  it('puts the document alone on stdout, with everything human on stderr', async () => {
+    const project = await fixture();
+
+    const { stdout, stderr } = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+
+    // `verify --json | jq` must work with no filtering.
+    expect(() => JSON.parse(stdout) as unknown).not.toThrow();
+    expect(stdout.startsWith('{')).toBe(true);
+    // The human rendering is not lost — it goes where it cannot corrupt stdout.
+    expect(stderr).toContain('VERDICT: PASS');
+  });
+
+  it('names a run directory that belongs to the run id it reports', async () => {
+    const project = await fixture();
+
+    const { stdout } = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+    const document = JSON.parse(stdout) as RunDocument;
+
+    // Nothing else checks this, and a mismatch renders confusingly rather than
+    // failing — the worst shape for a defect in a document read weeks later.
+    // The edge builds both halves from one minted id, so this pins the one site
+    // that could ever get it wrong.
+    expect(document.environment.runDirectory.endsWith(document.runId)).toBe(true);
+  });
+
+  it('re-renders through `report` without executing or writing anything (Q52, FR-31)', async () => {
+    const project = await fixture();
+
+    const first = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+    const document = JSON.parse(first.stdout) as RunDocument;
+    const runDir = join(project.root, document.environment.runDirectory);
+
+    const before = await fingerprintTree(runDir);
+    const rendered = await runCli(['report', document.runId, '--json'], { cwd: project.root });
+    const after = await fingerprintTree(runDir);
+
+    expect(rendered.exitCode).toBe(0);
+    // Byte-identical to what verify printed AND to what is on disk: report
+    // echoes the stored bytes rather than re-serializing a parsed document.
+    expect(rendered.stdout).toBe(first.stdout);
+    // Listing, sizes and mtimes unchanged — stronger than a throwing runner,
+    // because it also catches a write nobody intended.
+    expect(after).toBe(before);
+  });
+
+  it('leaves the source repository byte-identical, and no worktree behind (AD-8)', async () => {
+    const project = await fixture();
+
+    const before = await project.status();
+    const refsBefore = await project.refs();
+
+    const { exitCode, stdout } = await runCli(['verify', 'epic-1', '--json'], {
+      cwd: project.root,
+    });
+    const document = JSON.parse(stdout) as RunDocument;
+
+    expect(exitCode).toBe(0);
+    // FR-19's whole promise: verification never touches the tree it verifies.
+    expect(await project.status()).toBe(before);
+    expect(await project.refs()).toBe(refsBefore);
+
+    // And teardown removed the worktree it created, container included.
+    expect(document.environment.worktreePath).not.toBeNull();
+    await expect(stat(document.environment.worktreePath as string)).rejects.toThrow();
+  });
+});
+
+/**
+ * AC2 — a broken build is a PRODUCT failure: exit 1 with the failing gate
+ * named, never exit 3.
+ *
+ * The mirror image matters as much as the case itself. A gate failure reported
+ * as exit 3 tells a harness the environment is broken, so it retries a branch
+ * that will never build; an infra failure reported as exit 1 tells it the
+ * branch has defects, so it blocks a mergeable one. Both assertions are here.
+ */
+describe('verify — AC2: a failing gate is FAIL, exit 1, matching ADR-003', () => {
+  const brokenBuild = [
+    { id: 'lint', behaviour: 'pass' },
+    { id: 'build', behaviour: 'fail' },
+    { id: 'unit', behaviour: 'pass' },
+  ] as const;
+
+  it('exits 1 with verdict FAIL and gateFailed naming the gate — not exit 3', async () => {
+    const project = await fixture({ gates: [...brokenBuild] });
+
+    const { exitCode, stdout } = await runCli(['verify', 'epic-1', '--json'], {
+      cwd: project.root,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(exitCode).not.toBe(3);
+
+    const document = JSON.parse(stdout) as RunDocument;
+    expect(document.outcome.verdict).toBe('FAIL');
+    // A string carrying the gate id, not a boolean: repair automation routes to
+    // "fix the build" rather than to a criterion.
+    expect(document.outcome.gateFailed).toBe('build');
+    expect(document.outcome.infraError).toBeUndefined();
+  });
+
+  it('stops at the failing gate and reports the rest as skipped, not as missing', async () => {
+    const project = await fixture({ gates: [...brokenBuild] });
+
+    const { stdout } = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+    const document = JSON.parse(stdout) as RunDocument;
+
+    // A missing gate and a skipped gate look identical in a report, and only
+    // one of them is true.
+    expect(document.gates.map((gate) => [gate.gateId, gate.status])).toEqual([
+      ['lint', 'pass'],
+      ['build', 'fail'],
+      ['unit', 'skipped'],
+    ]);
+  });
+
+  it('reports ALL criteria as skipped when a gate failed (ADR-003)', async () => {
+    const project = await fixture({ gates: [...brokenBuild] });
+
+    const { stdout } = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+    const document = JSON.parse(stdout) as RunDocument;
+
+    expect(document.criteria.length).toBeGreaterThan(0);
+    expect(document.criteria.every((criterion) => criterion.status === 'skipped')).toBe(true);
+  });
+
+  it('captures the gate output as evidence, with a working relative pointer', async () => {
+    const project = await fixture({ gates: [...brokenBuild] });
+
+    const { stdout } = await runCli(['verify', 'epic-1', '--json'], { cwd: project.root });
+    const document = JSON.parse(stdout) as RunDocument;
+
+    const gateEvidence = document.evidence.find(
+      (item) => item.kind === 'gate' && item.gateId === 'build',
+    );
+    expect(gateEvidence).toBeDefined();
+    // The output the operator has to read, inline and bounded.
+    expect(gateEvidence?.stdout?.text).toContain(FAILING_GATE_STDOUT);
+
+    // Every evidence path is RELATIVE to the run directory (Q48), so a run
+    // directory survives being copied between machines. Resolve it and read it.
+    const pointer = gateEvidence?.stdout?.fullPath;
+    if (pointer !== undefined) {
+      expect(isAbsolute(pointer)).toBe(false);
+      const full = join(project.root, document.environment.runDirectory, pointer);
+      expect(await readFile(full, 'utf8')).toContain(FAILING_GATE_STDOUT);
+    }
+  });
+
+  it('says which gate failed in the human report too', async () => {
+    const project = await fixture({ gates: [...brokenBuild] });
+
+    const { stdout, stderr } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    expect(stdout).toContain("VERDICT: FAIL — gate 'build' failed");
+    // A FAIL is not an error: the run succeeded at verifying, and the answer is
+    // no. An ERROR:/HINT: pair here would tell an operator SpecWitness broke.
+    expect(stderr).not.toContain('ERROR: ');
+  });
+
+  it('keeps the FAIL when the result cannot be persisted afterwards', async () => {
+    const project = await fixture({
+      gates: [
+        { id: 'lint', behaviour: 'pass' },
+        { id: 'build', behaviour: 'fail-and-lock-run-dir' },
+      ],
+    });
+
+    const { exitCode, stdout } = await runCli(['verify', 'epic-1', '--json'], {
+      cwd: project.root,
+    });
+
+    // Once an outcome is decided, nothing after it may replace one. Exit 3 here
+    // would tell a harness "the environment is broken, retry" — and the retry
+    // merges a branch that does not build.
+    expect(exitCode).toBe(1);
+    expect(exitCode).not.toBe(3);
+
+    const document = JSON.parse(stdout) as RunDocument;
+    expect(document.outcome.verdict).toBe('FAIL');
+    expect(document.outcome.gateFailed).toBe('build');
+    // The durability failure is not hidden either — it is recorded where a
+    // reader would look for it.
+    const persist = document.stages.find((stage) => stage.stage === 'persist');
+    expect(persist?.status).toBe('error');
   });
 });

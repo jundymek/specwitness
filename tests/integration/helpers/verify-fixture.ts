@@ -148,31 +148,40 @@ function gateScript(behaviour: GateBehaviour, runsRoot: string): string {
         'process.exit(0);\n'
       );
     case 'fail-and-lock-run-dir':
+      // Blocks the RESULT write specifically, and nothing else.
+      //
       // The runs root is baked in as an absolute path because this script runs
       // with its cwd inside the DETACHED WORKTREE, which knows nothing about the
       // project root. Newest run directory = the run currently executing: run ids
       // begin with a compact UTC timestamp, so a plain string sort is newest-last
       // (the same ordering `RunStore.listRuns` relies on).
       //
-      // Mode 0o500 removes write permission, so creating the staged temp file
-      // inside the run directory fails — the finalize fails after the gate result
-      // is already on the accumulator. Doing it from inside the gate means one
-      // process, one run, and no timing race between the test and the run.
+      // It creates a DIRECTORY named `result.json` rather than removing write
+      // permission from the run directory. Taking the whole directory away was
+      // the first attempt and it was too blunt: the gates stage writes its
+      // evidence files into that same directory BEFORE the verdict is decided,
+      // so the run failed at `gates` with an InfraError and exited 3 — correctly,
+      // since SpecWitness genuinely could not record what happened. Exit 3 there
+      // is not the bug this fixture is for. Failing only the final rename leaves
+      // evidence capture and aggregation intact, so the outcome IS decided and
+      // the question becomes the one worth asking: does a durability failure
+      // afterwards rewrite it?
       return (
         "const fs = require('node:fs');\n" +
         "const path = require('node:path');\n" +
         `const runsRoot = ${JSON.stringify(runsRoot)};\n` +
-        'const runs = fs.readdirSync(runsRoot).filter((name) => name.startsWith(\'run-\')).sort();\n' +
+        "const runs = fs.readdirSync(runsRoot).filter((name) => name.startsWith('run-')).sort();\n" +
         'const newest = runs[runs.length - 1];\n' +
         'if (newest === undefined) {\n' +
-        "  process.stderr.write('fixture: no run directory to lock\\n');\n" +
+        "  process.stderr.write('fixture: no run directory to block\\n');\n" +
         '  process.exit(2);\n' +
         '}\n' +
-        'fs.chmodSync(path.join(runsRoot, newest), 0o500);\n' +
+        "fs.mkdirSync(path.join(runsRoot, newest, 'result.json'), { recursive: true });\n" +
         `process.stdout.write(${JSON.stringify(`${FAILING_GATE_STDOUT}\n`)});\n` +
         `process.stderr.write(${JSON.stringify(`${FAILING_GATE_STDERR}\n`)});\n` +
         'process.exit(1);\n'
       );
+
     default: {
       const unreachable: never = behaviour;
       return unreachable;
@@ -291,6 +300,12 @@ export async function runCli(
     cwd: options.cwd,
     // Prompt-free by contract: verify must never block on stdin.
     input: '',
+    // RAW bytes. execa strips the final newline by default, which would make a
+    // byte-equality assertion compare a value execa modified against the file on
+    // disk — passing or failing for a reason that has nothing to do with the
+    // product. `--json` output ends in exactly one newline, and that newline is
+    // part of the document story 3.5 persists.
+    stripFinalNewline: false,
     ...(options.env === undefined ? {} : { env: options.env }),
   });
   return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
