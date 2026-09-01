@@ -624,3 +624,61 @@ describe('how far a redacted header value extends (Codex review, follow-up round
     expect(redacted).toContain('Content-Type: application/json');
   });
 });
+
+describe('leaks that LOOKED redacted (Codex review, second follow-up pass)', () => {
+  const SECRET = `${['sk', 'ant'].join('-')}-lookedredacted`;
+
+  // Both of these produced output containing [REDACTED] with the secret still beside it.
+  // That is worse than no match at all: a reviewer scanning for the marker sees one, so
+  // the line survives review. Neither was caught by the tests I wrote for these patterns.
+
+  it('redacts a TRUNCATED quoted header value to end of line', () => {
+    // What a killed process or a capped capture leaves behind. Both quoted alternatives
+    // fail on it; without an end-of-line fallback the bare alternative matched EMPTY
+    // before the opening quote and produced `Authorization: [REDACTED]"Bearer <secret>`.
+    const redacted = redactText(`Authorization: "Bearer ${SECRET}`);
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toBe('Authorization: [REDACTED]');
+  });
+
+  it('redacts a truncated single-quoted header value too', () => {
+    expect(redactText(`Cookie: 'session=${SECRET}`)).not.toContain(SECRET);
+  });
+
+  it('redacts a quoted assignment name longer than the bare-name bound', () => {
+    // A JSON key of 300 characters is unusual but legal. With the {0,255} bound applied
+    // to the quoted form, the name could not reach its closing quote, the backreference
+    // failed, and matching could not restart inside the name because a quote is required
+    // at the start — so the value went through untouched.
+    const longName = `${'a'.repeat(300)}_API_KEY`;
+
+    const redacted = redactText(`{"${longName}":"${SECRET}"}`);
+
+    expect(redacted).not.toContain(SECRET);
+    expect(redacted).toContain('[REDACTED]');
+  });
+
+  it('still leaves a long quoted name alone when it is not sensitive', () => {
+    // The bound must not be traded for over-redaction in the other direction.
+    const longName = `${'a'.repeat(300)}_NOTE`;
+    const text = `{"${longName}":"harmless"}`;
+
+    expect(redactText(text)).toBe(text);
+  });
+
+  it('keeps quoted-name redaction linear despite being unbounded', () => {
+    // The quoted form is deliberately unbounded, which is only safe because its character
+    // class cannot match the quote that terminates it — there is exactly one way to match,
+    // so there is nothing to backtrack into. Pinned, because "unbounded" is the word that
+    // will worry the next reader of this file.
+    const raw = `{"${'b'.repeat(200_000)}_API_KEY":"${SECRET}"}`;
+
+    const started = performance.now();
+    const redacted = redactText(raw);
+    const elapsed = performance.now() - started;
+
+    expect(redacted).not.toContain(SECRET);
+    expect(elapsed).toBeLessThan(2000);
+  });
+});

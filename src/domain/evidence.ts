@@ -175,13 +175,21 @@ const SENSITIVE_HEADERS = new Set([
  * shell command as the double-quoted form. The residual risk is a credential containing a
  * literal quote, which base64 and hex tokens cannot.
  *
+ * THE ORDER OF THE LAST TWO ALTERNATIVES IS LOAD-BEARING. `[^"'\r\n]+` uses `+`, not `*`,
+ * so it cannot match empty, and an end-of-line fallback follows it. Without both, a
+ * TRUNCATED header - `Authorization: "Bearer secret` with no closing quote, which is what
+ * a killed process or a capped capture leaves behind - failed both quoted alternatives,
+ * matched an EMPTY value before the opening quote, and produced
+ * `Authorization: [REDACTED]"Bearer secret`. A leak that looks redacted is worse than a
+ * raw one: it survives review, because the marker is right there.
+ *
  * The lookbehind is what keeps it from over-matching: the header name must not be
  * preceded by another name character, so `X-Custom-Authorization-Policy` is not treated
  * as an `authorization` header by accident. Redaction runs to end of line, because that
  * is exactly the extent of a header value.
  */
 const SENSITIVE_HEADER_LINE =
-  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^"'\r\n]*)/gi;
+  /(?<![A-Za-z0-9_-])(authorization|proxy-authorization|set-cookie|cookie|x-api-key|x-auth-token)([^\S\r\n]*:)[^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^"'\r\n]+|[^\r\n]*)/gi;
 
 /**
  * `NAME=value`, `NAME: value`, `"name": "value"`, `name='value'`.
@@ -229,8 +237,36 @@ const SENSITIVE_HEADER_LINE =
  * a second pass yields `[REDACTED]]` — the kind of drift that shows up as a diff in a
  * snapshot test long after anyone remembers why.
  */
-const ASSIGNMENT =
-  /(["']?)([A-Za-z_][A-Za-z0-9_.-]{0,255})\1([^\S\r\n]*[:=][^\S\r\n]*)(\[REDACTED\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;)\]}]*)/g;
+const ASSIGNMENT_VALUE = String.raw`(\[REDACTED\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;)\]}]*)`;
+
+/**
+ * A QUOTED name: `"apiKey": "..."`, `'password' = '...'`.
+ *
+ * Deliberately UNBOUNDED, and safe: `[^"'\r\n]+` cannot match the quote that terminates
+ * it, so the engine never backtracks into it - there is exactly one way to match. The
+ * bound on the bare form below would be actively harmful here. A JSON key longer than 256
+ * characters is unusual but perfectly legal, and with a bound the name could not reach its
+ * closing quote, the backreference would fail, and matching could not restart inside the
+ * name because a quote is required at the start - so `"<300 chars>_API_KEY":"secret"` would
+ * have gone through unredacted. Found by review, after the bound was added.
+ */
+const QUOTED_ASSIGNMENT = new RegExp(
+  String.raw`(["'])([^"'\r\n]+)\1([^\S\r\n]*[:=][^\S\r\n]*)` + ASSIGNMENT_VALUE,
+  'g',
+);
+
+/**
+ * A BARE name: `ANTHROPIC_API_KEY=...`, `password: ...`.
+ *
+ * This is the one that needs the length bound, because its character class CAN keep
+ * consuming past where the match must fail. Quoted names are handled above and never
+ * reach here: a bare match starting inside `"foo"` runs into the closing quote where a
+ * `[:=]` is required, and fails.
+ */
+const BARE_ASSIGNMENT = new RegExp(
+  String.raw`([A-Za-z_][A-Za-z0-9_.-]{0,255})([^\S\r\n]*[:=][^\S\r\n]*)` + ASSIGNMENT_VALUE,
+  'g',
+);
 
 /**
  * The trailing name segment that makes an assignment sensitive.
@@ -292,26 +328,39 @@ export function redactText(raw: string, options?: RedactionOptions): string {
     return `${name}: ${REDACTED}`;
   });
 
-  text = text.replace(
-    ASSIGNMENT,
-    (match, quote: string, name: string, separator: string, value: string) => {
-      const quoted = value.startsWith('"') || value.startsWith("'");
-      const wrapper = quoted ? (value[0] as string) : '';
+  const rewrite = (quote: string, name: string, separator: string, value: string): string => {
+    const quoted = value.startsWith('"') || value.startsWith("'");
+    const wrapper = quoted ? (value[0] as string) : '';
 
-      if (!isSensitiveName(name)) {
-        if (!quoted) {
-          return match;
-        }
-        // A QUOTED value is consumed whole by the match, so a sensitive assignment
-        // nested inside an innocent one — `{"note":"ANTHROPIC_API_KEY=…"}` — would never
-        // be examined at all: the scan resumes past the closing quote. Recursing into
-        // the inner text closes that hole. It terminates because the inner string is
-        // strictly shorter than the value it came from.
-        return `${quote}${name}${quote}${separator}${wrapper}${redactText(value.slice(1, -1), options)}${wrapper}`;
+    if (!isSensitiveName(name)) {
+      if (!quoted) {
+        return `${quote}${name}${quote}${separator}${value}`;
       }
+      // A QUOTED value is consumed whole by the match, so a sensitive assignment nested
+      // inside an innocent one — `{"note":"ANTHROPIC_API_KEY=…"}` — would never be
+      // examined at all: the scan resumes past the closing quote. Recursing into the
+      // inner text closes that hole. It terminates because the inner string is strictly
+      // shorter than the value it came from.
+      return `${quote}${name}${quote}${separator}${wrapper}${redactText(value.slice(1, -1), options)}${wrapper}`;
+    }
 
-      return `${quote}${name}${quote}${separator}${wrapper}${REDACTED}${wrapper}`;
-    },
+    return `${quote}${name}${quote}${separator}${wrapper}${REDACTED}${wrapper}`;
+  };
+
+  // Quoted names first, then bare ones. Two passes rather than one alternation because
+  // the two forms need different safety properties: the quoted name must be unbounded
+  // (a long JSON key is legal) and is safe unbounded, while the bare name must be bounded
+  // and cannot be safe otherwise.
+  text = text.replace(
+    QUOTED_ASSIGNMENT,
+    (_match, quote: string, name: string, separator: string, value: string) =>
+      rewrite(quote, name, separator, value),
+  );
+
+  text = text.replace(
+    BARE_ASSIGNMENT,
+    (_match, name: string, separator: string, value: string) =>
+      rewrite('', name, separator, value),
   );
 
   for (const pattern of options?.extraPatterns ?? []) {
