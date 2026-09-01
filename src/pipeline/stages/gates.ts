@@ -67,10 +67,11 @@
  * It never calls `aggregate()`, never constructs a `RunOutcome`, and never
  * touches an exit code. It records `GateResult`s and `Evidence` on the
  * accumulator; the aggregate stage is AD-6's only converter. It prints nothing —
- * story 3.6 renders. It constructs no path under `.specwitness/runs/`: the full
+ * story 3.6 renders. It builds no path beneath the run directory: the full
  * output goes through an injected writer bound to `RunStore.writeEvidenceFile`,
- * which is the sole writer there (AD-8), so that string does not appear in this
- * file at all.
+ * which is the sole writer there (AD-8). The run id is bound at composition
+ * rather than passed in, so this stage cannot address another run's directory
+ * even by mistake.
  *
  * Gates run in the verification worktree, which leaves the operator's workspace
  * and the source repo untouched. That is all "isolated" means here — ADR-004

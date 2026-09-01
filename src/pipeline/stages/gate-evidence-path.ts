@@ -4,9 +4,15 @@
  * `RunStore` is the sole writer under `.specwitness/runs/` and the only module
  * permitted to construct a path there. This file does not construct one: it
  * derives the RELATIVE name handed to `RunStore.writeEvidenceFile`, which
- * returns the relative path that goes into the evidence record. The string
- * `.specwitness/runs` appears nowhere in `src/pipeline/`, so AD-8's grep-level
- * rule holds by construction rather than by review.
+ * returns the relative path that goes into the evidence record.
+ *
+ * Stated precisely, because the imprecise version invites a grep that
+ * contradicts it: the run-directory prefix appears in `src/pipeline/` only
+ * inside comments like this one, never in an expression. No module here joins,
+ * interpolates or otherwise builds a path beneath it, so AD-8's rule holds by
+ * construction. A reviewer checking that should look for path CONSTRUCTION
+ * rather than for the literal — the literal lives in the prose explaining why
+ * it is absent from the code.
  *
  * WHY THE NAME IS DERIVED RATHER THAN THE GATE ID USED DIRECTLY.
  *
