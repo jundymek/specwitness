@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { execa } from 'execa';
@@ -10,6 +10,7 @@ import {
   buildFixture,
   FAILING_GATE_STDERR,
   FAILING_GATE_STDOUT,
+  runCli,
   type Fixture,
 } from './helpers/verify-fixture.js';
 
@@ -188,5 +189,88 @@ describe('fixture preconditions', () => {
     expect(config.indexOf('id: typecheck')).toBeLessThan(config.indexOf('id: build'));
     // AD-3: argv, not a shell line. Nothing here needs quoting or a shell.
     expect(config).toContain('run: node gates/lint.cjs');
+  });
+});
+
+/** House style: `ERROR: <what>` then `HINT: <how to fix>`, both on stderr. */
+function houseStyleLines(stderr: string) {
+  return {
+    errors: stderr.split('\n').filter((line) => line.startsWith('ERROR: ')),
+    hints: stderr.split('\n').filter((line) => line.startsWith('HINT: ')),
+  };
+}
+
+/**
+ * The exit table, proven live through the built binary.
+ *
+ * Every case asserts the EXACT code rather than a negation. Story 3.2 shipped
+ * and fixed a bug where the CLI could exit **13** — a code that is not in the
+ * table at all — from a top-level await over an unref'd timer, with no output
+ * and no ERROR/HINT pair. An assertion written as "not 1" would have passed
+ * straight over it.
+ */
+describe('verify — usage errors exit 64 (ADR-002)', () => {
+  it.each([
+    ['a malformed epic id', ['verify', 'not-an-epic']],
+    ['epic 0, which does not exist', ['verify', '0']],
+    ['an empty --root value', ['verify', '1', '--root', '']],
+    ['an empty --head value', ['verify', '1', '--head', '']],
+    ['an unknown flag', ['verify', '1', '--definitely-not-a-flag']],
+  ])('%s exits 64 with one ERROR/HINT pair and nothing on stdout', async (_label, args) => {
+    const project = await fixture();
+
+    const { exitCode, stdout, stderr } = await runCli(args, { cwd: project.root });
+
+    // 64 sits outside 0–3 precisely so a typo can never be read as a verdict.
+    expect(exitCode).toBe(64);
+
+    const { errors, hints } = houseStyleLines(stderr);
+    expect(errors).toHaveLength(1);
+    expect(hints).toHaveLength(1);
+    // The harness parses stdout; a diagnostic there would corrupt it.
+    expect(stdout).toBe('');
+  });
+
+  it('treats every accepted spelling of the epic id as the same epic', async () => {
+    const project = await fixture({ contract: 'absent' });
+
+    // All three name epic-1, so all three must fail on the SAME missing
+    // contract rather than resolve three different lookups.
+    for (const spelling of ['1', 'epic-1', 'epic-01']) {
+      const { exitCode, stdout } = await runCli(['verify', spelling], { cwd: project.root });
+
+      expect(exitCode).toBe(3);
+      expect(stdout).toContain('epic-1');
+    }
+  });
+});
+
+describe('verify — a project that declares nothing is refused, never PASSed (DECISIONS 3.7-D4)', () => {
+  it('exits 3 with an ERROR/HINT pair rather than reporting merge-eligible', async () => {
+    const project = await fixture({ gates: [] });
+
+    const { exitCode, stdout, stderr } = await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    // Without this refusal the run reaches PASS having executed nothing, and
+    // exit 0 tells a harness the branch is merge-eligible.
+    expect(exitCode).toBe(3);
+    expect(exitCode).not.toBe(0);
+
+    const { errors, hints } = houseStyleLines(stderr);
+    expect(errors).toHaveLength(1);
+    expect(hints).toHaveLength(1);
+    expect(stderr).toContain('declares no deterministic gates');
+    expect(stdout).toBe('');
+  });
+
+  it('refuses BEFORE the run, so no run directory and no result.json exist', async () => {
+    const project = await fixture({ gates: [] });
+
+    await runCli(['verify', 'epic-1'], { cwd: project.root });
+
+    // A persisted PASS beside a CLI exiting 3 would be worse than the defect it
+    // fixes: whoever opens the run directory later has no exit code to compare
+    // against, so the stored verdict simply wins.
+    expect(await readdir(join(project.root, '.specwitness', 'runs'))).toEqual([]);
   });
 });
