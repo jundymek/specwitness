@@ -270,30 +270,36 @@ describe('clean against real processes', () => {
   });
 });
 
+/** Runs git in `repo` with a fixed identity, so no test depends on the operator's. */
+function gitIn(repo: string, args: string[]) {
+  return execa('git', args, {
+    cwd: repo,
+    env: {
+      GIT_AUTHOR_NAME: 'SpecWitness Test',
+      GIT_AUTHOR_EMAIL: 'test@example.invalid',
+      GIT_COMMITTER_NAME: 'SpecWitness Test',
+      GIT_COMMITTER_EMAIL: 'test@example.invalid',
+    },
+    extendEnv: true,
+  });
+}
+
+/** A fresh repository with one commit, inside this test's temp project. */
+async function seedRepo(): Promise<string> {
+  const repo = join(projectRoot, `repo-${Math.random().toString(36).slice(2, 8)}`);
+  await mkdir(repo, { recursive: true });
+  await gitIn(repo, ['init', '--quiet', '--initial-branch=main']);
+  await writeFile(join(repo, 'file.txt'), 'content\n');
+  await gitIn(repo, ['add', 'file.txt']);
+  await gitIn(repo, ['commit', '--quiet', '-m', 'chore: seed']);
+  return repo;
+}
+
 describe('clean against a real git worktree', () => {
   it('removes a recorded worktree and leaves no registration behind', async () => {
-    const repo = join(projectRoot, 'repo');
-    await mkdir(repo, { recursive: true });
-    const git = (args: string[]) =>
-      execa('git', args, {
-        cwd: repo,
-        env: {
-          GIT_AUTHOR_NAME: 'SpecWitness Test',
-          GIT_AUTHOR_EMAIL: 'test@example.invalid',
-          GIT_COMMITTER_NAME: 'SpecWitness Test',
-          GIT_COMMITTER_EMAIL: 'test@example.invalid',
-        },
-        extendEnv: true,
-      });
-
-    await git(['init', '--quiet', '--initial-branch=main']);
-    await writeFile(join(repo, 'file.txt'), 'content\n');
-    await git(['add', 'file.txt']);
-    await git(['commit', '--quiet', '-m', 'chore: seed']);
-    const head = (await git(['rev-parse', 'HEAD'])).stdout.trim();
-
+    const repo = await seedRepo();
     const worktree = join(projectRoot, 'wt');
-    await git(['worktree', 'add', '--detach', '--quiet', worktree, head]);
+    await gitIn(repo, ['worktree', 'add', '--detach', '--quiet', worktree, 'HEAD']);
 
     const store = new RunStore(repo, new SystemClock(), new RandomIds());
     await mkdir(join(repo, '.specwitness'), { recursive: true });
@@ -307,28 +313,63 @@ describe('clean against a real git worktree', () => {
     );
 
     expect(report.failures).toEqual([]);
-    expect(report.runs[0]?.removedWorktrees).toEqual([worktree]);
-    expect((await git(['worktree', 'list', '--porcelain'])).stdout).not.toContain(worktree);
+    expect(report.runs[0]?.reapedWorktrees).toEqual([worktree]);
+    expect((await gitIn(repo, ['worktree', 'list', '--porcelain'])).stdout).not.toContain(worktree);
     expect((await store.readManifest(runId)).reaped).toBe(true);
     // The worktree went; the run record and its manifest did not.
     expect(await store.listRuns()).toEqual([runId]);
   });
 
-  it('treats an already-removed worktree as nothing to do', async () => {
+  it('treats a path that was never registered as nothing to do', async () => {
     // Manifest replay hits this constantly — `clean` run twice, or a run that
-    // tore itself down cleanly before crashing later.
-    const store = makeStore();
+    // tore itself down cleanly before crashing later. It must be a no-op rather
+    // than an error, and it must be decided by the REGISTRATION rather than by
+    // whether the directory happens to be on disk.
+    const repo = await seedRepo();
+    const store = new RunStore(repo, new SystemClock(), new RandomIds());
+    await mkdir(join(repo, '.specwitness'), { recursive: true });
     const { runId } = await store.createRun();
     await store.recordWorktree(runId, join(projectRoot, 'never-existed'));
 
     const report = await cleanRuns(
       store,
       { all: false },
-      defaultCleanEffects(projectRoot, createProcessRunner(new SystemClock())),
+      defaultCleanEffects(repo, createProcessRunner(new SystemClock())),
     );
 
     expect(report.failures).toEqual([]);
-    expect(report.runs[0]?.absentWorktrees).toEqual([join(projectRoot, 'never-existed')]);
+    expect(report.runs[0]?.reapedWorktrees).toEqual([join(projectRoot, 'never-existed')]);
+    expect((await store.readManifest(runId)).reaped).toBe(true);
+  });
+
+  it('does NOT report a stale registration as reaped when the directory is gone', async () => {
+    // Codex review, P1. `git worktree remove --force` on a path whose directory
+    // has been deleted underneath git still has a registration to clear; an
+    // earlier version skipped the call entirely because the directory was
+    // absent, and reported the run reaped with the registration still there.
+    const repo = await seedRepo();
+    const worktree = join(projectRoot, 'wt-vanished');
+    await gitIn(repo, ['worktree', 'add', '--detach', '--quiet', worktree, 'HEAD']);
+    // Delete the checkout behind git's back, exactly as a crashed run or a
+    // cleaned temp directory would.
+    await rm(worktree, { recursive: true, force: true });
+    expect((await gitIn(repo, ['worktree', 'list', '--porcelain'])).stdout).toContain(worktree);
+
+    const store = new RunStore(repo, new SystemClock(), new RandomIds());
+    await mkdir(join(repo, '.specwitness'), { recursive: true });
+    const { runId } = await store.createRun();
+    await store.recordWorktree(runId, worktree);
+
+    const report = await cleanRuns(
+      store,
+      { all: false },
+      defaultCleanEffects(repo, createProcessRunner(new SystemClock())),
+    );
+
+    expect(report.failures).toEqual([]);
+    // The registration is what actually had to go.
+    expect((await gitIn(repo, ['worktree', 'list', '--porcelain'])).stdout).not.toContain(worktree);
+    expect((await store.readManifest(runId)).reaped).toBe(true);
   });
 });
 

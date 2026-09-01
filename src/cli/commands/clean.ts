@@ -45,8 +45,6 @@
  * which is the only exit table in the repository.
  */
 
-import { existsSync } from 'node:fs';
-
 import type { Command } from 'commander';
 
 import { InfraError } from '../../domain/errors.js';
@@ -75,7 +73,17 @@ import { removeWorktreeAtPath } from '../../infra/worktree-removal.js';
 export interface CleanEffects {
   probeProcessGroups(pgids: readonly number[]): Promise<ReadonlyMap<number, ProcessGroupProbe>>;
   terminateProcessGroup(pgid: number): Promise<void>;
-  worktreeExists(worktreePath: string): boolean;
+  /**
+   * Removes a recorded worktree AND verifies the git registration is gone.
+   * Removing one that is already absent is a no-op rather than an error.
+   *
+   * Called for EVERY recorded path, including paths whose directory has already
+   * disappeared. An earlier version skipped those after an `existsSync` check,
+   * which meant a deleted directory whose git registration survived — the exact
+   * thing `git worktree prune` exists for — was reported as reaped while the
+   * stale registration stayed behind forever. Only the removal effect can see
+   * the registration, so only it may decide there is nothing to do.
+   */
   removeWorktree(worktreePath: string): Promise<void>;
 }
 
@@ -86,8 +94,8 @@ export interface RunCleanReport {
   readonly skipped?: 'already-reaped';
   readonly killed: readonly number[];
   readonly alreadyGone: readonly number[];
-  readonly removedWorktrees: readonly string[];
-  readonly absentWorktrees: readonly string[];
+  /** Recorded paths that are now confirmed removed AND unregistered. */
+  readonly reapedWorktrees: readonly string[];
   /** Everything this run could not reap, each already a full sentence. */
   readonly problems: readonly string[];
   readonly reaped: boolean;
@@ -145,7 +153,6 @@ export function defaultCleanEffects(projectRoot: string, runner: ProcessRunner):
   return {
     probeProcessGroups: (pgids) => probeProcessGroups(runner, pgids, projectRoot),
     terminateProcessGroup: (pgid) => terminateProcessGroup(pgid),
-    worktreeExists: (worktreePath) => existsSync(worktreePath),
     removeWorktree: (worktreePath) => removeWorktreeAtPath(runner, projectRoot, worktreePath),
   };
 }
@@ -188,8 +195,7 @@ async function cleanOneRun(
     runId,
     killed: [],
     alreadyGone: [],
-    removedWorktrees: [],
-    absentWorktrees: [],
+    reapedWorktrees: [],
     reaped: false,
   } as const;
 
@@ -267,17 +273,14 @@ async function cleanOneRun(
     }
   }
 
-  const removedWorktrees: string[] = [];
-  const absentWorktrees: string[] = [];
+  const reapedWorktrees: string[] = [];
 
   for (const worktreePath of manifest.worktrees) {
-    if (!effects.worktreeExists(worktreePath)) {
-      absentWorktrees.push(worktreePath);
-      continue;
-    }
+    // Called unconditionally. A missing DIRECTORY does not mean a missing
+    // REGISTRATION, and only the removal effect can tell the difference.
     try {
       await effects.removeWorktree(worktreePath);
-      removedWorktrees.push(worktreePath);
+      reapedWorktrees.push(worktreePath);
     } catch (cause) {
       problems.push(`run ${runId}: could not remove worktree ${worktreePath}: ${describeCause(cause)}`);
     }
@@ -293,7 +296,7 @@ async function cleanOneRun(
     }
   }
 
-  return { runId, killed, alreadyGone, removedWorktrees, absentWorktrees, problems, reaped };
+  return { runId, killed, alreadyGone, reapedWorktrees, problems, reaped };
 }
 
 /**
@@ -322,11 +325,8 @@ export function renderCleanReport(report: CleanReport): string {
     for (const pgid of run.alreadyGone) {
       did.push(`  process group ${pgid} was already gone`);
     }
-    for (const path of run.removedWorktrees) {
-      did.push(`  removed worktree ${path}`);
-    }
-    for (const path of run.absentWorktrees) {
-      did.push(`  worktree ${path} was already gone`);
+    for (const path of run.reapedWorktrees) {
+      did.push(`  worktree ${path} removed and unregistered`);
     }
     for (const problem of run.problems) {
       did.push(`  NOT REAPED: ${problem}`);

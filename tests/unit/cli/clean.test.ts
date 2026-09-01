@@ -55,7 +55,6 @@ function effects(
     terminateProcessGroup: async (pgid) => {
       recorder.signalled.push(pgid);
     },
-    worktreeExists: () => false,
     removeWorktree: async (path) => {
       recorder.removed.push(path);
     },
@@ -217,26 +216,32 @@ describe('clean: process groups', () => {
 });
 
 describe('clean: worktrees', () => {
-  it('removes a worktree that is still on disk', async () => {
+  it('removes a recorded worktree', async () => {
     const store = makeStore();
     const { runId } = await store.createRun();
     await store.recordWorktree(runId, '/tmp/specwitness-x/worktree');
     const rec = recorder();
 
-    await cleanRuns(store, { all: false }, effects(rec, { worktreeExists: () => true }));
+    await cleanRuns(store, { all: false }, effects(rec));
 
     expect(rec.removed).toEqual(['/tmp/specwitness-x/worktree']);
   });
 
-  it('does nothing for a worktree path that is already gone', async () => {
+  it('asks the removal effect even when the DIRECTORY is already gone', async () => {
+    // A missing directory does not mean a missing git REGISTRATION — that is
+    // precisely what `git worktree prune` exists for. An earlier version
+    // short-circuited on an `existsSync` check, so a deleted directory whose
+    // registration survived was reported as reaped while the stale
+    // registration stayed behind forever. Only the removal effect can see the
+    // registration, so only it may decide there is nothing to do.
     const store = makeStore();
     const { runId } = await store.createRun();
-    await store.recordWorktree(runId, '/tmp/specwitness-x/worktree');
+    await store.recordWorktree(runId, '/tmp/specwitness-x/definitely-not-on-disk');
     const rec = recorder();
 
     const report = await cleanRuns(store, { all: false }, effects(rec));
 
-    expect(rec.removed).toEqual([]);
+    expect(rec.removed).toEqual(['/tmp/specwitness-x/definitely-not-on-disk']);
     expect(report.failures).toEqual([]);
     expect((await store.readManifest(runId)).reaped).toBe(true);
   });
@@ -251,7 +256,6 @@ describe('clean: worktrees', () => {
       store,
       { all: false },
       effects(rec, {
-        worktreeExists: () => true,
         removeWorktree: async () => {
           throw new InfraError('worktree removal left a registration behind', 'run git worktree prune');
         },
@@ -382,7 +386,6 @@ describe('clean: Q51 — it reaps resources, never results', () => {
       store,
       { all: true },
       effects(rec, {
-        worktreeExists: () => true,
         probeProcessGroups: async () =>
           new Map([[4242, { pgid: 4242, state: 'live' as const, startedAt: new Date(CLOCK) }]]),
       }),
@@ -410,7 +413,6 @@ describe('clean: Q51 — it reaps resources, never results', () => {
       store,
       { all: false },
       effects(recorder(), {
-        worktreeExists: () => true,
         removeWorktree: async () => {
           throw new InfraError('nope', 'hint');
         },
@@ -433,7 +435,6 @@ describe('clean: the report an operator reads', () => {
       store,
       { all: false },
       effects(recorder(), {
-        worktreeExists: () => true,
         probeProcessGroups: async () =>
           new Map([[4242, { pgid: 4242, state: 'live' as const, startedAt: new Date(CLOCK) }]]),
       }),

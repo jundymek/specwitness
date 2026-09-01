@@ -10,10 +10,18 @@
  *
  * WHAT THIS MODULE ESTABLISHES, precisely:
  *
- *   liveness  `kill(-pgid, 0)` would succeed, i.e. the group has members.
+ *   liveness  `kill(-pgid, 0)` — asked directly, and the ONLY thing allowed to
+ *             conclude `gone`. It is the same question the eventual signal asks,
+ *             so it cannot be defeated by a `ps` line this module misparsed.
  *   identity  the EARLIEST start time among the group's members sits within
  *             `IDENTITY_WINDOW_MS` of the instant SpecWitness recorded that
  *             pgid (`RunStore.readProcessGroupRecords`).
+ *
+ * ABSENCE IS NEVER INFERRED FROM SILENCE. If `ps` cannot be run, cannot be
+ * parsed, or describes no member of a group that `kill(-pgid, 0)` says is
+ * alive, the answer is `unknown` — reported, not signalled, and not marked
+ * reaped. A diagnostic that failed must never read as evidence that there was
+ * nothing to find.
  *
  * WHY THE EARLIEST MEMBER RATHER THAN THE LEADER. Every member of a group we
  * created is the leader or a descendant of it, so the earliest surviving member
@@ -78,6 +86,23 @@ interface ProcessRow {
   readonly startedAt: Date;
 }
 
+/** What `ps` told us, including what it told us badly. */
+interface ProcessSnapshot {
+  readonly rows: readonly ProcessRow[];
+  /**
+   * Process groups with at least one member whose START TIME could not be
+   * parsed. The group is demonstrably alive; it just cannot be dated, so it
+   * must never be reported as `gone`.
+   */
+  readonly undatable: ReadonlySet<number>;
+  /**
+   * True when some line could not be attributed to a pgid at all. Then no
+   * absence can be proved from this snapshot, because the missing member could
+   * have been in any of those lines.
+   */
+  readonly unattributable: boolean;
+}
+
 /**
  * Probes every requested process group in ONE `ps` call.
  *
@@ -119,15 +144,33 @@ export async function probeProcessGroups(
     return probes;
   }
 
-  const rows = parseProcessRows(result.stdout);
+  const snapshot = parseProcessSnapshot(result.stdout);
   // Our own group is derived from the SAME snapshot rather than a second call,
   // so there is no window in which the two could disagree.
-  const ownGroup = rows.find((row) => row.pid === process.pid)?.pgid;
+  const ownGroup = snapshot.rows.find((row) => row.pid === process.pid)?.pgid;
 
   for (const pgid of pgids) {
-    const members = rows.filter((row) => row.pgid === pgid);
-    if (members.length === 0) {
+    // `kill(-pgid, 0)` is asked FIRST and is authoritative about existence: it
+    // is the same question the eventual signal asks, and it cannot be defeated
+    // by a `ps` line this module failed to parse. Only it may conclude `gone`.
+    const exists = processGroupExists(pgid);
+
+    if (exists === false) {
       probes.set(pgid, { pgid, state: 'gone' });
+      continue;
+    }
+
+    const members = snapshot.rows.filter((row) => row.pgid === pgid);
+
+    if (members.length === 0 || snapshot.undatable.has(pgid)) {
+      // Alive (or possibly alive) but not describable. NEVER `gone`: reporting
+      // absence because a diagnostic could not read a line is how a live
+      // process group ends up marked reaped and left running forever.
+      probes.set(pgid, {
+        pgid,
+        state: 'unknown',
+        detail: describeUndescribable(exists, snapshot.undatable.has(pgid), snapshot),
+      });
       continue;
     }
 
@@ -150,6 +193,54 @@ export async function probeProcessGroups(
 }
 
 /**
+ * Does a process group have any member? `undefined` when it cannot be asked.
+ *
+ * Signal 0 delivers nothing; it only performs the existence and permission
+ * check. EPERM means the group exists and belongs to someone else, which is
+ * emphatically not "gone".
+ *
+ * `pgid <= 1` is refused rather than probed: `kill(-0, …)` addresses the
+ * CALLER's own process group, so passing 0 through would ask a question about
+ * ourselves and answer it about somebody else's run.
+ */
+function processGroupExists(pgid: number): boolean | undefined {
+  if (!Number.isInteger(pgid) || pgid <= 1) {
+    return undefined;
+  }
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') {
+      return false;
+    }
+    if (code === 'EPERM') {
+      return true;
+    }
+    return undefined;
+  }
+}
+
+/** Why a group could not be described, in a sentence an operator can act on. */
+function describeUndescribable(
+  exists: boolean | undefined,
+  undatable: boolean,
+  snapshot: ProcessSnapshot,
+): string {
+  if (undatable) {
+    return 'the process group is alive but ps reported a member whose start time could not be parsed, so its identity could not be verified';
+  }
+  if (exists === true) {
+    return 'the process group is alive but ps did not list any of its members, so its identity could not be verified';
+  }
+  if (snapshot.unattributable) {
+    return 'ps produced output this build could not parse, so the process group could not be proved absent';
+  }
+  return 'the process group could not be checked';
+}
+
+/**
  * Does a live group's start time match when SpecWitness recorded that pgid?
  *
  * Exported so the decision is testable on its own: it is the single comparison
@@ -160,16 +251,26 @@ export function startTimeMatchesRecord(startedAt: Date, recordedAt: Date): boole
 }
 
 /**
- * Parses `pid pgid lstart` rows.
+ * Parses `pid pgid lstart` rows, KEEPING TRACK OF WHAT IT COULD NOT PARSE.
  *
  * `lstart` is the whole rest of the line (`Sun Aug 31 22:10:45 2026`) and
  * contains spaces, so the first two fields are split off and the remainder is
- * handed to `Date` whole. A row that does not parse is DROPPED rather than
- * guessed at: an unparseable row means the group looks absent, and looking
- * absent means nothing gets signalled — the safe direction.
+ * handed to `Date` whole.
+ *
+ * An earlier version simply DROPPED any line it could not parse, and that was a
+ * defect of exactly the kind this command exists to prevent: a live member with
+ * an unreadable `lstart` disappeared from the snapshot, the group then looked
+ * empty, and `clean` reported the run reaped while the processes kept running.
+ * Silence about a failed parse is indistinguishable from evidence of absence.
+ *
+ * So a failure is now RECORDED. A line whose pid and pgid parsed but whose date
+ * did not makes that group undatable; a line that did not parse at all makes the
+ * whole snapshot unable to prove any absence.
  */
-function parseProcessRows(stdout: string): ProcessRow[] {
+function parseProcessSnapshot(stdout: string): ProcessSnapshot {
   const rows: ProcessRow[] = [];
+  const undatable = new Set<number>();
+  let unattributable = false;
 
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim();
@@ -178,17 +279,22 @@ function parseProcessRows(stdout: string): ProcessRow[] {
     }
     const match = /^(\d+)\s+(\d+)\s+(.+)$/.exec(trimmed);
     if (match === null) {
+      unattributable = true;
       continue;
     }
     const [, pidText = '', pgidText = '', startText = ''] = match;
+    const pgid = Number(pgidText);
     const startedAt = new Date(startText);
     if (Number.isNaN(startedAt.getTime())) {
+      // The group is demonstrably alive — we are looking at one of its members
+      // — we simply cannot date it. That is `unknown`, never `gone`.
+      undatable.add(pgid);
       continue;
     }
-    rows.push({ pid: Number(pidText), pgid: Number(pgidText), startedAt });
+    rows.push({ pid: Number(pidText), pgid, startedAt });
   }
 
-  return rows;
+  return { rows, undatable, unattributable };
 }
 
 /** A sentence an operator can act on, for each way `ps` can fail. */
