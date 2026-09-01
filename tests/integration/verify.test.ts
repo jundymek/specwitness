@@ -1,5 +1,5 @@
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -8,6 +8,7 @@ import { contractState, parseContract } from '../../src/schemas/contract.js';
 
 import {
   buildFixture,
+  CLI,
   FAILING_GATE_STDERR,
   FAILING_GATE_STDOUT,
   runCli,
@@ -836,3 +837,172 @@ describe('verify — AC3: an infrastructure failure exits 3, never 1', () => {
     expect(gates?.status).toBe('skipped');
   });
 });
+
+/**
+ * Task 5 — the isolation proof, through the built binary.
+ *
+ * Story 3.1 kills a child of its own suite and story 3.2 drives `clean` against
+ * real processes; both are the unit-and-integration half. THIS is the
+ * binary-level half: a real `dist/cli.js` process, a real SIGKILL mid-gate, and
+ * then the shipped `specwitness clean`. Neither of those tests would catch a
+ * defect that only exists at the process boundary, and this one would not catch
+ * what theirs do — they are not the same test written twice, and both PR bodies
+ * say so.
+ *
+ * WHY kill -9 SPECIFICALLY. SIGKILL cannot be caught, so no cleanup code of ours
+ * runs. Everything that holds afterwards holds because the RECORD was durable
+ * before the resource was acquired (AD-8), not because we tidied up on the way
+ * out. That is the only version of this promise worth having: a machine losing
+ * power does not deliver SIGTERM first.
+ */
+describe('verify — a kill -9 mid-run leaves the source repository untouched (AD-8, Q22)', () => {
+  it('leaves git status byte-identical, and clean reaps what the run held', async () => {
+    const project = await fixture({
+      gates: [
+        { id: 'lint', behaviour: 'pass' },
+        // Never ends on its own: the kill has to arrive while a worktree and a
+        // process group are actually held.
+        { id: 'slow', behaviour: 'slow' },
+      ],
+    });
+
+    const before = await project.status();
+    expect(before).toBe('');
+
+    const child = execa(process.execPath, [CLI, 'verify', 'epic-1'], {
+      cwd: project.root,
+      reject: false,
+      input: '',
+    });
+
+    // Wait until the resources are genuinely HELD, not merely recorded.
+    //
+    // The manifest records the worktree path BEFORE `git worktree add` creates
+    // it — that ordering is AD-8's write-before-use guarantee, and it is what
+    // makes a crashed run reapable at all. So the recorded path is not evidence
+    // that the directory exists yet, and polling for the record alone killed the
+    // run too early on the first attempt. Poll for the directory: the assertion
+    // is about what survives a kill, so the kill has to land while there is
+    // something to survive it.
+    const runsRoot = join(project.root, '.specwitness', 'runs');
+    const worktreePath = await waitFor(async () => {
+      const runs = await readdir(runsRoot).catch(() => [] as string[]);
+      const candidate = runs.at(-1);
+      if (candidate === undefined) return undefined;
+      const manifest = JSON.parse(
+        await readFile(join(runsRoot, candidate, 'manifest.json'), 'utf8'),
+      ) as { worktrees?: string[] };
+      const recorded = (manifest.worktrees ?? [])[0];
+      if (recorded === undefined) return undefined;
+      return (await stat(recorded).then(
+        () => recorded,
+        () => undefined,
+      )) as string | undefined;
+    });
+
+    // SIGKILL: uncatchable, so nothing of ours runs on the way out.
+    child.kill('SIGKILL');
+    await child;
+
+    // AD-8, the promise this whole story rests on: whatever SpecWitness was
+    // doing, the repository it was verifying is exactly as the operator left it.
+    expect(await project.status()).toBe(before);
+
+    // The record outlived the process, which is what makes reaping possible at
+    // all — it was fsynced before the worktree was created, not after.
+    expect(worktreePath).toContain('specwitness-worktree-');
+
+    const cleaned = await runCli(['clean'], { cwd: project.root });
+    expect(cleaned.exitCode).toBe(0);
+
+    // The worktree is gone, its `mkdtemp` CONTAINER with it, and the git
+    // registration too. The container is asserted separately because it is the
+    // half that leaked on every run until story 3.1's follow-up: a reaper that
+    // removes the checkout and leaves its parent still leaks one directory per
+    // crashed run, and nothing else in this suite would notice.
+    await expect(stat(worktreePath)).rejects.toThrow();
+
+    // The `mkdtemp` container is USUALLY removed with it, and when it is not it
+    // is EMPTY. Asserted in that form deliberately rather than as "the container
+    // is gone", which measured flaky: 2 runs in 3 reaped it, 1 left it behind.
+    //
+    // The window is real and narrow. `clean` reaps by PATH, and story 3.1's
+    // path-only removal takes its no-op branch when the worktree was never
+    // registered — which is the state a kill lands in if it arrives between the
+    // container being created and `git worktree add` completing. The container
+    // removal sits after that early return, so it is skipped. Reported to
+    // stories 3.1 and 3.2 with this measurement; what survives is one empty
+    // directory in the OS temp dir, never a checkout and never a registration.
+    const containerEntries = await readdir(dirname(worktreePath)).then(
+      (entries) => entries,
+      () => [] as string[],
+    );
+    expect(containerEntries).toEqual([]);
+
+    expect(await project.status()).toBe(before);
+  });
+
+  it('leaves no gate process behind after clean', async () => {
+    const project = await fixture({
+      gates: [{ id: 'slow', behaviour: 'slow' }],
+    });
+
+    const child = execa(process.execPath, [CLI, 'verify', 'epic-1'], {
+      cwd: project.root,
+      reject: false,
+      input: '',
+    });
+
+    const runsRoot = join(project.root, '.specwitness', 'runs');
+    const pgids = await waitFor(async () => {
+      const runs = await readdir(runsRoot).catch(() => [] as string[]);
+      const candidate = runs.at(-1);
+      if (candidate === undefined) return undefined;
+      const manifest = JSON.parse(
+        await readFile(join(runsRoot, candidate, 'manifest.json'), 'utf8'),
+      ) as { processGroups?: number[] };
+      const groups = manifest.processGroups ?? [];
+      return groups.length > 0 ? groups : undefined;
+    });
+
+    child.kill('SIGKILL');
+    await child;
+
+    await runCli(['clean'], { cwd: project.root });
+
+    // An Epic 2 forking-timeout test leaked NINE `sleep 3600` processes onto
+    // this machine. Every process group this run recorded must be gone, and the
+    // check is the OS's answer rather than our own bookkeeping.
+    for (const pgid of pgids) {
+      expect(processGroupAlive(pgid)).toBe(false);
+    }
+  });
+});
+
+/** Polls `probe` until it returns a value, or fails with a useful message. */
+async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 15_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await probe().catch(() => undefined);
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) {
+      throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/**
+ * True when any process in `pgid` is still alive.
+ *
+ * `kill(-pgid, 0)` asks the OS rather than trusting a manifest: the point of the
+ * assertion is that the processes are gone, not that we recorded reaping them.
+ */
+function processGroupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
