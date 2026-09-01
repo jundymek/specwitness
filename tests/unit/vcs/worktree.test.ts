@@ -492,3 +492,45 @@ describe('a registration whose checkout is gone is still a registration', () => 
     ).resolves.toBeUndefined();
   });
 });
+
+describe('an unusable temp root names the remedy, not the syscall', () => {
+  it('raises the published InfraError with its hint when the container cannot be created', async () => {
+    const { repo, root } = await repoWithRoot('wt-bad-tmpdir');
+
+    // `TMPDIR` pointing at a FILE rather than a directory. Reported by predator
+    // (3.7) from the built binary, where it surfaced as
+    // `ERROR: infra: ENOTDIR: not a directory, mkdtemp '…'` with NO HINT line —
+    // `mkdtemp` was unwrapped, so the throw was a plain Error carrying no hint
+    // for the pipeline to render.
+    //
+    // The realistic causes are not exotic: a full disk (ENOSPC), a read-only or
+    // stale TMPDIR in CI (EACCES/EROFS). All are fixable in a minute IF the
+    // operator is told which one it is — and exit 3 means "fix the environment
+    // and rerun", so this is the message that says WHAT to fix. An errno naming
+    // an internal call does not.
+    const notADirectory = join(repo.path, 'first.txt');
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = notADirectory;
+    try {
+      const attempt = vcs().addWorktree(root, repo.headSha, recordNothing);
+
+      await expect(attempt).rejects.toThrow(InfraError);
+      await expect(attempt).rejects.toThrow(/could not create the verification worktree container/);
+      // The hint is the point. `printError` renders it as the `HINT:` line, and
+      // an InfraError without one leaves the operator with a diagnosis and no
+      // remedy — which the house style exists to prevent.
+      await attempt.catch((error: unknown) => {
+        expect(error).toBeInstanceOf(InfraError);
+        expect((error as InfraError).hint).toBe(
+          'check free space and permissions on the OS temp directory',
+        );
+        // The errno is kept, in the detail, where it belongs: useful to whoever
+        // reads it, but not the whole message.
+        expect((error as InfraError).message).toMatch(/ENOTDIR|not a directory/);
+      });
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
+    }
+  });
+});

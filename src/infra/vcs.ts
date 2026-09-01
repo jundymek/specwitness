@@ -389,6 +389,17 @@ async function removeEmptyContainer(worktreePath: string): Promise<void> {
   }
 }
 
+/**
+ * Best-effort message from an unknown thrown value, for error detail.
+ *
+ * Mirrors the `describe` helper in `src/infra/run-store.ts` — the same job, and
+ * that file cannot export it without becoming an import target for a reason
+ * that is not its purpose. Kept to one line so the two cannot drift.
+ */
+function describeCause(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
 /** True when the path exists and is a directory. */
 async function isDirectory(path: string): Promise<boolean> {
   try {
@@ -1012,7 +1023,33 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // a symlink and git reports the resolved form; comparing the two later
     // without this silently answers the wrong question.
     const tempRoot = await resolveReal(tmpdir());
-    const container = await resolveReal(await mkdtemp(join(tempRoot, CONTAINER_PREFIX)));
+
+    // Wrapped, because an unusable temp root is an ORDINARY environment failure
+    // and the operator needs the remedy rather than the syscall. Unwrapped, this
+    // threw a plain Error, so the pipeline classified it `infra` correctly —
+    // exit 3, fail closed — but had no `hint` to carry, and the operator saw
+    // `ENOTDIR: not a directory, mkdtemp '…'`: an internal call name, and no
+    // statement of what to do about it.
+    //
+    // The realistic causes are all mundane and all fixable in a minute once
+    // named: a full disk (ENOSPC), a read-only or noexec TMPDIR (EACCES/EROFS),
+    // a TMPDIR left pointing somewhere stale in CI. Exit 3 means "fix the
+    // environment and rerun", which makes this the message that has to say WHAT
+    // to fix. The errno is kept in the detail, where it helps whoever reads it
+    // without being the whole message.
+    //
+    // Reported by predator (3.7) from the built binary — the gap being that
+    // this module's published error pair already had the right words, and only
+    // covered `git worktree add` failing one step later.
+    let container: string;
+    try {
+      container = await resolveReal(await mkdtemp(join(tempRoot, CONTAINER_PREFIX)));
+    } catch (cause) {
+      throw new InfraError(
+        `could not create the verification worktree container under ${tempRoot}: ${describeCause(cause)}`,
+        'check free space and permissions on the OS temp directory',
+      );
+    }
     const worktreePath = join(container, WORKTREE_DIR);
 
     // Belt and braces: if a tmpdir configuration ever points inside a tree we
