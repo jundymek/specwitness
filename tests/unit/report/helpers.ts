@@ -138,3 +138,30 @@ export function runResult(overrides: Partial<RunResult> = {}): RunResult {
 
 /** Re-exported so a test can assert a marker without rebuilding one. */
 export { boundedText };
+
+/**
+ * Gate evidence whose stdout is roughly `bytes` long before capture bounds it.
+ *
+ * Parameterised on the ORIGINAL size so a test can state NFR-8 as a property:
+ * the report is the same size whether the gate emitted 64 KB or 4 MB.
+ *
+ * The content is REALISTIC multi-line log output, not `'x'.repeat(n)`. That is
+ * not cosmetic. Capture-time redaction is linear over ordinary log text (4 MB
+ * in ~50 ms) but quadratic over a long unbroken run of identifier characters,
+ * so a single-token fixture of this size takes minutes and would have made this
+ * suite look hung. The shape of the fixture has to match the shape of the thing
+ * being described, or the test measures the fixture instead.
+ */
+export function hugeGateEvidence(gateId: string, bytes: number): Evidence {
+  const line = 'ok 1 - the checkout page rejects an expired card (12ms)\n';
+  return gateEvidence({
+    capturedAt: '2026-08-31T14:25:30Z',
+    gateId,
+    status: 'fail',
+    exitCode: 1,
+    stdout: line.repeat(Math.ceil(bytes / line.length)),
+    stderr: '',
+    durationMs: 3400,
+    stdoutFullPath: `evidence/gate-${gateId}.stdout.txt`,
+  });
+}

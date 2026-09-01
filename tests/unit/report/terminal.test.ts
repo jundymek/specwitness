@@ -17,6 +17,7 @@ import {
   RUN_ID,
   criterion,
   gate,
+  hugeGateEvidence,
   runResult,
   shortGateEvidence,
   stages,
@@ -310,6 +311,48 @@ describe('bounded output', () => {
 
     const pointers = [...report.matchAll(/full output at (\S+)/g)].map((match) => match[1]);
     expect(new Set(pointers).size).toBe(pointers.length);
+  });
+
+  it('does not grow with the size of the output it describes', () => {
+    // NFR-8 stated as the property it actually is, rather than as a fixed
+    // length: a failing `npm test` can emit megabytes, and the report has to
+    // stay the same size whether it emitted 20 KB or 2 MB. Asserting only
+    // `length < 20000` would pass for a renderer that happened to be under the
+    // limit on one fixture and flood a supervisor's context window on the next.
+    //
+    // The bound comes from the cap applied at capture, not from anything this
+    // renderer decides — which is why there is no second cap here to keep in
+    // sync with the first.
+    //
+    // Both fixtures are realistic multi-line log text rather than one enormous
+    // token: capture-time redaction is linear over ordinary output but
+    // quadratic over a long unbroken identifier run, so a single-token fixture
+    // this size would take minutes and this test would look hung.
+    const small = renderTerminal(
+      runResult({
+        gates: [gate('test', 'fail')],
+        evidence: [hugeGateEvidence('test', 64_000)],
+      }),
+    );
+    const enormous = renderTerminal(
+      runResult({
+        gates: [gate('test', 'fail')],
+        evidence: [hugeGateEvidence('test', 4_000_000)],
+      }),
+    );
+
+    // Not byte-identical, and it should not be: the marker prints the ORIGINAL
+    // size, so a bigger input costs exactly the extra digits of that number.
+    // That is the report telling the truth about what it withheld. The property
+    // is that this is the ONLY way the report grows — 62x the input for a
+    // handful of characters, rather than 62x the report.
+    expect(Math.abs(enormous.length - small.length)).toBeLessThan(50);
+    expect(small).toContain('bytes shown');
+    // The marker still tells the truth about how much was withheld, and the two
+    // numbers differ by orders of magnitude even though the reports do not.
+    const bytesOf = (report: string): number =>
+      Number(/of (\d+) bytes shown/.exec(report)?.[1] ?? 0);
+    expect(bytesOf(enormous)).toBeGreaterThan(bytesOf(small) * 50);
   });
 
   it('lists a passing gate without inlining its output', () => {
