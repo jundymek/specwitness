@@ -292,6 +292,11 @@ const StageTimelineEntrySchema = z
     status: z.enum(STAGE_STATUSES),
     durationMs: z.number().int().nonnegative(),
     detail: z.string().optional(),
+    // Mirrors StageTimelineEntry.hint (story 3.3 follow-up): the AD-7 remedy from the
+    // error that ended the stage. This schema is `.strict()`, so without the mirror a run
+    // that recorded a hint SERIALIZES but cannot be parsed back - meaning exactly the
+    // error runs whose remedy was just preserved would be unreadable from storage.
+    hint: z.string().optional(),
   })
   .strict();
 

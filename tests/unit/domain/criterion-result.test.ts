@@ -287,10 +287,13 @@ describe('a human-verifiability criterion never auto-passes (Q39)', () => {
     expect(result.status).not.toBe('skipped');
   });
 
-  it('lets a probe that actually ran decide, if one ever does', () => {
-    // Epic 4/5 may adjudicate a human criterion through an explicit human-input surface.
-    // The zero-attempt rule is a floor, not an override — otherwise a recorded human
-    // judgement could never be reported.
+  it('stays needs_human even when a probe ran and its assertions held', () => {
+    // My first fix applied the rule only when there were NO attempts, reasoning that a
+    // future human-input surface should be able to report a recorded judgement. Review
+    // caught that as a silent redesign: `domain/contract.ts` says human criteria "always
+    // resolve to NEEDS_HUMAN", and that it is "a property of the contract rather than a
+    // judgement made later at run time" — attempts ARE a run-time judgement, so they
+    // cannot override it. Changing that is an ADR, not a branch in this function.
     const result = deriveCriterionResult(HUMAN_CRITERION, [
       {
         attempt: 1,
@@ -301,6 +304,22 @@ describe('a human-verifiability criterion never auto-passes (Q39)', () => {
       },
     ]);
 
-    expect(result.status).toBe('pass');
+    expect(result.status).toBe('needs_human');
+  });
+
+  it('stays needs_human even when a probe ran and its assertions FAILED', () => {
+    // The other direction, and the more tempting one to allow: a mechanical `fail` on a
+    // criterion nobody may adjudicate mechanically is still not an answer.
+    const result = deriveCriterionResult(HUMAN_CRITERION, [
+      {
+        attempt: 1,
+        observations: [],
+        assertionEvaluations: [{ description: 'copy matches the spec text', satisfied: false }],
+        evidence: [],
+        durationMs: 1,
+      },
+    ]);
+
+    expect(result.status).toBe('needs_human');
   });
 });

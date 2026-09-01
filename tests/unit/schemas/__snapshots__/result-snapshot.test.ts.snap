@@ -43,7 +43,9 @@ exports[`the persisted result.json shape (AC3, NFR-7) > matches the recorded sna
     {
       "stage": "services",
       "status": "error",
-      "durationMs": 600
+      "durationMs": 600,
+      "detail": "infra: the service never became ready",
+      "hint": "check the readiness url and raise the timeout in .specwitness/config.yaml"
     },
     {
       "stage": "data",

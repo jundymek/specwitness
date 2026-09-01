@@ -193,22 +193,29 @@ export function deriveCriterionResult(
     severity: criterion.severity,
   };
 
+  // HUMAN VERIFIABILITY DECIDES FIRST, before attempts are even looked at.
+  //
+  // `domain/contract.ts` is unconditional about this: human criteria "always resolve to
+  // NEEDS_HUMAN and never auto-PASS - that is one of only two NEEDS_HUMAN triggers in the
+  // whole product (Q39), which is why this is a PROPERTY OF THE CONTRACT rather than a
+  // judgement made later at run time". Attempts are a run-time judgement, so they cannot
+  // override it; that last clause is the whole point of the sentence.
+  //
+  // Dropping `verifiability` at the integrity stage is what made a contract whose author
+  // had written "no machine may answer this" verify PASS at exit 0. A first fix carried
+  // the field but applied it only when there were no attempts, reasoning that a future
+  // human-input surface should be able to report a recorded judgement. That was a silent
+  // redesign of a recorded decision, and review caught it: if Epic 4/5 wants a probe to
+  // adjudicate a human criterion, the way to get that is an ADR, not a branch here.
+  if (criterion.verifiability === 'human') {
+    return { ...base, status: 'needs_human' };
+  }
+
   const final = attempts.at(-1);
   if (final === undefined) {
-    // Nothing ran. For an `automated` criterion that is `skipped` - inert by definition,
-    // and the case every criterion of a gates-only run reaches.
-    //
-    // For a `human` criterion it is NEEDS_HUMAN, and that distinction is the whole reason
-    // `verifiability` is carried this far. Q39 fixes human verifiability as one of exactly
-    // two NEEDS_HUMAN triggers, and `domain/contract.ts` states the consequence in its own
-    // words: human criteria "always resolve to NEEDS_HUMAN and never auto-PASS - that is
-    // why this is a property of the contract rather than a judgement made later at run
-    // time". `skipped` is inert in aggregation, so returning it here made a contract whose
-    // author had written "no machine may answer this" verify PASS at exit 0.
-    //
-    // It does not wait for Epic 4: nothing about it depends on probes existing. A run that
-    // executed no probes has still not had a person look.
-    return { ...base, status: criterion.verifiability === 'human' ? 'needs_human' : 'skipped' };
+    // Nothing ran. Inert by definition, and the case every automated criterion of a
+    // gates-only run reaches.
+    return { ...base, status: 'skipped' };
   }
 
   const status = outcomeOf(final);

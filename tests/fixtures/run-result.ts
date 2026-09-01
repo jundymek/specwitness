@@ -149,6 +149,16 @@ export function fullyPopulatedRunResult(): RunResult {
               : ('skipped' as const),
       durationMs: index < 5 || stage === 'services' ? (index + 1) * 100 : 0,
       ...(stage === 'gates' ? { detail: "gate 'lint' failed" } : {}),
+      // The `services` stage carries BOTH halves of the house style, so the persisted
+      // document proves a stored run can round-trip an ERROR/HINT pair. Without the hint
+      // mirrored into the strict schema, such a run serialized but could not be parsed
+      // back - i.e. exactly the error runs whose remedy had just been preserved.
+      ...(stage === 'services'
+        ? {
+            detail: 'infra: the service never became ready',
+            hint: 'check the readiness url and raise the timeout in .specwitness/config.yaml',
+          }
+        : {}),
     })),
     // One gate of each GateStatus.
     gates: [
