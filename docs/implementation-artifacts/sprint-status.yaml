@@ -55,7 +55,7 @@ development_status:
   2-8-hermetic-dependency-rules-test: done
   epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: done
   3-1-revision-resolution-isolated-worktree: done
   # follow-up PR keys of story 3.1 (distinct branch names; added at closure so the measurement can see them):
   3-1-fix-isregistered-canonicalisation: done
