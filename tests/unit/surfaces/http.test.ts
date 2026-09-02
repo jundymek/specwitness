@@ -427,6 +427,77 @@ describe('malformed params (a wiring defect, never an execError)', () => {
     });
   }
 
+  const malformedProbe: { why: string; probe: Record<string, unknown> }[] = [
+    { why: 'a probe with no id', probe: { id: undefined } },
+    { why: 'a probe whose id is not a string', probe: { id: 7 } },
+    { why: 'a probe whose id is blank', probe: { id: '   ' } },
+  ];
+
+  for (const { why, probe: overrides } of malformedProbe) {
+    it(`throws InfraError before any I/O: ${why}`, async () => {
+      // `probe.id` is only read by `evidenceStem` AFTER the request, so an unchecked id threw a
+      // raw TypeError inside slugify at that point — past the pre-I/O guarantee, leaving a run
+      // that really touched the network with no evidence and no classification.
+      const { baseUrl, received } = await jsonFixture({ ok: true });
+
+      await expect(
+        harness().executor.execute({
+          criterionId: 'E4-01',
+          surface: 'http',
+          params: {
+            probe: {
+              ...probe([assertion({ source: 'status' }, 'equals', '200')]),
+              ...overrides,
+            },
+            baseUrl,
+          },
+        }),
+      ).rejects.toBeInstanceOf(InfraError);
+
+      expect(received).toHaveLength(0);
+    });
+  }
+
+  it('refuses a path carrying a fragment, which would never reach the server', async () => {
+    // `/orders#admin` is schema-valid, but fetch sends only `/orders` while the captured url,
+    // the observations and the report all say `/orders#admin` — a verdict describing an
+    // endpoint the probe never touched.
+    const { baseUrl, received } = await jsonFixture({ ok: true });
+
+    await expect(
+      run(
+        harness().executor,
+        baseUrl,
+        probe([assertion({ source: 'status' }, 'equals', '200')], { path: '/orders#admin' }),
+      ),
+    ).rejects.toBeInstanceOf(InfraError);
+
+    expect(received).toHaveLength(0);
+  });
+
+  it('redacts every untrusted value it quotes back in a rejection', async () => {
+    // A rejection message reaches stderr through printError, so a caller-supplied value quoted
+    // into it is persistence like any other. The unsupported-path message interpolated the raw
+    // path, bypassing the redaction its neighbours applied.
+    const opaque = 'pppp-opaque-rejected-pppp';
+    const { executor } = harness({ redaction: { extraPatterns: [new RegExp(opaque, 'g')] } });
+
+    await expect(
+      executor.execute({
+        criterionId: 'E4-01',
+        surface: 'http',
+        params: {
+          probe: probe([
+            assertion({ source: 'jsonPath', path: `$..${opaque}` }, 'equals', 'x'),
+          ]),
+          baseUrl: 'http://127.0.0.1:1',
+        },
+      }),
+    ).rejects.toThrow(
+      expect.objectContaining({ message: expect.not.stringContaining(opaque) as unknown }),
+    );
+  });
+
   it('still accepts an ordinary path, headers and body', async () => {
     // The other half of a validator: over-refusal is its own defect, and a guard that only
     // proves things are rejected cannot tell a correct rule from one that rejects everything.
@@ -736,7 +807,20 @@ describe('a value that is not there (AC1)', () => {
 /* ── Task 2: an unsupported JSON path is a TOOLING gap, never a product failure ─────── */
 
 describe('JSON-path syntax outside the implemented subset', () => {
-  const unsupported = ['$..id', '$.items[*].id', '$.items[?(@.id)]', '$.items[0:2]'];
+  const unsupported = [
+    '$..id',
+    '$.items[*].id',
+    '$.items[?(@.id)]',
+    '$.items[0:2]',
+    // A DANGLING SEPARATOR IS THE DANGEROUS ONE: `$.user.` used to parse as `user`, so the
+    // executor evaluated a DIFFERENT path than the plan declared and a `notEquals` against the
+    // wrong value could report a PASS. A path that does not mean what it says is worse than one
+    // that fails to parse, because nothing surfaces it.
+    '$.user.',
+    'a.',
+    '$.',
+    '$.a..b',
+  ];
 
   for (const path of unsupported) {
     it(`refuses '${path}' before any request is issued`, async () => {

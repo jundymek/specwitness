@@ -418,6 +418,10 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
   }
 
   let expectSeparator = false;
+  // Set by a `.`, cleared by the key that must follow it. If the loop ends with this still
+  // set, the path finished on a dangling separator.
+  let awaitingKey = false;
+
   while (index < path.length) {
     const char = path[index];
 
@@ -427,8 +431,17 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
       if (path[index + 1] === '.') {
         return undefined;
       }
+      // A SEPARATOR MUST BE FOLLOWED BY A KEY. Without this, `$.user.` parsed as `user`, so
+      // the executor would silently evaluate a DIFFERENT path than the plan declared — and a
+      // `notEquals` against the wrong value can report a PASS. A path that does not mean what
+      // it says is worse than one that fails to parse, because nothing surfaces it. Found in
+      // review.
+      if (awaitingKey) {
+        return undefined;
+      }
       index += 1;
       expectSeparator = false;
+      awaitingKey = true;
       continue;
     }
 
@@ -445,6 +458,7 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
       steps.push(step);
       index = close + 1;
       expectSeparator = true;
+      awaitingKey = false;
       continue;
     }
 
@@ -464,9 +478,12 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
     }
     steps.push({ kind: 'key', name });
     index = end;
+    awaitingKey = false;
   }
 
-  return steps.length === 0 ? undefined : steps;
+  // A trailing `.` leaves this set: `$.user.` and `a.` are refused rather than silently read
+  // as `user` and `a`.
+  return steps.length === 0 || awaitingKey ? undefined : steps;
 }
 
 /** `0` -> an index; `'a'` / `"a"` -> a key; anything else is outside the subset. */
@@ -926,8 +943,20 @@ function validateParams(
   }
   if (probe.surface !== 'http') {
     return fail(
-      `the probe declares surface '${String(probe.surface)}', not 'http'`,
+      `the probe declares surface '${redact(String(probe.surface))}', not 'http'`,
       'route each probe to the executor whose surface matches; this is a wiring defect, not a plan error',
+    );
+  }
+
+  // `probe.id` is read by `evidenceStem` only AFTER the request has been issued, so an id that
+  // is missing or not a string threw a raw `TypeError` inside `slugify` at that point — past
+  // the pre-I/O guarantee, leaving a run that really touched the network with no evidence and
+  // no classification. Same shape as the header-name finding, same remedy: check it where the
+  // promise is made. Found in review.
+  if (typeof probe.id !== 'string' || probe.id.trim() === '') {
+    return fail(
+      "the probe has no string 'id'",
+      'a probe id names the probe within its criterion and is part of every evidence filename',
     );
   }
 
@@ -937,7 +966,7 @@ function validateParams(
   }
   if (!HTTP_METHODS.includes(mechanics.method)) {
     return fail(
-      `method '${String(mechanics.method)}' is not one of the declared HTTP methods`,
+      `method '${redact(String(mechanics.method))}' is not one of the declared HTTP methods`,
       `HTTP_METHODS is closed: ${HTTP_METHODS.join(', ')}`,
     );
   }
@@ -949,6 +978,18 @@ function validateParams(
   // are normalised or percent-encoded and SENT, instead of being refused as the wiring defect
   // they are. Found in review. Re-validating at all is not redundant: `params` arrives untyped,
   // so this executor's guarantee must not depend on which validator ran upstream.
+  // A FRAGMENT IS NOT SENT, SO IT MAKES THE EVIDENCE LIE. `/orders#admin` is schema-valid, but
+  // `fetch` transmits only `/orders` while the captured url, the observations and the report
+  // all say `/orders#admin`. The verdict would describe an endpoint the probe never touched —
+  // a faithful-evidence failure, which is the thing this module's evidence path exists to
+  // prevent. Refused rather than stripped: silently dropping it would issue a request the plan
+  // did not declare. Found in review.
+  if (typeof path === 'string' && path.includes('#')) {
+    return fail(
+      `path '${redact(path)}' contains a fragment`,
+      'a fragment is never sent to a server, so a probe naming one would be adjudicated against a different endpoint than it reports — percent-encode it as %23 if the path genuinely contains a hash',
+    );
+  }
   if (typeof path !== 'string' || !RELATIVE_PATH.test(path)) {
     return fail(
       `path '${redact(String(path))}' is not service-relative`,
@@ -1036,7 +1077,7 @@ function validateParams(
     }
     if (!ASSERTION_COMPARISONS.includes(assertion.comparison)) {
       fail(
-        `${at} declares comparison '${String(assertion.comparison)}'`,
+        `${at} declares comparison '${redact(String(assertion.comparison))}'`,
         `ASSERTION_COMPARISONS is closed: ${ASSERTION_COMPARISONS.join(', ')}`,
       );
       return;
@@ -1054,7 +1095,7 @@ function validateParams(
     const source = (target as { source?: unknown }).source;
     if (!HTTP_ASSERTION_SOURCES.includes(source as string)) {
       fail(
-        `${at} reads from '${String(source)}', which is not an http assertion target`,
+        `${at} reads from '${redact(String(source))}', which is not an http assertion target`,
         `HttpAssertionTarget is a closed union: ${HTTP_ASSERTION_SOURCES.join(', ')}`,
       );
       return;
@@ -1086,7 +1127,7 @@ function validateParams(
       // surfacing as an unsatisfied assertion about the branch under verification.
       if (parseJsonPath(path) === undefined) {
         fail(
-          `json path '${path}' uses syntax this executor does not implement`,
+          `json path '${redact(path)}' uses syntax this executor does not implement`,
           "supported: a dotted path with array indices and bracketed quoted keys, e.g. '$.data.items[0].id'. Recursive descent, wildcards, filters and slices are not implemented — rewrite the path, or raise an additive follow-up",
         );
       }
@@ -1112,7 +1153,7 @@ function validateParams(
   const attempt = params.attempt ?? 1;
   if (!Number.isInteger(attempt) || attempt < 1) {
     return fail(
-      `attempt '${String(params.attempt)}' is not a positive integer`,
+      `attempt '${redact(String(params.attempt))}' is not a positive integer`,
       'attempt numbers are 1-based; the executor runs exactly one attempt per call and never increments it',
     );
   }
