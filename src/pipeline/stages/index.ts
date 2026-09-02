@@ -15,6 +15,7 @@
 import type { Stage } from '../stage.js';
 import { createAggregateStage } from './aggregate.js';
 import { createDataStage } from './data.js';
+import type { DataStageDeps } from './data.js';
 import { createGatesStage, createUnwiredGatesStage } from './gates.js';
 import type { GatesStageDeps } from './gates.js';
 import { createIntegrityStage } from './integrity.js';
@@ -87,6 +88,26 @@ export interface StageDependencies {
    * `TeardownDeps.release` below, BEFORE removing the worktree.
    */
   readonly services?: ServicesStageDeps;
+  /**
+   * The declared `data.*` commands plus the runner and evidence writer they need (story 4.3).
+   *
+   * Optional only because the CLI edge that binds it arrives in story 4.7. A run assembled
+   * without it runs no data commands and SAYS SO in its timeline — the same choice `services`
+   * makes above, and deliberately NOT the fail-closed refusal `gates` uses: an empty gate set
+   * aggregates to PASS, so an unwired gates run would read as a green build, whereas data
+   * commands adjudicate nothing and cannot manufacture a verdict on their own.
+   *
+   * Note the interaction with `worktree`, which is the same one gates and services have, and
+   * sharper: data commands run in the worktree, so a run that binds data without binding the
+   * worktree seam raises an `InfraError` rather than falling back to the source repo. A
+   * `data.reset` command plausibly drops a schema, so that fallback would not merely verify the
+   * wrong tree — it would modify the operator's working directory.
+   *
+   * Unlike `gates`, `writeEvidence` is OPTIONAL inside this object: a data command's output
+   * corroborates a step that produces no verdict, so without a writer the stage still records
+   * bounded inline evidence and only the pointer to a full copy is lost.
+   */
+  readonly data?: DataStageDeps;
   /** Releases the worktree and the process group. Stories 3.1 and 3.2 bind it. */
   readonly teardown?: TeardownDeps;
   /**
@@ -109,7 +130,7 @@ export function createStages(deps: StageDependencies): Stage[] {
     createSetupStage(),
     deps.gates === undefined ? createUnwiredGatesStage() : createGatesStage(deps.gates),
     createServicesStage(deps.services),
-    createDataStage(),
+    createDataStage(deps.data),
     createProbesStage(),
     createAggregateStage(),
     createPersistStage(deps.persist ?? {}),
