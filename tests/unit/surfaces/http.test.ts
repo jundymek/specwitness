@@ -303,6 +303,72 @@ describe('malformed params (a wiring defect, never an execError)', () => {
     });
   }
 
+  const malformedAssertions: { why: string; assertions: unknown[] }[] = [
+    { why: 'an assertion that is not an object', assertions: [null] },
+    {
+      why: 'an assertion with no target at all',
+      assertions: [{ description: 'd', comparison: 'equals', expected: '200' }],
+    },
+    {
+      why: 'an assertion whose target is not an object',
+      assertions: [{ description: 'd', comparison: 'equals', expected: '200', target: 'status' }],
+    },
+    { why: 'an empty assertion object', assertions: [{}] },
+    {
+      why: 'a target reading from an unknown source',
+      assertions: [
+        { description: 'd', comparison: 'equals', expected: 'x', target: { source: 'cookies' } },
+      ],
+    },
+    {
+      why: 'a header assertion with no header name',
+      assertions: [
+        { description: 'd', comparison: 'equals', expected: 'x', target: { source: 'header' } },
+      ],
+    },
+    {
+      why: 'a jsonPath assertion with no path',
+      assertions: [
+        { description: 'd', comparison: 'equals', expected: 'x', target: { source: 'jsonPath' } },
+      ],
+    },
+    {
+      why: 'an unknown comparison',
+      assertions: [
+        { description: 'd', comparison: 'matches', expected: 'x', target: { source: 'status' } },
+      ],
+    },
+    {
+      why: 'a non-string expected',
+      assertions: [
+        { description: 'd', comparison: 'equals', expected: 200, target: { source: 'status' } },
+      ],
+    },
+  ];
+
+  for (const { why, assertions } of malformedAssertions) {
+    it(`throws InfraError, never a raw TypeError: ${why}`, async () => {
+      // `params` is `Readonly<Record<string, unknown>>`, so nothing has type-checked its
+      // interior. Dereferencing an assertion's target without a shape check threw a raw
+      // TypeError — neither an InfraError nor classified at all, escaping the one contract
+      // this validation exists to keep.
+      const { baseUrl, received } = await jsonFixture({ ok: true });
+
+      await expect(
+        harness().executor.execute({
+          criterionId: 'E4-01',
+          surface: 'http',
+          params: {
+            probe: { ...probe([assertion({ source: 'status' }, 'equals', '200')]), assertions },
+            baseUrl,
+          },
+        }),
+      ).rejects.toBeInstanceOf(InfraError);
+
+      expect(received).toHaveLength(0);
+    });
+  }
+
   it('never issues a request when the params are malformed', async () => {
     const { baseUrl, received } = await jsonFixture({ ok: true });
     await expect(

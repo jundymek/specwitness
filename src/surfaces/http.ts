@@ -222,7 +222,7 @@ import type {
   ProbeRequest,
   SurfaceExecutor,
 } from '../domain/criterion-result.js';
-import { HTTP_METHODS } from '../domain/plan.js';
+import { ASSERTION_COMPARISONS, HTTP_METHODS } from '../domain/plan.js';
 import type {
   Assertion,
   AssertionComparison,
@@ -265,6 +265,14 @@ export const HTTP_PROBE_TIMEOUT_MS = 30_000;
  * rather than pretending the whole body was seen.
  */
 export const HTTP_BODY_READ_CAP_BYTES = 1_048_576;
+
+/**
+ * The `source` discriminants `HttpAssertionTarget` admits.
+ *
+ * Listed here because the union is a TYPE and params arrive untyped, so the discriminant has
+ * to be checkable at run time before anything is read from a target.
+ */
+const HTTP_ASSERTION_SOURCES: readonly string[] = ['status', 'header', 'body', 'jsonPath'];
 
 /** The run-directory subfolder every evidence file lives in (Q50), shared with gates. */
 const EVIDENCE_DIR = 'evidence';
@@ -957,16 +965,71 @@ function validateParams(
     );
   }
 
-  // Every JSON path is parsed NOW, so an unsupported one is refused before a request is
-  // issued rather than surfacing as an unsatisfied assertion about the branch.
-  for (const assertion of probe.assertions) {
-    if (assertion.target.source === 'jsonPath' && parseJsonPath(assertion.target.path) === undefined) {
-      return fail(
-        `json path '${assertion.target.path}' uses syntax this executor does not implement`,
-        "supported: a dotted path with array indices and bracketed quoted keys, e.g. '$.data.items[0].id'. Recursive descent, wildcards, filters and slices are not implemented — rewrite the path, or raise an additive follow-up",
-      );
+  // EVERY ASSERTION IS SHAPE-CHECKED BEFORE IT IS DEREFERENCED.
+  //
+  // `ProbeRequest.params` is `Readonly<Record<string, unknown>>`, so nothing has type-checked
+  // its interior — and this function's whole promise is that a malformed params object throws
+  // `InfraError` BEFORE any I/O. Reading `assertion.target.source` without checking threw a raw
+  // `TypeError` for something as ordinary as `{assertions: [{}]}`: neither an InfraError nor
+  // classified at all, escaping the one contract this function exists to keep. Found in review.
+  probe.assertions.forEach((assertion, index) => {
+    const at = `assertions[${index}]`;
+    if (assertion === null || typeof assertion !== 'object') {
+      fail(`${at} is not an object`, 'compile the plan with the merged plan schema');
+      return;
     }
-  }
+    if (typeof assertion.description !== 'string' || typeof assertion.expected !== 'string') {
+      fail(
+        `${at} is missing a string 'description' or 'expected'`,
+        'both are copied verbatim into the recorded AssertionEvaluation, so both must be strings',
+      );
+      return;
+    }
+    if (!ASSERTION_COMPARISONS.includes(assertion.comparison)) {
+      fail(
+        `${at} declares comparison '${String(assertion.comparison)}'`,
+        `ASSERTION_COMPARISONS is closed: ${ASSERTION_COMPARISONS.join(', ')}`,
+      );
+      return;
+    }
+
+    const target: unknown = assertion.target;
+    if (target === null || typeof target !== 'object') {
+      fail(
+        `${at} has no 'target'`,
+        'each assertion names what to read: status, header, body or jsonPath',
+      );
+      return;
+    }
+
+    const source = (target as { source?: unknown }).source;
+    if (!HTTP_ASSERTION_SOURCES.includes(source as string)) {
+      fail(
+        `${at} reads from '${String(source)}', which is not an http assertion target`,
+        `HttpAssertionTarget is a closed union: ${HTTP_ASSERTION_SOURCES.join(', ')}`,
+      );
+      return;
+    }
+    if (source === 'header' && typeof (target as { name?: unknown }).name !== 'string') {
+      fail(`${at} is a header assertion with no header name`, "add 'name' to the assertion's target");
+      return;
+    }
+    if (source === 'jsonPath') {
+      const path = (target as { path?: unknown }).path;
+      if (typeof path !== 'string') {
+        fail(`${at} is a jsonPath assertion with no path`, "add 'path' to the assertion's target");
+        return;
+      }
+      // Parsed NOW, so an unsupported path is refused before a request is issued rather than
+      // surfacing as an unsatisfied assertion about the branch under verification.
+      if (parseJsonPath(path) === undefined) {
+        fail(
+          `json path '${path}' uses syntax this executor does not implement`,
+          "supported: a dotted path with array indices and bracketed quoted keys, e.g. '$.data.items[0].id'. Recursive descent, wildcards, filters and slices are not implemented — rewrite the path, or raise an additive follow-up",
+        );
+      }
+    }
+  });
 
   const baseUrl = params.baseUrl;
   if (typeof baseUrl !== 'string' || baseUrl === '') {
