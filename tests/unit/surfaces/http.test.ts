@@ -427,6 +427,34 @@ describe('malformed params (a wiring defect, never an execError)', () => {
     });
   }
 
+  const malformedServiceId: { why: string; mechanics: Record<string, unknown> }[] = [
+    { why: 'no serviceId', mechanics: { serviceId: undefined } },
+    { why: 'a non-string serviceId', mechanics: { serviceId: 7 } },
+    { why: 'a blank serviceId', mechanics: { serviceId: '  ' } },
+  ];
+
+  for (const { why, mechanics } of malformedServiceId) {
+    it(`throws InfraError before any I/O: ${why}`, async () => {
+      // The executor never READS serviceId — the caller resolved baseUrl from it already — but
+      // a probe arriving without one is associated with no declared service, and issuing it
+      // would mean running something the AD-3 chain cannot account for.
+      const { baseUrl, received } = await jsonFixture({ ok: true });
+
+      await expect(
+        harness().executor.execute({
+          criterionId: 'E4-01',
+          surface: 'http',
+          params: {
+            probe: probe([assertion({ source: 'status' }, 'equals', '200')], mechanics),
+            baseUrl,
+          },
+        }),
+      ).rejects.toBeInstanceOf(InfraError);
+
+      expect(received).toHaveLength(0);
+    });
+  }
+
   const malformedProbe: { why: string; probe: Record<string, unknown> }[] = [
     { why: 'a probe with no id', probe: { id: undefined } },
     { why: 'a probe whose id is not a string', probe: { id: 7 } },
@@ -861,6 +889,20 @@ describe('JSON-path syntax outside the implemented subset', () => {
     'a.',
     '$.',
     '$.a..b',
+    // A bracket may not follow a dot: `items.[0]` was read as `items[0]`.
+    'items.[0].id',
+    '$.items.[0]',
+    "$.a.['b']",
+    // A leading dot is neither the rooted form ($.user) nor the bare form (user).
+    '.user',
+    '.a.b',
+    // Unclosed, empty and non-numeric brackets.
+    'a[',
+    "a['b",
+    "a['']",
+    'a[]',
+    'a[-1]',
+    'a[0]b',
   ];
 
   for (const path of unsupported) {

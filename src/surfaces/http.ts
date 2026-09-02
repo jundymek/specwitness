@@ -417,6 +417,10 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
     return undefined;
   }
 
+  // Whether a `$` root was consumed. A leading `.` is legal only after it — `.user` is neither
+  // the rooted form (`$.user`) nor the bare form (`user`), and accepting it as a synonym is one
+  // more way a path can mean something its author did not write.
+  const rooted = index === 1;
   let expectSeparator = false;
   // Set by a `.`, cleared by the key that must follow it. If the loop ends with this still
   // set, the path finished on a dangling separator.
@@ -436,7 +440,7 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
       // `notEquals` against the wrong value can report a PASS. A path that does not mean what
       // it says is worse than one that fails to parse, because nothing surfaces it. Found in
       // review.
-      if (awaitingKey) {
+      if (awaitingKey || (steps.length === 0 && !rooted)) {
         return undefined;
       }
       index += 1;
@@ -446,6 +450,15 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
     }
 
     if (char === '[') {
+      // A BRACKET MAY NOT FOLLOW A DOT. `items.[0].id` was read as `items[0].id` — the same
+      // silent-wrong-path defect as the trailing separator, in the one state the first fix did
+      // not cover. Stated as the full rule so it stops being patched case by case: after a `.`
+      // the ONLY legal next step is a bare key; after a key, either `.` or `[`; after a
+      // bracket, `.` or `[` but never a bare key (which `expectSeparator` already refuses).
+      if (awaitingKey) {
+        return undefined;
+      }
+
       const quote = path[index + 1];
 
       // A QUOTED KEY IS SCANNED, NOT SPLIT ON THE FIRST `]`.
@@ -1016,6 +1029,18 @@ function validateParams(
   if (mechanics === undefined || typeof mechanics !== 'object') {
     return fail("the probe carries no 'mechanics'", 'compile the plan with the merged plan schema');
   }
+  // `serviceId` is what ties this probe to a DECLARED service (AD-3). The executor never reads
+  // it — the caller resolved `baseUrl` from it already — but a probe arriving without one is a
+  // probe associated with no declared service, and issuing it would mean the executor had run
+  // something the AD-3 chain cannot account for. Checked here rather than trusted, because
+  // params reaching this function may not have come from the plan parser. Found in review.
+  if (typeof mechanics.serviceId !== 'string' || mechanics.serviceId.trim() === '') {
+    return fail(
+      "the probe has no string 'mechanics.serviceId'",
+      'an http probe names a declared service; the caller resolves that id into the base URL it passes in',
+    );
+  }
+
   if (!HTTP_METHODS.includes(mechanics.method)) {
     return fail(
       `method '${redact(String(mechanics.method))}' is not one of the declared HTTP methods`,
