@@ -739,35 +739,54 @@ function slugify(id: string): string {
  * This executor sees one probe per call and has no index, so the discriminator is derived
  * from the identity itself.)
  *
- * SHA-256 over `criterionId` + probe id, truncated to 24 hex characters (96 bits).
+ * SHA-256 over `criterionId` + probe id, the FULL hex digest, untruncated (owner ruling,
+ * 2026-09-02, superseding two narrower widths this file shipped).
+ *
  * Deterministic, which is load-bearing rather than incidental: two runs of the same plan must
  * produce byte-identical evidence paths, or a run directory stops being comparable across runs.
  *
- * IT IS A SECURITY CONTROL, and the first two versions of this comment denied it. A plan is
+ * IT IS A SECURITY CONTROL, and an early version of this comment denied it. A plan is
  * PROVIDER-AUTHORED, so the ids are chosen by whoever wrote it — a colliding pair is a chosen
  * input, not an unlucky one, and the consequence is that one probe's evidence silently replaces
  * another's while the stale reference still resolves.
  *
- * WHY 96 BITS AND NOT 48. A birthday collision costs ~2^(n/2) candidates, and that is cheap
- * far longer than it looks. Measured on this function rather than reasoned about:
+ * WHY NO TRUNCATION, stated as a correction because BOTH of the earlier justifications were
+ * wrong and deleting them would hide the more useful half.
+ *
+ * A birthday collision costs ~2^(n/2) candidates, which stays cheap far longer than it looks.
+ * Measured on this function rather than reasoned about:
  *
  *     32 bits -> collision after     81,757 candidates in     57ms
  *     40 bits -> collision after  2,097,109 candidates in  1,932ms
  *     48 bits -> ~16.7M candidates, ~30s by extrapolation
  *
- * So the 32-bit FNV this file shipped first was seconds of work, and the 48-bit interim digest
- * was still under a minute. 96 bits puts it at ~2^48, which is infeasible rather than merely
- * unlikely — the property that actually matters when the input is chosen. The shell surface
- * (4.6) reached 24 characters independently; this now matches it. **The http surface (4.4) is
- * merged at 12 and is therefore the remaining outlier**, reported rather than edited here.
+ *  - The FIRST justification ("not a security control, so a short non-cryptographic digest is
+ *    the right tool") was wrong about the threat: the ids are chosen, not incidental.
+ *  - The SECOND ("96 bits is infeasible, and it matches the shell surface") was wrong about the
+ *    method. It was true as arithmetic, but it was reached by matching a peer rather than by
+ *    asking what the truncation buys — and it bought nothing. Truncating a digest trades
+ *    collision resistance for filename bytes, and this stem has bytes to spare, so the trade
+ *    had no upside to weigh against the risk. Where two peer precedents disagreed (12 and 24),
+ *    "match the peers" was a coin flip wearing the costume of a decision procedure.
  *
- * The 48-bit interim was not an oversight so much as a misplaced tie-break: three surfaces had
- * three widths, and matching the wrong one for uniformity's sake shipped the weaker number.
- * Uniformity is worth having, but not at the width the security argument rejects.
+ * SO THE WIDTH IS NOT A JUDGEMENT ANY MORE. There is no number here to get wrong, which is the
+ * point of the ruling: a truncation length is a parameter somebody must justify every time it is
+ * read, and the full digest is a parameter nobody has to.
+ *
+ * IT FITS, verified for THIS stem rather than copied from another surface's figure. Worst case
+ * is the filename COMPONENT — `evidence/` is a directory and does not count toward the 255-byte
+ * limit on APFS and ext4:
+ *
+ *     observation- (12) + criterionSlug (48) + '-' + probeSlug (48) + '-' + digest (64)
+ *                       + '-' + phase (8, "snapshot") + '-' + attempt (4 digits) + '.stdout.txt' (11)
+ *                       = 199 bytes, leaving 56 spare.
+ *
+ * `slugify` substitutes everything outside `[A-Za-z0-9._-]`, so every byte is single-byte by
+ * construction and bytes equal characters — the assumption that would otherwise break this sum.
  */
 function discriminator(criterionId: string, probeId: string): string {
   // The separator is a character `Identifier` forbids, so the concatenation is unambiguous.
-  return createHash('sha256').update(`${criterionId} ${probeId}`, 'utf8').digest('hex').slice(0, 24);
+  return createHash('sha256').update(`${criterionId} ${probeId}`, 'utf8').digest('hex');
 }
 
 export class ObservationSurfaceExecutor implements SurfaceExecutor {

@@ -133,7 +133,7 @@ describe('`id` is canonical; `probeId` is an explicit alias', () => {
 });
 
 describe('the discriminator resists a CHOSEN collision, not merely a chance one', () => {
-  it('carries a 24-character hex digest — wide enough to resist a CHOSEN collision', async () => {
+  it('carries the FULL sha256 digest — wide enough to resist a CHOSEN collision', async () => {
     // ASSERTS THE PROPERTY, NOT THE FORMULA. Recomputing sha256(criterion + probe) here
     // would MIRROR the implementation rather than check it — the two would agree even if
     // both were wrong, which is the same self-consistency trap that let the probeId
@@ -143,11 +143,42 @@ describe('the discriminator resists a CHOSEN collision, not merely a chance one'
     const { evidence } = await execute({ ...REAL_PROBE });
     const name = evidence.files[0]?.name ?? '';
 
-    expect(name).toMatch(/-[0-9a-f]{24}-snapshot-1\./);
+    expect(name).toMatch(/-[0-9a-f]{64}-snapshot-1\./);
     // Nothing as narrow as the old digest may appear again.
-    // Neither the original 7-char base36 hash nor the 12-char (48-bit) interim width.
+    // No truncated width may return: not the original 7-char base36 hash, and not either
+    // of the two truncations this file shipped (12 and 24 hex).
     expect(name).not.toMatch(/-[0-9a-z]{7}-snapshot-1\./);
     expect(name).not.toMatch(/-[0-9a-f]{12}-snapshot-1\./);
+    expect(name).not.toMatch(/-[0-9a-f]{24}-snapshot-1\./);
+  });
+
+  it('keeps the WORST-CASE filename inside the 255-byte component limit', async () => {
+    // The untruncated digest is only safe because this stem has the bytes to spare, so the
+    // headroom is pinned rather than asserted once in a comment. Computed for THIS stem —
+    // observation carries a phase and an attempt that the other surfaces do not — rather than
+    // copied from another surface's figure.
+    //
+    //   observation-(12) + criterionSlug(48) + '-' + probeSlug(48) + '-' + digest(64)
+    //   + '-' + 'snapshot'(8) + '-' + attempt + '.stdout.txt'(11)
+    //
+    // `evidence/` is a DIRECTORY, so it does not count toward the component limit, and
+    // `slugify` emits only [A-Za-z0-9._-] so bytes equal characters.
+    const maximal = 'z'.repeat(200); // far past the 48-char slug budget, so both slugs saturate
+    const { evidence } = await execute({
+      ...REAL_PROBE,
+      id: maximal,
+      attempt: 9999,
+    });
+
+    expect(evidence.files.length).toBeGreaterThan(0);
+    for (const file of evidence.files) {
+      const component = file.name.slice(file.name.lastIndexOf('/') + 1);
+      const bytes = Buffer.byteLength(component, 'utf8');
+      expect(bytes).toBeLessThanOrEqual(255);
+      // Pin the headroom too: a future stem change that eats it should fail here rather than
+      // on somebody's filesystem with ENAMETOOLONG, which arrives as exit 3 for a good run.
+      expect(bytes).toBeLessThanOrEqual(210);
+    }
   });
 
   it('separates two ids that share a prefix past the slug budget', async () => {
