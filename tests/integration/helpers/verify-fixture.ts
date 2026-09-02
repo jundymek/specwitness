@@ -137,9 +137,30 @@ function gateScript(behaviour: GateBehaviour, runsRoot: string): string {
         'process.exit(1);\n'
       );
     case 'slow':
-      // Never resolves on its own: the kill-mid-run proof needs a run that is
-      // still holding a worktree and a process group when SIGKILL arrives.
-      return "process.stdout.write('gate started\\n');\nsetInterval(() => {}, 1000);\n";
+      // Does not resolve on its own within any test's lifetime: the kill-mid-run
+      // proof needs a run that is still holding a worktree and a process group
+      // when the signal arrives.
+      //
+      // BOUNDED AT TEN MINUTES RATHER THAN IMMORTAL, which is a change story 4.7
+      // made after measuring the consequence of the old form. This gate runs in
+      // its own DETACHED process group, so it survives the death of the
+      // `specwitness` process that started it; that is the point, and it is what
+      // `specwitness clean` exists to reap. But when a test RUN is killed
+      // outright — a timeout, a superseded auto-review, a Ctrl+C — no `afterEach`
+      // executes, nothing reaps anything, and an immortal gate then lives until
+      // the machine reboots. Twenty-nine such processes were found on this
+      // machine while writing this story, the oldest more than a day old.
+      //
+      // No test is affected: every one that uses this gate signals or reaps it
+      // within seconds, and ten minutes is far beyond any of them. The property
+      // the fixture actually needs is "does not end on its own DURING the test",
+      // not "never ends" — and the difference between those two is whether a
+      // killed test run leaves permanent garbage or self-healing garbage.
+      return (
+        "process.stdout.write('gate started\\n');\n" +
+        'const timer = setInterval(() => {}, 1000);\n' +
+        'setTimeout(() => { clearInterval(timer); process.exit(0); }, 600000).unref?.();\n'
+      );
     case 'spawn-marker':
       // Records that it ran AT ALL. Used where the assertion is that nothing was
       // spawned — a refusal that reaches a gate is a refusal that came too late.

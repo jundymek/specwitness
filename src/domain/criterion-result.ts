@@ -147,6 +147,38 @@ export interface DerivedCriterionResult extends CriterionResult {
   readonly evidence?: readonly EvidenceRef[];
 }
 
+/**
+ * What one derivation needs to know beyond the contract and the attempts.
+ *
+ * Extends `RedactionOptions` rather than sitting beside it so that every existing call
+ * site — two or three arguments, `RedactionOptions` in the third — keeps compiling
+ * unchanged, and so there is still exactly ONE options bag reaching the single producer.
+ */
+export interface DerivationOptions extends RedactionOptions {
+  /**
+   * The executed PLAN carried this criterion as `needs-human` rather than mapping it to
+   * probes — Q38's `not-safely-automatable`, the second of Q39's two triggers.
+   *
+   * THIS IS A SEAM DEFECT'S FIX, and the defect is worth stating because the shape of it
+   * recurs. `domain/plan.ts` is explicit that `not-safely-automatable` is one of "Q39's
+   * TWO — and only two — NEEDS_HUMAN triggers", and that such a criterion is "recorded,
+   * surfaced in the report, and never silently dropped". But the disposition lives in the
+   * PLAN, and until story 4.7 nothing executed a plan, so this function had never been
+   * given it: the criterion simply produced no attempts, derived to `skipped`, and
+   * `aggregate` treats `skipped` as inert. A plan-author that explicitly refused to
+   * automate a criterion therefore yielded **PASS, exit 0, merge-eligible** — the
+   * green-for-nothing this product exists to make impossible, reached by a route no unit
+   * suite could see because it only exists where the plan meets the derivation.
+   *
+   * It is checked BEFORE attempts, unconditionally, for the same reason human
+   * verifiability is: a plan's refusal to automate is a compile-time fact, and a run-time
+   * observation may not overturn it. (In practice no attempt exists for such a criterion —
+   * the probes stage executes nothing for it — so the unconditional form guards a wiring
+   * mistake rather than a legitimate case.)
+   */
+  readonly plannedNeedsHuman?: boolean;
+}
+
 /** How one attempt came out, before retry orchestration is considered. */
 type AttemptOutcome = Exclude<CriterionStatus, 'skipped'>;
 
@@ -182,7 +214,7 @@ function outcomeOf(attempt: ProbeAttempt): AttemptOutcome {
 export function deriveCriterionResult(
   criterion: ContractCriterionRef,
   attempts: readonly ProbeAttempt[],
-  options?: RedactionOptions,
+  options?: DerivationOptions,
 ): DerivedCriterionResult {
   // `statement` and `severity` come from the frozen contract — text a human wrote and
   // reviewed, not text a probe captured — so they are carried verbatim. Redacting them
@@ -208,6 +240,13 @@ export function deriveCriterionResult(
   // redesign of a recorded decision, and review caught it: if Epic 4/5 wants a probe to
   // adjudicate a human criterion, the way to get that is an ADR, not a branch here.
   if (criterion.verifiability === 'human') {
+    return { ...base, status: 'needs_human' };
+  }
+
+  // THE PLAN'S OWN REFUSAL DECIDES SECOND, and also before attempts. See
+  // `DerivationOptions.plannedNeedsHuman`: this is Q39's other trigger, and without it a
+  // criterion the plan-author declined to automate reported PASS at exit 0.
+  if (options?.plannedNeedsHuman === true) {
     return { ...base, status: 'needs_human' };
   }
 

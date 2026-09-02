@@ -1,0 +1,1163 @@
+/**
+ * The `shell` surface executor (story 4.6, FR-26, AD-3, AD-13).
+ *
+ * ============================================================================
+ * THE NAME OF THIS STORY LIES: THERE IS NO SHELL HERE, AND THERE MUST NEVER BE.
+ * ============================================================================
+ *
+ * A "shell probe" runs a project-declared command and asserts on its exit code
+ * and output. It does NOT run a shell. The command reaches the child through
+ * `ProcessRunner.run({binary, args})`, whose own header is explicit: "There is
+ * no `shell` option and no way to add one without changing this file. That is
+ * what makes it impossible for provider output — text a model wrote — to become
+ * an executable command."
+ *
+ * So `&&`, `;`, `$(…)`, `|` and `*` inside an argument arrive at the child as
+ * LITERAL argv elements. They are not filtered here, not escaped here and not
+ * refused here, and that is deliberate rather than an omission: filtering them
+ * would imply a shell exists somewhere, which is exactly the belief AD-3 is
+ * designed to make unnecessary. `tests/integration/surfaces/shell.test.ts`
+ * proves this rather than asserting it, by having the fixture command echo its
+ * own `process.argv` back and comparing element for element.
+ *
+ * If you are reading this because you want to support a pipe, a redirect, a
+ * `cd`, or an `&&` — STOP. `sh -c`, `shell: true` and string concatenation into
+ * a command line are the single change that would undo this epic's security
+ * property, and adding one is not a story-level decision. The supported way to
+ * express a pipeline is a script committed to the project and declared in
+ * `.specwitness/config.yaml`.
+ *
+ * ============================================================================
+ * AC2 — THE ALLOWLIST, AND WHY IT IS CHECKED TWICE
+ * ============================================================================
+ *
+ * A shell probe is the one place in the product where a provider-authored
+ * artifact chooses ARGUMENTS to a real command. Two independent gates stand in
+ * front of that, and the acceptance criterion calls them "schema + runtime
+ * double enforcement":
+ *
+ *  1. SCHEMA (story 4.2, merged, not this file). A plan cannot express a
+ *     command string at all — a shell probe carries a config `commandId` plus
+ *     an `argumentAllowlist`, on a `z.strictObject`, and `ShellProbeSchema`'s
+ *     own `superRefine` already enforces `args ⊆ argumentAllowlist`.
+ *  2. RUNTIME (this file). Every argument is checked against the allowlist
+ *     again, immediately before spawning.
+ *
+ * The second is not belt-and-braces. Plans are committed YAML in the target
+ * project (Q11), so a human or another tool can edit one between compilation
+ * and execution, and such a file never passes through the schema gate at all.
+ * A schema gate protects a DRAFTED plan; a runtime gate protects an EXECUTED
+ * one. Neither alone is sufficient.
+ *
+ * THE ENFORCEMENT SEMANTICS, stated precisely because this is a security
+ * boundary a reader must be able to audit without running it:
+ *
+ *  - MATCHING IS EXACT STRING EQUALITY. Not prefix, not substring, not glob,
+ *    not regex. `--dry-run` in the allowlist does not permit `--dry-runner`,
+ *    and does not permit `--dry`. A pattern language would be a second parser
+ *    and a second attack surface, and `domain/plan.ts` already refuses regex
+ *    comparison for the same reason (an untrusted pattern over untrusted text
+ *    is ReDoS with a hostile author and no timeout in sight).
+ *  - AN EMPTY ALLOWLIST PERMITS NO ARGUMENTS. It does not mean "unconstrained".
+ *    Fail closed. The opposite reading is fail-open and reads like a reasonable
+ *    default, which is precisely why it is named here.
+ *  - REPEATS ARE PERMITTED. Membership is a set test, so an allowed argument
+ *    may be passed more than once: the allowlist states WHICH VALUES may be
+ *    passed, not how many times. This matches the merged schema's own `Set`
+ *    membership test rather than inventing a stricter rule the schema would
+ *    then disagree with.
+ *  - AN ARGUMENT MATCHING NO ENTRY REJECTS THE WHOLE PROBE. Nothing is dropped,
+ *    nothing is sanitised, nothing runs.
+ *  - AN UNUSED ALLOWLIST ENTRY IS NOT AN ERROR. The allowlist is a ceiling.
+ *
+ * REJECTION IS A `ConfigError`, NEVER A PRODUCT FAIL (AD-6/AD-7). An undeclared
+ * id or an out-of-allowlist argument means THE PLAN IS WRONG, which says
+ * nothing about whether the branch satisfies its contract. Exit 1 would tell a
+ * harness the branch has defects and route repair automation at code that may
+ * be perfectly fine; exit 3 says SpecWitness could not reach a conclusion,
+ * which is what actually happened. The merged `getObservationCommand` in
+ * `src/config/types.ts` is the precedent for the id case — it throws naming the
+ * declared ids rather than returning a fallback, because "quietly substituting
+ * anything would be a hole in the AD-3 boundary".
+ *
+ * ============================================================================
+ * EXIT CODES: THIS MAPPING DELIBERATELY DIFFERS FROM THE GATES STAGE
+ * ============================================================================
+ *
+ * `pipeline/stages/gates.ts` maps `completed` + non-zero to a GATE FAILURE.
+ * That is right THERE and wrong HERE, and copying it would make every
+ * negative-case probe unwritable.
+ *
+ * The difference is WHO DECLARED THE EXPECTATION. A gate's assertion is
+ * implicit and fixed — "exit 0" — so a non-zero exit violates it by
+ * definition. A probe's assertion is EXPLICIT and comes from the plan, so a
+ * probe legitimately asserting `exitCode == 1` MUST PASS when the command exits
+ * 1. For a shell probe a non-zero exit code is an OBSERVATION, not a verdict.
+ *
+ *   completed (any exit code)    -> evaluate the plan's assertions. Product.
+ *   not-found / spawn-failed /
+ *   timed-out                    -> `execError` -> criterion `error`. Infra.
+ *
+ * "The command said no" and "the command could not run" are the two things this
+ * product exists to keep apart. A missing binary reported as `fail` is
+ * infrastructure blamed on the branch.
+ *
+ * The same principle produces three different rules across the three Epic 4
+ * surfaces, which is one pattern rather than three inconsistencies (settled
+ * with bob/4.4 and pamela/4.5 at cohort intent-sync, 2026-09-01):
+ *   - shell (here):      a non-zero exit is a normal evaluation — the PLAN
+ *                        declared what the exit code must be.
+ *   - observation (4.5): a non-zero exit is `execError` — Q35 makes "exit 0 and
+ *                        emit JSON" the observation command's DECLARED contract.
+ *   - http (4.4):        a non-JSON body under a jsonPath assertion is an
+ *                        unsatisfied assertion — the PLAN asserted it.
+ * Each follows whoever declared the expectation.
+ *
+ * Q39 forecloses a third option: execution-time uncertainty is `error`, NEVER
+ * `needs_human`. There are exactly two NEEDS_HUMAN triggers and both are
+ * compile-time. Nothing observed here creates a third.
+ *
+ * ============================================================================
+ * WHAT THIS FILE DOES NOT DO
+ * ============================================================================
+ *
+ * It never returns a `CriterionStatus` — AD-13 puts the single producer in
+ * `domain/criterion-result.ts` and there is nowhere in `ProbeAttempt` to put
+ * one. It evaluates assertions mechanically and reports what it saw; whether
+ * that means pass, fail, error or flaky is `deriveCriterionResult`'s call, and
+ * so is retry orchestration: this executes exactly ONE attempt per call and
+ * stamps the 1-based `attempt` the caller supplied. It never loops.
+ *
+ * It also never resolves anything. `adapters-core-only` forbids `src/surfaces/**`
+ * from importing `src/config/**` or `src/pipeline/**`, so the CALLER resolves
+ * the config id to a command, splits it into a binary and argv with the merged
+ * `splitCommandLine`, applies that module's three malformed-command refusals,
+ * and injects the result. This file never mints a `DeclaredCommand`, never
+ * casts to one, and never imports the brand.
+ *
+ * AD-1: imports `src/domain/**` and npm only.
+ */
+
+import { createHash } from 'node:crypto';
+
+import type {
+  AssertionEvaluation,
+  Observation,
+  ProbeAttempt,
+  ProbeRequest,
+  SurfaceExecutor,
+} from '../domain/criterion-result.js';
+import { ConfigError, InfraError } from '../domain/errors.js';
+import {
+  commandEvidence,
+  evidenceRef,
+  redactText,
+  type Evidence,
+  type EvidenceRef,
+  type RedactionOptions,
+} from '../domain/evidence.js';
+import { ASSERTION_COMPARISONS, type AssertionComparison } from '../domain/plan.js';
+import type { Clock } from '../domain/ports.js';
+import type { ProcessResult, ProcessRunner } from '../domain/process-runner.js';
+
+/**
+ * How long one shell probe may run before it is abandoned as inconclusive.
+ *
+ * Two minutes, chosen rather than guessed: a probe is a targeted check (has
+ * this migration been applied, does this binary report the expected version,
+ * does this generated file have the right shape), not a build. The gates
+ * stage's fifteen minutes is sized for `pnpm install` on a cold store and would
+ * be an eternity here. Injectable so a test asserts the timeout path in
+ * milliseconds instead of waiting it out.
+ */
+export const SHELL_PROBE_TIMEOUT_MS = 2 * 60 * 1000;
+
+/** The run-directory subfolder every evidence file lives in (Q50). */
+const EVIDENCE_DIR = 'evidence';
+
+/**
+ * A declared command the CALLER has already resolved and split.
+ *
+ * Every field is a plain string. There is no `DeclaredCommand` here and no way
+ * to get one: minting happens only inside `src/config/`, which this module may
+ * not import at all. What arrives is the OUTPUT of the sanctioned read
+ * direction — `commandText(declared)` for display, `splitCommandLine(...)` for
+ * execution — performed by the probes stage (4.7).
+ *
+ * Field names agreed verbatim with story 4.5 at cohort intent-sync so the two
+ * command-spawning surfaces present one shape to their common caller.
+ */
+export interface ResolvedShellCommand {
+  /** The config id this command was declared under. For evidence and diagnostics. */
+  readonly commandId: string;
+  /** `commandText(declared)`. DISPLAY ONLY — never parsed back, never executed from here. */
+  readonly displayCommand: string;
+  /** The executable token. The caller refuses an empty one before we are constructed. */
+  readonly binary: string;
+  /** argv from the DECLARED command line. The plan's arguments are appended after these. */
+  readonly baseArgs: readonly string[];
+}
+
+/**
+ * Writes one evidence file into the run directory and returns its RELATIVE path.
+ *
+ * Bound by the composition root to `RunStore.writeEvidenceFile` with the run id
+ * already applied — `RunStore` is the sole writer under `.specwitness/runs/`
+ * (AD-8), and this module constructs no path beneath it. The run id is
+ * deliberately not a parameter, so the executor cannot address another run's
+ * directory even by mistake. Structurally identical to the merged
+ * `GateEvidenceWriter`, and to 4.4's and 4.5's, so 4.7 binds one thing three
+ * times.
+ */
+export interface ShellEvidenceWriter {
+  (relativeName: string, contents: string): Promise<string>;
+}
+
+/**
+ * Hands the typed evidence member to whoever owns the run accumulator.
+ *
+ * WHY THIS EXISTS, since it is the one dep that is not obvious. `ProbeAttempt`
+ * carries `readonly EvidenceRef[]` — REFERENCES — and there is nowhere in it to
+ * put an `Evidence` member. But `RunResult.evidence` is `readonly Evidence[]`,
+ * "the closed evidence UNION, not bare references", and its own doc explains
+ * why: "Refs alone would discard the redacted, bounded content at the moment it
+ * was constructed, and a renderer whose signature is `(result: RunResult) =>
+ * string` could then only show that content by reading the file — which AD-11
+ * forbids and its signature makes impossible."
+ *
+ * `gates.ts` solves this by pushing members onto `context.run.evidence`
+ * directly. No executor can: `adapters-core-only` keeps `src/surfaces/**` away
+ * from the pipeline by design. That same rule prescribes the remedy — "if a
+ * story needs an adapter-to-adapter call, that is a port in src/domain/,
+ * injected by the caller" — and this callback is that port in its smallest
+ * form. 4.7 binds it to `context.run.evidence.push`.
+ *
+ * Without it a run's report would carry gate evidence and NO probe evidence at
+ * all, silently, with every surface's test suite green — because no executor
+ * test drives a renderer. Found at cohort intent-sync by 4.5 and settled there.
+ */
+export interface ShellEvidenceSink {
+  (evidence: Evidence): void;
+}
+
+export interface ShellExecutorDeps {
+  readonly runner: ProcessRunner;
+  /** AD-9. Never `Date.now()`. */
+  readonly clock: Clock;
+  /** `run.environment.worktreePath` — commands run in the worktree (AD-8, FR-19). */
+  readonly cwd: string;
+  /** Resolved and split by the caller; see `ResolvedShellCommand`. */
+  readonly command: ResolvedShellCommand;
+  readonly writeEvidence: ShellEvidenceWriter;
+  readonly recordEvidence: ShellEvidenceSink;
+  /** Defaults to `SHELL_PROBE_TIMEOUT_MS`. */
+  readonly timeoutMs?: number;
+  /** AD-10 config-declared extra patterns, passed through to every redaction. */
+  readonly redaction?: RedactionOptions;
+  /**
+   * Passed straight to the runner so a probe's process group is recorded
+   * durably BEFORE the run proceeds (AD-8).
+   *
+   * NOT optional in spirit, only in type. A probe spawns a real child, and that
+   * child gets its own process group whether or not anyone writes the pgid
+   * down. If nothing records it, `specwitness clean` cannot find the group
+   * after an interrupted or crashed run, and the probe's descendants outlive
+   * the run with nothing on disk able to name them — the one state AD-8's
+   * crash-durable manifest exists to prevent. Both merged spawning modules
+   * carry this hook for the same reason (`pipeline/stages/gates.ts` and
+   * `pipeline/stages/services.ts`), and the composition root should bind it to
+   * `RunStore.recordProcessGroup` here too.
+   *
+   * Optional purely so a unit test can omit it; the runner awaits it before the
+   * child's outcome is observed, which is where the durability ordering lives.
+   */
+  readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
+}
+
+/** What a shell assertion reads. Mirrors the merged `ShellAssertionTarget`. */
+type ShellTargetSource = 'exitCode' | 'stdout' | 'stderr';
+
+const TARGET_SOURCES: readonly ShellTargetSource[] = ['exitCode', 'stdout', 'stderr'];
+
+/**
+ * The normalised, FLAT form this executor works with internally.
+ *
+ * **It is not the shape `params` arrives in.** `readParams` reads the MERGED
+ * `ShellProbe` model — `{id, mechanics: {commandId, args, argumentAllowlist},
+ * assertions}` — because that is what a compiled plan actually holds and what
+ * the caller can pass through unchanged. See `readParams` for why.
+ *
+ * `params` is `Readonly<Record<string, unknown>>` and the per-surface zod
+ * schemas in `src/schemas/plan.ts` are MODULE-PRIVATE (`ShellProbeSchema` is
+ * not exported), so this shape is hand-validated below rather than re-parsed.
+ * Confirmed independently by all three Epic 4 surface stories at intent-sync
+ * and reported to the owner as an additive follow-up; nobody adds an export to
+ * a merged file they do not own.
+ *
+ * Hand-validation is still real runtime enforcement, which is what AC2 needs:
+ * the plan on disk may have been edited after it was compiled.
+ */
+export interface ShellProbeParams {
+  /** The probe's own id, from the plan. Used to name evidence files. */
+  readonly probeId: string;
+  /** The config id the plan referenced. Must match the resolved command. */
+  readonly commandId: string;
+  /** argv the plan supplies, appended after the declared command's own. */
+  readonly args: readonly string[];
+  /** Every argument this probe may pass. Reviewed by a human in the committed plan. */
+  readonly argumentAllowlist: readonly string[];
+  readonly assertions: readonly ShellAssertionSpec[];
+  /** 1-based. Optional so a single-shot caller need not think about it; defaults to 1. */
+  readonly attempt?: number;
+}
+
+/** One mechanically evaluable expectation, as DATA. Mirrors `Assertion<ShellAssertionTarget>`. */
+export interface ShellAssertionSpec {
+  readonly description: string;
+  readonly target: { readonly source: ShellTargetSource };
+  readonly comparison: AssertionComparison;
+  readonly expected: string;
+}
+
+/* ── params validation ───────────────────────────────────────────────────── */
+
+function wiringDefect(what: string): InfraError {
+  return new InfraError(
+    `the shell probe was invoked with malformed params: ${what}`,
+    'this is a SpecWitness defect rather than a problem with the branch under ' +
+      'verification — the probes stage must pass a compiled shell probe’s mechanics ' +
+      'and assertions through unchanged',
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reads one field, and ONLY as an own property.
+ *
+ * A plain `raw['probeId']` walks the prototype chain, so a params object whose
+ * fields live on its prototype passes every check below and the probe SPAWNS —
+ * silent acceptance rather than a crash, which is the worse of the two failures.
+ * `params` is derived from YAML a human may have hand-edited, which is the whole
+ * threat model this validator exists for, so it may not trust inherited shape.
+ *
+ * The merged `getObservationCommand` in `src/config/types.ts` guards the same
+ * class for the same reason, in as many words: "Own-property check on purpose: a
+ * prototype walk would resolve `constructor` or `toString` into something that
+ * is not a declared observation at all." This is that rule applied one layer out.
+ *
+ * Found by an adversarial params suite written after story 4.4 reported the
+ * shared "the interior of `params` is `unknown` and we all read it as typed"
+ * defect class — their instance was a two-level dereference, this one is a
+ * prototype read, and both hide in hand-validation because the type system stops
+ * helping at `Readonly<Record<string, unknown>>`.
+ */
+function own(raw: Record<string, unknown>, field: string): unknown {
+  return Object.hasOwn(raw, field) ? raw[field] : undefined;
+}
+
+function stringArray(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value)) {
+    throw wiringDefect(`'${field}' is not an array`);
+  }
+  for (const [index, element] of value.entries()) {
+    if (typeof element !== 'string') {
+      throw wiringDefect(`'${field}[${index}]' is not a string`);
+    }
+  }
+  return value as readonly string[];
+}
+
+function assertionSpec(value: unknown, index: number): ShellAssertionSpec {
+  if (!isRecord(value)) {
+    throw wiringDefect(`'assertions[${index}]' is not an object`);
+  }
+  if (typeof own(value, 'description') !== 'string') {
+    throw wiringDefect(`'assertions[${index}].description' is not a string`);
+  }
+  if (typeof own(value, 'expected') !== 'string') {
+    throw wiringDefect(`'assertions[${index}].expected' is not a string`);
+  }
+
+  const comparison = own(value, 'comparison');
+  if (
+    typeof comparison !== 'string' ||
+    !(ASSERTION_COMPARISONS as readonly string[]).includes(comparison)
+  ) {
+    // Refused rather than defaulted. A comparison nobody implements must not
+    // silently become `equals`, and a plan naming one is a plan this build
+    // cannot execute faithfully.
+    throw wiringDefect(
+      `'assertions[${index}].comparison' is ${JSON.stringify(comparison)}, which is not one of ` +
+        ASSERTION_COMPARISONS.join(', '),
+    );
+  }
+
+  const target = own(value, 'target');
+  if (!isRecord(target)) {
+    throw wiringDefect(`'assertions[${index}].target' is not an object`);
+  }
+  const source = own(target, 'source');
+  if (typeof source !== 'string' || !(TARGET_SOURCES as readonly string[]).includes(source)) {
+    throw wiringDefect(
+      `'assertions[${index}].target.source' is ${JSON.stringify(source)}, which is not one of ` +
+        TARGET_SOURCES.join(', '),
+    );
+  }
+
+  return {
+    description: own(value, 'description') as string,
+    target: { source: source as ShellTargetSource },
+    comparison: comparison as AssertionComparison,
+    expected: own(value, 'expected') as string,
+  };
+}
+
+/**
+ * Reads and validates `ProbeRequest.params`, or throws an `InfraError`.
+ *
+ * THE SHAPE IS THE MERGED `ShellProbe`, NOT A FLATTENED INVENTION.
+ *
+ * A compiled plan holds `{id, surface, mechanics: {commandId, args,
+ * argumentAllowlist}, assertions}`. This reads exactly that, plus `attempt` as
+ * orchestration metadata the caller adds, so story 4.7 can pass a `ShellProbe`
+ * through the `SurfaceExecutor` boundary unchanged.
+ *
+ * An earlier revision required a FLATTENED object with `probeId`, `commandId`,
+ * `args` and `argumentAllowlist` all at the top level. Every test constructed
+ * that shape, so the whole suite passed green while an ordinary plan probe
+ * would have been refused with an `InfraError` before execution — the executor
+ * unusable through the very boundary it implements, and 4.7 left to invent a
+ * shell-specific conversion nobody documented. The merged
+ * `src/surfaces/observation.ts` (story 4.5) reads the nested shape, so the two
+ * surfaces would have demanded different params of the same caller.
+ *
+ * Caught by the Codex review pass. It is the one finding in this story that
+ * broke INTEGRATION rather than leaking anything, and it is precisely the class
+ * 4.7's conformance test would have found in cohort 3 with nobody left to ask.
+ * A suite built entirely from one hand-written shape cannot detect that the
+ * shape is wrong — only a reader comparing it against the merged model can.
+ *
+ * `probeId` is accepted as an alias for `id`: one line, and it removes a whole
+ * class of 4.7 wiring failure, since the merged observation executor reads a
+ * top-level `probeId` too. The canonical name is `id`, because that is what
+ * `ProbeSpec` declares.
+ *
+ * EVERYTHING IS REFUSED RATHER THAN DEFAULTED. The allowlist is where that
+ * matters most: defaulting an absent `argumentAllowlist` to "everything
+ * permitted" is fail-open, and defaulting it to "nothing permitted" would
+ * silently disable a probe an operator believes is running. Neither is honest,
+ * so neither happens.
+ */
+function readParams(raw: Readonly<Record<string, unknown>>): ShellProbeParams {
+  if (!isRecord(raw)) {
+    throw wiringDefect('they are not an object');
+  }
+
+  // `probeId` is an ALIAS for `id`, never a fallback to a different field. Both
+  // names must mean the same probe, so carrying both with different values is
+  // refused rather than silently resolved in favour of one.
+  //
+  // Story 4.5 found the cost of the looser reading on their own surface: their
+  // validator falls back from `probeId` to `mechanics.commandId`, so the SAME
+  // probe produced two different evidence paths depending on whether the caller
+  // spread `{...probe}` or mapped `{probeId: probe.id}` — silently, with both
+  // accepted. That is the misattributed-evidence defect again, arriving through
+  // a convenience rather than a hash collision. An alias that can resolve to a
+  // semantically different value is not an alias.
+  const declaredId = own(raw, 'id');
+  const aliasId = own(raw, 'probeId');
+  if (
+    typeof declaredId === 'string' &&
+    typeof aliasId === 'string' &&
+    declaredId !== aliasId
+  ) {
+    throw wiringDefect(
+      "'id' and its alias 'probeId' are both present and disagree — they name one probe",
+    );
+  }
+
+  const identifier = declaredId ?? aliasId;
+  if (typeof identifier !== 'string' || identifier === '') {
+    throw wiringDefect("'id' is not a non-empty string");
+  }
+
+  const mechanics = own(raw, 'mechanics');
+  if (!isRecord(mechanics)) {
+    throw wiringDefect("'mechanics' is not an object");
+  }
+
+  const commandId = own(mechanics, 'commandId');
+  if (typeof commandId !== 'string' || commandId === '') {
+    throw wiringDefect("'mechanics.commandId' is not a non-empty string");
+  }
+
+  if (!Array.isArray(own(mechanics, 'args'))) {
+    throw wiringDefect("'mechanics.args' is not an array");
+  }
+  if (!Array.isArray(own(mechanics, 'argumentAllowlist'))) {
+    throw wiringDefect("'mechanics.argumentAllowlist' is not an array");
+  }
+
+  const declaredAssertions = own(raw, 'assertions');
+  if (!Array.isArray(declaredAssertions) || declaredAssertions.length === 0) {
+    // A probe that adjudicates nothing reaches `outcomeOf`'s "nothing was
+    // adjudicated mechanically" branch, which returns `needs_human` rather than
+    // minting a PASS out of nothing. The merged schema's `.min(1)` makes that
+    // unreachable from a COMPILED plan; a hand-edited one can still get here.
+    throw wiringDefect("'assertions' is not a non-empty array");
+  }
+
+  const attempt = own(raw, 'attempt');
+  if (
+    attempt !== undefined &&
+    (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1)
+  ) {
+    throw wiringDefect("'attempt' is not a positive integer");
+  }
+
+  return {
+    probeId: identifier,
+    commandId,
+    args: stringArray(own(mechanics, 'args'), 'mechanics.args'),
+    argumentAllowlist: stringArray(
+      own(mechanics, 'argumentAllowlist'),
+      'mechanics.argumentAllowlist',
+    ),
+    assertions: declaredAssertions.map((entry, index) => assertionSpec(entry, index)),
+    ...(attempt === undefined ? {} : { attempt: attempt as number }),
+  };
+}
+
+/* ── the AC2 runtime gate ────────────────────────────────────────────────── */
+
+/** Looks like a template placeholder the caller forgot to substitute. */
+function looksUnsubstituted(value: string): boolean {
+  // DIAGNOSTIC ONLY. Nothing here interprets `{{…}}` — inventing a template
+  // language in the executor would be the second-parser mistake this file
+  // refuses everywhere else. It only improves the HINT on a rejection.
+  return value.includes('{{');
+}
+
+/**
+ * Renders a PLAN-SUPPLIED identifier for a diagnostic message, redacted.
+ *
+ * `probeId` and the params' `commandId` come from the plan — provider-authored
+ * text — and every diagnostic below reaches `printError`, which writes
+ * `ERROR:`/`HINT:` to stderr verbatim. So they get the same fail-closed
+ * treatment as a rejected argument, and for the same reason.
+ *
+ * WHY THIS IS REACHABLE RATHER THAN THEORETICAL, since a schema-valid
+ * `Identifier` cannot contain `=` or `:` and so cannot form a redactable
+ * assignment: `readParams` deliberately accepts any non-empty string, because
+ * the whole point of the runtime gate is a plan **edited on disk after
+ * compilation**, which never passed through 4.2's schema at all. Such a plan can
+ * carry `probeId: "API_KEY=sk-ant-..."`. The gate that exists for hand-edited
+ * plans must not itself trust hand-edited input.
+ *
+ * The resolved command's own `commandId` is project-owner-declared rather than
+ * provider-authored, so it does not strictly need this — it is redacted anyway
+ * because uniformity costs nothing (an ordinary id matches no redaction pattern
+ * and passes through untouched) and a rule with an exception is a rule somebody
+ * eventually applies to the wrong side. Found by the Codex review pass, which
+ * correctly read it as an inconsistency with the argument redaction three lines
+ * away.
+ */
+function safeId(value: string, redaction: RedactionOptions | undefined): string {
+  return redactText(value, redaction);
+}
+
+/**
+ * Refuses the probe unless every argument is permitted. Runs BEFORE any spawn.
+ *
+ * The half-substitution hint exists because of a cohort agreement with story
+ * 4.3: `resolveMechanics` substitutes `args` AND `argumentAllowlist` with the
+ * same resolved data, so both sides of this equality see the same
+ * substitution. Without that, every probe using a data binding would reject
+ * forever — and a `volatile` binding could never be passed at all, since its
+ * value is a token the plan author cannot know at compile time. If a caller
+ * ever substitutes one array and not the other, the failure looks exactly like
+ * a genuine allowlist violation, so the hint names the real cause.
+ */
+function enforceAllowlist(
+  params: ShellProbeParams,
+  command: ResolvedShellCommand,
+  redaction: RedactionOptions | undefined,
+): void {
+  if (params.commandId !== command.commandId) {
+    throw new ConfigError(
+      `shell probe '${safeId(params.probeId, redaction)}' references command id ` +
+        `'${safeId(params.commandId, redaction)}', but the command resolved for it was ` +
+        `'${safeId(command.commandId, redaction)}'`,
+      'a plan may only run commands declared under `observations:` in .specwitness/config.yaml, ' +
+        'and the id it names must be the one that was resolved — quietly running a different ' +
+        'command would be a hole in the AD-3 boundary',
+    );
+  }
+
+  const permitted = new Set(params.argumentAllowlist);
+  const rejected = params.args.filter((argument) => !permitted.has(argument));
+  if (rejected.length === 0) {
+    return;
+  }
+
+  // REDACTED UNDECLARED, both sides. These are PLAN-supplied strings —
+  // provider-authored text, not a project owner's declared command — so they
+  // get the fail-closed treatment, not `{shellCommand: true}`. And this message
+  // reaches `printError`, which writes ERROR:/HINT: to stderr verbatim, so an
+  // unredacted argument here would leak in the terminal while the persisted
+  // copy stayed clean.
+  //
+  // THE OPTIONS ARE PASSED, and that is the whole point of threading them here.
+  // AD-10's "config-declared extra patterns" are the ONLY thing that can redact
+  // a project's own secret shapes — a bearer token format the built-in rules do
+  // not recognise. Calling `redactText(value)` bare, as an earlier revision did,
+  // silently applied the built-in rules only, so a secret covered exclusively by
+  // `extraPatterns` reached stderr verbatim from precisely the path this story
+  // exists to make safe. Every other redaction in this file already threads
+  // them; this one was the outlier. (Codex review pass.)
+  const show = (value: string): string => redactText(value, redaction);
+  const halfSubstituted =
+    rejected.some(looksUnsubstituted) || params.argumentAllowlist.some(looksUnsubstituted);
+
+  throw new ConfigError(
+    `shell probe '${safeId(params.probeId, redaction)}' passes ${rejected.length} argument(s) ` +
+      `outside its ` +
+      `argumentAllowlist: ${rejected.map((value) => `'${show(value)}'`).join(', ')}`,
+    (params.argumentAllowlist.length === 0
+      ? `this probe's argumentAllowlist is empty, which permits NO arguments — add each ` +
+        `argument it must pass to argumentAllowlist in the plan, or remove it from args`
+      : `permitted arguments are: ${params.argumentAllowlist
+          .map((value) => `'${show(value)}'`)
+          .join(', ')} — matching is exact, so a prefix or a longer form of a permitted ` +
+        `argument is refused`) +
+      (halfSubstituted
+        ? '. A `{{…}}` placeholder survived here, which usually means args and ' +
+          'argumentAllowlist were not substituted with the same resolved data — both must be, ' +
+          'or neither'
+        : ''),
+  );
+}
+
+/* ── mechanical assertion evaluation ─────────────────────────────────────── */
+
+/** Reads one target out of the settled spawn. Exhaustive with a `never` check. */
+function actualFor(source: ShellTargetSource, result: ProcessResult): string {
+  switch (source) {
+    case 'exitCode':
+      // `String(null)` is "null", which is honest for a process that produced
+      // no code and makes any exit-code assertion legitimately unsatisfied
+      // rather than throwing.
+      return String(result.exitCode);
+    case 'stdout':
+      return result.stdout;
+    case 'stderr':
+      return result.stderr;
+    default: {
+      const unreachable: never = source;
+      throw wiringDefect(`unrecognised assertion target '${String(unreachable)}'`);
+    }
+  }
+}
+
+/**
+ * A numeric comparison where BOTH sides must parse as finite numbers.
+ *
+ * A side that does not is an UNSATISFIED assertion, never a crash — the merged
+ * `domain/plan.ts` says so in as many words. The empty string is treated as
+ * non-numeric rather than as `Number('') === 0`, because an empty stdout is the
+ * absence of an answer, not the number zero.
+ */
+function numeric(actual: string, expected: string, compare: (a: number, b: number) => boolean): boolean {
+  const parse = (raw: string): number => (raw.trim() === '' ? Number.NaN : Number(raw));
+  const left = parse(actual);
+  const right = parse(expected);
+  return Number.isFinite(left) && Number.isFinite(right) && compare(left, right);
+}
+
+/** Exhaustive over `ASSERTION_COMPARISONS` with a `never` check. */
+function satisfies(comparison: AssertionComparison, actual: string, expected: string): boolean {
+  switch (comparison) {
+    case 'equals':
+      return actual === expected;
+    case 'notEquals':
+      return actual !== expected;
+    case 'contains':
+      return actual.includes(expected);
+    case 'notContains':
+      return !actual.includes(expected);
+    case 'greaterThan':
+      return numeric(actual, expected, (a, b) => a > b);
+    case 'lessThan':
+      return numeric(actual, expected, (a, b) => a < b);
+    default: {
+      const unreachable: never = comparison;
+      throw wiringDefect(`unrecognised assertion comparison '${String(unreachable)}'`);
+    }
+  }
+}
+
+/**
+ * Evaluates every declared assertion, INCLUDING the satisfied ones.
+ *
+ * All of them, because FR-28 needs `expected`/`actual` on non-pass results and
+ * `deriveCriterionResult` reads `find(e => !e.satisfied)` — an executor that
+ * reported only failures would leave a passing probe with no record of what it
+ * checked, and a report that cannot say what was verified is not evidence.
+ *
+ * `satisfied` is computed on the RAW values; `expected` and `actual` are
+ * redacted for reporting. The two cannot disagree about the outcome, because
+ * the outcome was decided before redaction — which is the right order: a
+ * credential that happens to appear in output must not change whether a
+ * criterion passed.
+ */
+function evaluate(
+  params: ShellProbeParams,
+  result: ProcessResult,
+  redaction: RedactionOptions | undefined,
+): AssertionEvaluation[] {
+  return params.assertions.map((assertion) => {
+    const actual = actualFor(assertion.target.source, result);
+    return {
+      // REDACTED like its two neighbours. `description` is provider-authored
+      // plan text sitting in the same object as `expected` and `actual`, which
+      // are redacted for exactly this threat model — leaving one of the three
+      // raw was an inconsistency rather than a decision.
+      //
+      // HONEST ABOUT THE BLAST RADIUS, because the review that found this
+      // overstated it: `description` does NOT reach `result.json` today.
+      // `deriveCriterionResult` copies only `expected`, `actual` and `evidence`
+      // into `DerivedCriterionResult` — verified in the merged source rather
+      // than assumed. So this is defence in depth, not the closing of a live
+      // leak. It is still worth doing: `description` is the human-readable
+      // label for an assertion, so a future renderer or a 4.7 timeline detail
+      // surfacing it is likely rather than far-fetched, and an ordinary
+      // description matches no redaction pattern, so the cost is nil.
+      description: redactText(assertion.description, redaction),
+      satisfied: satisfies(assertion.comparison, actual, assertion.expected),
+      // Redacted UNDECLARED. `actual` is captured output and `expected` is
+      // provider-authored plan text; neither is a project owner's declared
+      // shell command, so neither gets `{shellCommand: true}`.
+      expected: redactText(assertion.expected, redaction),
+      actual: redactText(actual, redaction),
+    };
+  });
+}
+
+/* ── classification ──────────────────────────────────────────────────────── */
+
+/**
+ * The diagnosis for a binary the OS could not find, which has two causes.
+ *
+ * A bare name (`node`) is a PATH lookup: "it is not installed" is right. A
+ * token carrying a separator (`./scripts/check`) names a FILE resolved against
+ * the verification worktree, so the useful instruction is "commit it" — a
+ * script present but untracked in the operator's working copy is genuinely
+ * absent from the revision under verification. Same reasoning, and the same
+ * two remedies, as the merged `notFoundError` in `pipeline/stages/gates.ts`.
+ *
+ * THE BINARY IS REDACTED even though it is project-owner-DECLARED, because it
+ * is derived from the declared command line and `commandEvidence` already
+ * redacts `displayCommand` for the same reason. The gates stage states the rule
+ * this follows: a declared command can legitimately carry a credential, and
+ * this message reaches `printError`, which writes it to stderr verbatim.
+ * Redacted UNDECLARED rather than with `{shellCommand: true}`, since a bare
+ * binary token is a fragment rather than a whole command line and the
+ * fail-closed default is the safer reading of a fragment. (Codex review pass.)
+ */
+function notFoundExecError(
+  params: ShellProbeParams,
+  binary: string,
+  redaction: RedactionOptions | undefined,
+): { message: string; hint: string } {
+  const namesAFile = binary.includes('/') || binary.includes('\\');
+  return namesAFile
+    ? {
+        message:
+          `shell probe '${safeId(params.probeId, redaction)}' could not start: ` +
+          `'${redactText(binary, redaction)}' does not exist in the ` +
+          'verification worktree',
+        hint:
+          'probes run against the revision under verification, not your working copy — commit ' +
+          `'${redactText(binary, redaction)}' (an untracked or uncommitted file will not ` +
+          `be there), or correct ` +
+          `observations.${safeId(params.commandId, redaction)} in .specwitness/config.yaml`,
+      }
+    : {
+        message:
+          `shell probe '${safeId(params.probeId, redaction)}' could not start: ` +
+          `'${redactText(binary, redaction)}' is not on PATH`,
+        hint:
+          `install '${redactText(binary, redaction)}', or correct ` +
+          `observations.${safeId(params.commandId, redaction)} in ` +
+          '.specwitness/config.yaml — this is an environment problem, not a failure of the ' +
+          'branch under verification',
+      };
+}
+
+/**
+ * Turns one settled spawn into an exec error, or `undefined` when it ran.
+ *
+ * Exhaustive over `ProcessOutcome` with a `never` check in the default branch.
+ * That is not style: a `switch` handling only `completed` would treat a missing
+ * binary as "no failure seen", and a fifth outcome added upstream must break
+ * this file's compilation rather than fall through to silence.
+ */
+function classify(
+  params: ShellProbeParams,
+  result: ProcessResult,
+  binary: string,
+  timeoutMs: number,
+  redaction: RedactionOptions | undefined,
+): { message: string; hint: string } | undefined {
+  switch (result.outcome) {
+    case 'completed':
+      // IT RAN. Whatever the exit code, the plan's assertions decide — see the
+      // header on why this differs from the gates stage.
+      return undefined;
+
+    case 'not-found':
+      return notFoundExecError(params, binary, redaction);
+
+    case 'spawn-failed':
+      return {
+        // The only message here embedding CAPTURED OUTPUT, so redacted at the
+        // point untrusted text enters it: an error reaches `printError`, which
+        // writes to stderr verbatim, and the persisted copy would be clean
+        // while the terminal showed the secret.
+        message:
+          `shell probe '${safeId(params.probeId, redaction)}' could not be spawned: ` +
+          (redactText(result.stderr, redaction).trim() || 'the process did not start'),
+        hint: 'check that the verification worktree exists and is readable, then rerun',
+      };
+
+    case 'timed-out':
+      return {
+        message: `shell probe '${safeId(params.probeId, redaction)}' timed out after ${timeoutMs}ms and was killed`,
+        hint:
+          'a probe that hung observed nothing, so this is reported as an environment problem ' +
+          'rather than as a failing criterion — rerun, or make the command faster',
+      };
+
+    default: {
+      const unreachable: never = result.outcome;
+      return {
+        message:
+          `shell probe '${safeId(params.probeId, redaction)}' returned an unrecognised process outcome: ` +
+          String(unreachable),
+        hint: 'this is a defect in SpecWitness; please report it with the run directory',
+      };
+    }
+  }
+}
+
+/* ── evidence ────────────────────────────────────────────────────────────── */
+
+/**
+ * Normalise an id into at most one safe path component.
+ *
+ * The merged `pipeline/stages/gate-evidence-path.ts` solves this problem for
+ * gates and is NOT importable here — `adapters-core-only` forbids
+ * `src/surfaces/**` from reaching into `src/pipeline/**`. Its reasoning applies
+ * unchanged: an id containing `..` hits `RunStore`'s containment rule and an
+ * over-long one raises `ENAMETOOLONG`, and both would mean EXIT 3 FOR A
+ * PERFECTLY GOOD RUN — infrastructure blamed for something that is not
+ * infrastructure. So this is total: every string maps to one safe component.
+ */
+function slugify(value: string): string {
+  const substituted = value
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    // Collapsed so the literal sequence `..` can never appear anywhere in the
+    // result, not merely at the edges.
+    .replace(/\.{2,}/g, '.');
+  const trimmed = substituted.replace(/^[-.]+/, '').replace(/[-.]+$/, '');
+  return trimmed.length <= 64 ? trimmed : trimmed.slice(0, 64).replace(/[-.]+$/, '');
+}
+
+/**
+ * A collision-resistant discriminator for one `(criterionId, probeId)` pair:
+ * the FULL SHA-256 of the two ids joined by NUL, a separator neither can
+ * contain.
+ *
+ * ── WHY THE DIGEST IS NOT TRUNCATED ────────────────────────────────────────
+ *
+ * An earlier revision kept 24 hex characters and justified it as "96 bits puts
+ * a birthday collision at ~2^48 rather than ~2^16". **Both halves of that
+ * sentence were wrong in the same way, and the correction is kept here rather
+ * than deleted because the error recurred three times across this cohort.**
+ *
+ * DIGEST WIDTH IS NOT COLLISION RESISTANCE. A truncated n-bit digest gives
+ * about n/2 bits of resistance, because a birthday search needs only ~2^(n/2)
+ * work to find *any* colliding pair:
+ *
+ *     32-bit  ->  ~16 bits  ->  ~82k hashes, 57ms       (measured, story 4.5)
+ *     48-bit  ->  ~24 bits  ->  ~8M hashes, 7.9s        (measured, story 4.4)
+ *     96-bit  ->  ~48 bits  ->  ~2.8e14 ops, GPU-hours  (still an argument)
+ *     256-bit ->  ~128 bits ->  not an argument anyone has to have
+ *
+ * And the "~2^48" in the old comment was the ATTACK COST, not a safety margin —
+ * quoting it as though it were the latter is exactly how each widening in this
+ * cohort concluded the question was closed while leaving it open. This surface
+ * was the origin of the mistake: the 32-bit FNV it replaced was BRUTE-FORCED by
+ * a review pass, which produced two valid 82-character probe ids sharing a
+ * 70-character prefix — so both truncate to the same slug — that collide at
+ * `ee83bd36`. Identical stem, so the later probe silently overwrote the
+ * earlier one's files while both attempts kept referencing them.
+ *
+ * TRUNCATION ALSO BUYS NOTHING HERE. The worst-case filename this surface can
+ * produce, with a maximal 64-character slug and the full 64-hex digest, is:
+ *
+ *     shell- (6) + slug (64) + - (1) + digest (64) + - (1)
+ *          + attempt (3, allowing 999) + .stdout.txt (11)  =  150 characters
+ *
+ * against the 255-BYTE limit on a single filename component — and `evidence/`
+ * does not count toward it, since the limit governs the component rather than
+ * the path. That leaves 105 bytes spare. Even a pathologically long attempt
+ * number cannot approach the limit, because this surface's slug is a single
+ * capped 64 rather than two. (Computed for THIS stem rather than copied from
+ * another surface's figure; the http stem carries two slugs and lands at 211.)
+ *
+ * So the only thing truncation ever bought was the need to have this argument.
+ *
+ * Misattributed evidence remains the worst failure available here: lost evidence
+ * is visible, but a reader shown another probe's output under this probe's name
+ * has no signal that anything is wrong.
+ *
+ * `node:crypto` is available because `no-side-effect-builtins-in-core` scopes
+ * its ban to `src/(domain|schemas)/`; `src/surfaces/**` is an adapter, and
+ * `src/schemas/canonical.ts` and `src/infra/ids.ts` already use it. All three
+ * surfaces first reached for an inline FNV because we carried a
+ * dependency-freedom constraint from the domain, where it is real, into a layer
+ * where it is not.
+ *
+ * The ideal fix is still the one `gate-evidence-path.ts` uses — a DECLARATION
+ * INDEX, collision-free by construction rather than by probability. An executor
+ * has none: it is handed one probe at a time and never sees the list. Adding
+ * `index` to the params contract would need story 4.7 to supply it.
+ */
+function discriminator(criterionId: string, probeId: string): string {
+  return createHash('sha256').update(`${criterionId}\u0000${probeId}`).digest('hex');
+}
+
+/**
+ * `evidence/shell-E4-01-migrations-check-4f2a1b9c-1` — the stem all three files
+ * for one attempt share.
+ *
+ * WHY BOTH A SLUG AND A DISCRIMINATOR. `slugify` is readable but LOSSY, and the
+ * pair `(criterionId, probeId)` is not uniquely recoverable from a joined
+ * string. Three distinct collisions follow, and every one of them ends the same
+ * way: a later write silently overwrites an earlier file while the earlier
+ * probe's evidence references keep pointing at it — so a reader is shown
+ * another probe's output under this probe's name. Silently wrong evidence is
+ * worse than missing evidence in a product whose only output is evidence.
+ *
+ *  1. SUBSTITUTION, with no truncation at all: `a.b` and `a..b` are two
+ *     distinct, schema-valid probe ids (4.2 enforces uniqueness only WITHIN a
+ *     criterion, so both may exist side by side) and both normalise to `a.b`.
+ *  2. TRUNCATION at 64 characters: `Identifier` permits 128, so two ids sharing
+ *     a long prefix become one slug.
+ *  3. AMBIGUOUS JOINING: criterion `a-b` with probe `c` and criterion `a` with
+ *     probe `b-c` both concatenate to `a-b-c`. A discriminator computed from
+ *     that same joined string cannot separate them either — it is the identical
+ *     input. Found by the Codex review pass after the first two were fixed, and
+ *     it is the one a hand-written test would never have thought to try.
+ *
+ * So the discriminator is computed over an UNAMBIGUOUS encoding — the two ids
+ * separated by NUL, which no `Identifier` and no criterion id can contain — and
+ * it is ALWAYS present rather than conditional. An earlier revision appended it
+ * only when the slug lost information, which left case 3 undetected precisely
+ * because both of its stems are clean. A conditional discriminator has to be
+ * right about when it is needed; an unconditional one does not.
+ *
+ * The merged `pipeline/stages/gate-evidence-path.ts` solves the same problem
+ * with the gate's DECLARATION INDEX — and its comment names two of these three
+ * cases. It is not importable here (`adapters-core-only` forbids
+ * `src/surfaces/**` from reaching into `src/pipeline/**`), and an executor has
+ * no index to use anyway: it is handed one probe at a time and never sees the
+ * list. Stories 4.4 and 4.5 arrived independently at the same index-free
+ * substitute, which is the strongest evidence available that the constraint
+ * drove the design rather than any one of us.
+ *
+ * DETERMINISTIC, and that is load-bearing rather than incidental: a re-run must
+ * produce byte-identical paths, or a stored run directory diffs against its own
+ * repeat. Pinned by test.
+ */
+function evidenceStem(criterionId: string, params: ShellProbeParams, attempt: number): string {
+  const slug = slugify(`${criterionId}-${params.probeId}`);
+  const stamp = discriminator(criterionId, params.probeId);
+
+  return slug === '' ? `shell-${stamp}-${attempt}` : `shell-${slug}-${stamp}-${attempt}`;
+}
+
+export class ShellSurfaceExecutor implements SurfaceExecutor {
+  readonly surface = 'shell' as const;
+
+  readonly #deps: ShellExecutorDeps;
+
+  constructor(deps: ShellExecutorDeps) {
+    this.#deps = deps;
+  }
+
+  async execute(request: ProbeRequest): Promise<ProbeAttempt> {
+    const { command, redaction } = this.#deps;
+    const timeoutMs = this.#deps.timeoutMs ?? SHELL_PROBE_TIMEOUT_MS;
+
+    const params = readParams(request.params);
+    const attempt = params.attempt ?? 1;
+
+    // ── AC2: BEFORE ANY EXECUTION ────────────────────────────────────────
+    // Nothing above this line has spawned anything, and nothing below it runs
+    // if this throws. That ordering is the acceptance criterion, and the unit
+    // suite proves it with a runner that fails the test if it is ever called.
+    enforceAllowlist(params, command, redaction);
+
+    const result = await this.#deps.runner.run({
+      binary: command.binary,
+      // argv, never a command line. The declared command's own arguments
+      // first, then the plan's — the ordering agreed with story 4.5.
+      args: [...command.baseArgs, ...params.args],
+      cwd: this.#deps.cwd,
+      timeoutMs,
+      // Probes are the project's own commands and need the operator's PATH and
+      // toolchain, exactly as gates do. FR-15's withholding is for provider
+      // invocations (AD-4), not for a project inspecting itself.
+      env: { inherit: true },
+      // AD-8: the runner AWAITS this before the child's outcome is observed, so
+      // the pgid is durable before the run proceeds. Omitted rather than passed
+      // as `undefined`, matching the merged gates stage.
+      ...(this.#deps.onProcessGroup === undefined
+        ? {}
+        : { onProcessGroup: this.#deps.onProcessGroup }),
+    });
+
+    const execError = classify(params, result, command.binary, timeoutMs, redaction);
+    const evidence = await this.#captureEvidence(request.criterionId, params, attempt, result);
+
+    const observations: Observation[] = [
+      { name: 'outcome', value: result.outcome },
+      { name: 'exitCode', value: String(result.exitCode) },
+    ];
+
+    return {
+      attempt,
+      observations,
+      // ZERO assertion evaluations on an error path. Assertions evaluated
+      // against a broken observation would manufacture product evidence out of
+      // an infrastructure failure — `outcomeOf` says the same from the other
+      // side, where an exec error outranks any assertion a probe managed to
+      // evaluate.
+      assertionEvaluations: execError === undefined ? evaluate(params, result, redaction) : [],
+      evidence,
+      ...(execError === undefined ? {} : { execError }),
+      // The runner's OWN measurement, which already uses the injected clock
+      // (AD-9). Never a second clock read here.
+      durationMs: result.durationMs,
+    };
+  }
+
+  /**
+   * Captures `command` evidence for this attempt, and returns its references.
+   *
+   * THE RULE:
+   *
+   *   EVERY attempt -> `recordEvidence(member)`; write the serialized member
+   *     and ref it.
+   *   Each stream non-empty after redaction -> also write the full redacted
+   *     copy, ref it, and pass its path as that stream's `fullPath`.
+   *
+   * EVERY attempt, with no "observed something" exception — and the exception
+   * is described because it was here and was wrong. This file first carried the
+   * cohort's "no OBSERVATION, no ref" rule, under which a `not-found` recorded
+   * nothing at all on the grounds that nothing ran. The Codex review pass
+   * caught it, and what settles it is a structural asymmetry with the gates
+   * stage rather than a matter of taste:
+   *
+   *   - `gates.ts`'s `recordAttempt` DOES return early on two empty streams.
+   *     It can: a gate that cannot start THROWS, produces no `GateResult` at
+   *     all, and its diagnosis lives in the `InfraError`. There is no persisted
+   *     non-pass result for FR-28 to govern.
+   *   - A probe is the opposite. A `not-found` becomes `execError`, which
+   *     `deriveCriterionResult` turns into a persisted criterion `error` — a
+   *     NON-PASS RESULT, and FR-28 requires at least one evidence reference on
+   *     every one of those. Recording nothing left exactly those results bare.
+   *
+   * Nothing on that path is invented: `commandId` and `displayCommand` are what
+   * was attempted, `exitCode` is `null` — which the port documents as meaning
+   * "killed or never started" — and both streams are genuinely empty. It
+   * preserves WHAT WAS ATTEMPTED, the one thing a reader of a failed run most
+   * needs and the one thing the old rule discarded.
+   *
+   * The stream files keep their own rule, because that reasoning does survive:
+   * an empty file is an artifact implying output that never existed.
+   *
+   * WHY THE FULL COPIES GO THROUGH `redactText` FIRST. A file in the run
+   * directory IS persistence, and `boundedText` inside the constructor redacts
+   * only the INLINE copy. Handing raw bytes to the writer would leave the
+   * inline evidence spotless and the file beside it holding a credential
+   * verbatim — with the obvious seeded-secret test, which inspects the
+   * evidence, passing green over exactly that hole. `evidence.ts`'s header
+   * calls this out as the reason `redactText` exists as its own export.
+   */
+  async #captureEvidence(
+    criterionId: string,
+    params: ShellProbeParams,
+    attempt: number,
+    result: ProcessResult,
+  ): Promise<EvidenceRef[]> {
+    const { redaction } = this.#deps;
+    const stem = evidenceStem(criterionId, params, attempt);
+    const refs: EvidenceRef[] = [];
+    const paths: { stdoutFullPath?: string; stderrFullPath?: string } = {};
+
+    for (const stream of ['stdout', 'stderr'] as const) {
+      const redacted = redactText(result[stream], redaction);
+      if (redacted === '') {
+        // An empty file is an artifact implying output that never existed.
+        continue;
+      }
+      const path = await this.#deps.writeEvidence(
+        `${EVIDENCE_DIR}/${stem}.${stream}.txt`,
+        redacted,
+      );
+      paths[stream === 'stdout' ? 'stdoutFullPath' : 'stderrFullPath'] = path;
+      refs.push(evidenceRef('command', path));
+    }
+
+    const member = commandEvidence(
+      {
+        capturedAt: this.#deps.clock.now().toISOString(),
+        commandId: this.#deps.command.commandId,
+        // The DECLARED command text. This is the one string here that is a
+        // project owner's shell command, so the constructor redacts it with
+        // `{shellCommand: true}` — which bounds a sensitive header value at its
+        // closing quote instead of running to end of line. Captured output and
+        // plan arguments are NOT declared and never get that treatment.
+        displayCommand: this.#deps.command.displayCommand,
+        exitCode: result.exitCode,
+        // RAW on purpose: the constructor redacts and bounds the inline copy.
+        // Pre-redacting would double-redact, and a pre-built BoundedText is not
+        // accepted by design.
+        stdout: result.stdout,
+        stderr: result.stderr,
+        durationMs: result.durationMs,
+        ...paths,
+      },
+      redaction,
+    );
+
+    this.#deps.recordEvidence(member);
+
+    const memberPath = await this.#deps.writeEvidence(
+      `${EVIDENCE_DIR}/${stem}.json`,
+      `${JSON.stringify(member, null, 2)}\n`,
+    );
+    // FIRST, so a non-pass result always carries at least one reference (FR-28)
+    // whether or not either stream produced a file.
+    refs.unshift(evidenceRef('command', memberPath));
+
+    return refs;
+  }
+}

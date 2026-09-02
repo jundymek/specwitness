@@ -1024,6 +1024,49 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     // without this silently answers the wrong question.
     const tempRoot = await resolveReal(tmpdir());
 
+    // CHECKED BEFORE ANYTHING IS CREATED — story 4.1's owner rider (Epic 3
+    // retrospective §5, debt 1).
+    //
+    // This check used to run on the CONTAINER, i.e. after `mkdtemp` had already
+    // created a directory. When `TMPDIR` resolves inside a tree we promised not
+    // to touch, that meant SpecWitness CREATED A DIRECTORY INSIDE THE OPERATOR'S
+    // WORKING TREE and only then refused — the precise thing FR-19 forbids and
+    // this check exists to prevent. It was removed again a moment later, so the
+    // steady state looked correct; but a `kill -9` in that window left the
+    // leftover in the operator's checkout, where it appears in `git status` and
+    // where no OS temp policy will ever reclaim it. That is a materially worse
+    // leftover than the empty `/tmp` container the window is usually discussed
+    // in terms of.
+    //
+    // It also produced a WRONG DIAGNOSIS with no crash involved: if the in-repo
+    // `TMPDIR` was not writable, `mkdtemp` failed first and the operator was told
+    // to "check free space and permissions on the OS temp directory" — a remedy
+    // for a problem they did not have — while the real fault went unmentioned.
+    // `tests/unit/vcs/worktree-preregistration-window.test.ts` pins that case and
+    // was red against the previous ordering.
+    //
+    // Equivalent to the old check and strictly earlier: the container is created
+    // directly under `tempRoot`, and `isInside` treats an equal path as inside,
+    // so `isInside(tree, tempRoot)` holds exactly when `isInside(tree, container)`
+    // would have. BOTH roots, not just the main one: the operator may have
+    // invoked from a LINKED worktree — this project's own agents always do — and
+    // a `TMPDIR` resolving inside that checkout would put SpecWitness
+    // directories in the workspace they are looking at.
+    //
+    // `mkdtemp` itself is deliberately KEPT. Closing the final syscall of the
+    // window would mean generating the container name here and creating it with
+    // `mkdir` after the record — trading a documented, resource-free leftover
+    // for a predictable temp-directory name, which is a security regression in
+    // the one place that must not have one.
+    const forbidden = [root.mainWorktreeRoot, root.worktreeRoot];
+    const violatedRoot = forbidden.find((tree) => isInside(tree, tempRoot));
+    if (violatedRoot !== undefined) {
+      throw new InfraError(
+        `refusing to create a worktree inside ${violatedRoot}: ${tempRoot}`,
+        'the OS temp directory resolves inside the tree being verified or the one you invoked from; set TMPDIR to a location outside both',
+      );
+    }
+
     // Wrapped, because an unusable temp root is an ORDINARY environment failure
     // and the operator needs the remedy rather than the syscall. Unwrapped, this
     // threw a plain Error, so the pipeline classified it `infra` correctly —
@@ -1052,16 +1095,12 @@ export function createGitVcs(options: GitVcsOptions): Vcs {
     }
     const worktreePath = join(container, WORKTREE_DIR);
 
-    // Belt and braces: if a tmpdir configuration ever points inside a tree we
-    // promised not to touch, the invariant is checked rather than trusted.
-    //
-    // BOTH roots, not just the main one. The operator may have invoked from a
-    // LINKED worktree — this project's own agents always do — and a `TMPDIR`
-    // resolving inside that checkout would put SpecWitness directories in the
-    // workspace the operator is looking at, visible in their `git status`.
-    // Checking only `mainWorktreeRoot` would miss exactly the case FR-19 is
-    // written about: "my workspace is never touched".
-    const forbidden = [root.mainWorktreeRoot, root.worktreeRoot];
+    // Belt and braces, and UNREACHABLE IN PRACTICE since the same invariant is
+    // now checked on `tempRoot` before `mkdtemp` runs (see above). Kept rather
+    // than deleted because it is the only guard that would still catch a
+    // container which somehow did not land under the temp root it was created
+    // in — and because a containment check that costs one string comparison is
+    // never the thing to economise on. If it ever fires, the pre-check is wrong.
     const violated = forbidden.find((tree) => isInside(tree, container));
     if (violated !== undefined) {
       await rm(container, { recursive: true, force: true });

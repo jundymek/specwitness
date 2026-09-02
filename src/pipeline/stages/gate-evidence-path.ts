@@ -158,3 +158,41 @@ export function gateEvidenceRelativePath(
 
   return `${GATE_EVIDENCE_DIR}/${stem}.${stream}.txt`;
 }
+
+/**
+ * The relative path of one DATA command's full captured output, for one stream (story 4.3).
+ *
+ *   `evidence/data-00-reset.stdout.txt`
+ *   `evidence/data-03.stderr.txt`       (id normalised to nothing)
+ *
+ * @param dataId The data command's declared id — its key under `data:` in the Project Config.
+ * @param index  Its position in declaration order. Zero-based.
+ * @param stream Which captured stream this file holds.
+ *
+ * WHY IT LIVES HERE RATHER THAN IN `data.ts`. Everything this module's header says about a gate
+ * id is true, unchanged, of a data-command id: it is only `nonEmptyString` in the merged schema,
+ * so an id containing `..` or one longer than a filesystem component limit would turn a
+ * perfectly good verification run into exit 3 — infrastructure being blamed for something that
+ * is not infrastructure. The derivation that prevents that is `slugify`, and a SECOND copy of it
+ * in another module is exactly the "two owners of one guardrail" this file's header warns
+ * against: the day one is fixed and the other is not, two evidence paths disagree about what is
+ * safe.
+ *
+ * So the `gate-` in this module's filename is historical rather than a scope. Data-command ids
+ * are unique by schema (they are object keys), and the index keeps names unique after slugify
+ * and after truncation, exactly as it does for gates. The `data-` stem keeps the two kinds of
+ * evidence distinguishable in a run directory a human reads by hand — a file called
+ * `gate-00-reset.stdout.txt` for something that was never a gate would be a small lie in an
+ * artifact whose whole value is that it does not tell them.
+ */
+export function dataEvidenceRelativePath(
+  dataId: string,
+  index: number,
+  stream: GateOutputStream,
+): string {
+  const ordinal = String(index).padStart(INDEX_WIDTH, '0');
+  const slug = slugify(dataId);
+  const stem = slug === '' ? `data-${ordinal}` : `data-${ordinal}-${slug}`;
+
+  return `${GATE_EVIDENCE_DIR}/${stem}.${stream}.txt`;
+}

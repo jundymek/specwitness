@@ -508,7 +508,18 @@ describe('an unusable temp root names the remedy, not the syscall', () => {
     // operator is told which one it is — and exit 3 means "fix the environment
     // and rerun", so this is the message that says WHAT to fix. An errno naming
     // an internal call does not.
-    const notADirectory = join(repo.path, 'first.txt');
+    //
+    // The fixture path lives in `repo.scratch` (the PARENT of the checkout) and
+    // NOT inside `repo.path`, and that distinction became load-bearing in story
+    // 4.1. Its owner rider moved the "refusing to create a worktree inside the
+    // tree being verified" check ahead of `mkdtemp`, so a `TMPDIR` pointing
+    // INSIDE the repository is now refused for containment before it is ever
+    // reached for being unusable. This test is about the unusable-temp-root
+    // diagnosis, so its fixture is made unusable WITHOUT also being contained —
+    // otherwise it would silently start asserting the other branch, and the
+    // ENOTDIR path predator reported would go uncovered.
+    const notADirectory = join(repo.scratch, 'not-a-directory.txt');
+    await writeFile(notADirectory, 'not a directory\n', 'utf8');
     const previous = process.env.TMPDIR;
     process.env.TMPDIR = notADirectory;
     try {

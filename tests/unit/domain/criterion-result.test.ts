@@ -323,3 +323,42 @@ describe('a human-verifiability criterion never auto-passes (Q39)', () => {
     expect(result.status).toBe('needs_human');
   });
 });
+
+/**
+ * Q38/Q39's SECOND NEEDS_HUMAN trigger, seen at execution time.
+ *
+ * A plan may carry a criterion whose contract says `verifiability: automated` as
+ * `needs-human` with reason `not-safely-automatable` — `domain/plan.ts` names it one of
+ * "Q39's TWO — and only two — NEEDS_HUMAN triggers". Nothing then executes for it, so
+ * before this the derivation saw zero attempts and returned `skipped`, which `aggregate`
+ * treats as inert: a criterion the plan-author explicitly refused to automate reported
+ * PASS, exit 0, merge-eligible. Found at the 4.7 seam, where the plan and the derivation
+ * first meet.
+ */
+describe('deriveCriterionResult — the plan carried the criterion as needs-human', () => {
+  it('is `needs_human`, not `skipped`, when the plan refused to automate it', () => {
+    const result = deriveCriterionResult(CRITERION, [], { plannedNeedsHuman: true });
+
+    expect(result.status).toBe('needs_human');
+  });
+
+  it('stays `skipped` when the plan did automate it and nothing ran', () => {
+    expect(deriveCriterionResult(CRITERION, [], { plannedNeedsHuman: false }).status).toBe(
+      'skipped',
+    );
+    expect(deriveCriterionResult(CRITERION, []).status).toBe('skipped');
+  });
+
+  it('carries the contract statement and severity, exactly as every other arm does', () => {
+    const result = deriveCriterionResult(CRITERION, [], { plannedNeedsHuman: true });
+
+    expect(result.statement).toBe(CRITERION.statement);
+    expect(result.severity).toBe('critical');
+  });
+
+  it('is unconditional: attempts do not override it, as human verifiability does not', () => {
+    const result = deriveCriterionResult(CRITERION, [attempt()], { plannedNeedsHuman: true });
+
+    expect(result.status).toBe('needs_human');
+  });
+});
