@@ -997,3 +997,96 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/);
   });
 });
+
+describe('every provider-authored string in an evaluation is redacted', () => {
+  // `description` sits in the same object as `expected` and `actual`, and all
+  // three are provider-authored plan text. Redacting two of the three was an
+  // inconsistency rather than a decision. (Codex review pass. Note the finding
+  // overstated the consequence — `deriveCriterionResult` copies only
+  // `expected`/`actual`/`evidence`, so `description` does not reach result.json
+  // today; this is defence in depth for a field a renderer is likely to surface.)
+  const PROJECT_SECRET = 'zzq-internal-9f2c1a5b7d3e';
+
+  it('redacts the assertion description, not just expected and actual', async () => {
+    const { attempt } = await run(
+      { exitCode: 0 },
+      {
+        assertions: [
+          {
+            description: `checks ANTHROPIC_API_KEY=${SEEDED_API_KEY} is unset`,
+            target: { source: 'exitCode' },
+            comparison: 'equals',
+            expected: '0',
+          },
+        ],
+      },
+    );
+
+    expect(attempt.assertionEvaluations[0]?.description).not.toContain(SEEDED_API_KEY);
+  });
+
+  it('applies configured extraPatterns to the description too', async () => {
+    const { attempt } = await run(
+      { exitCode: 0 },
+      {
+        assertions: [
+          {
+            description: `checks ${PROJECT_SECRET} is absent`,
+            target: { source: 'exitCode' },
+            comparison: 'equals',
+            expected: '0',
+          },
+        ],
+      },
+      { redaction: { extraPatterns: [/zzq-internal-[a-z0-9]+/g] } },
+    );
+
+    expect(attempt.assertionEvaluations[0]?.description).not.toContain(PROJECT_SECRET);
+  });
+
+  it('leaves an ordinary description readable', async () => {
+    const { attempt } = await run({ exitCode: 0 });
+
+    expect(attempt.assertionEvaluations[0]?.description).toBe('exits cleanly');
+  });
+});
+
+describe('the binary is redacted in not-found diagnostics', () => {
+  // `binary` is derived from the project-owner's DECLARED command, and
+  // `commandEvidence` already redacts `displayCommand` for the same reason: a
+  // declared command can legitimately carry a credential, and this message
+  // reaches `printError`, which writes it to stderr verbatim.
+  it('redacts a secret-bearing binary on the PATH branch', async () => {
+    const { attempt } = await run({ outcome: 'not-found', exitCode: null }, {}, {
+      command: resolvedCommand({
+        binary: `tool-ANTHROPIC_API_KEY=${SEEDED_API_KEY}`,
+        displayCommand: 'tool',
+      }),
+    });
+
+    const rendered = `${attempt.execError?.message ?? ''}\n${attempt.execError?.hint ?? ''}`;
+    expect(rendered).not.toContain(SEEDED_API_KEY);
+  });
+
+  it('redacts a secret-bearing binary on the worktree-path branch', async () => {
+    const { attempt } = await run({ outcome: 'not-found', exitCode: null }, {}, {
+      command: resolvedCommand({
+        binary: `./scripts/tool-ANTHROPIC_API_KEY=${SEEDED_API_KEY}`,
+        displayCommand: './scripts/tool',
+      }),
+    });
+
+    const rendered = `${attempt.execError?.message ?? ''}\n${attempt.execError?.hint ?? ''}`;
+    expect(rendered).not.toContain(SEEDED_API_KEY);
+    // The remedy must survive redaction — an operator still needs to be told to
+    // commit the file rather than install it.
+    expect(rendered).toContain('commit');
+  });
+
+  it('leaves an ordinary binary readable in the diagnosis', async () => {
+    const { attempt } = await run({ outcome: 'not-found', exitCode: null });
+
+    expect(attempt.execError?.message).toContain('node');
+    expect(attempt.execError?.message).toContain('not on PATH');
+  });
+});

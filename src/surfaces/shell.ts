@@ -646,7 +646,21 @@ function evaluate(
   return params.assertions.map((assertion) => {
     const actual = actualFor(assertion.target.source, result);
     return {
-      description: assertion.description,
+      // REDACTED like its two neighbours. `description` is provider-authored
+      // plan text sitting in the same object as `expected` and `actual`, which
+      // are redacted for exactly this threat model — leaving one of the three
+      // raw was an inconsistency rather than a decision.
+      //
+      // HONEST ABOUT THE BLAST RADIUS, because the review that found this
+      // overstated it: `description` does NOT reach `result.json` today.
+      // `deriveCriterionResult` copies only `expected`, `actual` and `evidence`
+      // into `DerivedCriterionResult` — verified in the merged source rather
+      // than assumed. So this is defence in depth, not the closing of a live
+      // leak. It is still worth doing: `description` is the human-readable
+      // label for an assertion, so a future renderer or a 4.7 timeline detail
+      // surfacing it is likely rather than far-fetched, and an ordinary
+      // description matches no redaction pattern, so the cost is nil.
+      description: redactText(assertion.description, redaction),
       satisfied: satisfies(assertion.comparison, actual, assertion.expected),
       // Redacted UNDECLARED. `actual` is captured output and `expected` is
       // provider-authored plan text; neither is a project owner's declared
@@ -668,6 +682,15 @@ function evaluate(
  * script present but untracked in the operator's working copy is genuinely
  * absent from the revision under verification. Same reasoning, and the same
  * two remedies, as the merged `notFoundError` in `pipeline/stages/gates.ts`.
+ *
+ * THE BINARY IS REDACTED even though it is project-owner-DECLARED, because it
+ * is derived from the declared command line and `commandEvidence` already
+ * redacts `displayCommand` for the same reason. The gates stage states the rule
+ * this follows: a declared command can legitimately carry a credential, and
+ * this message reaches `printError`, which writes it to stderr verbatim.
+ * Redacted UNDECLARED rather than with `{shellCommand: true}`, since a bare
+ * binary token is a fragment rather than a whole command line and the
+ * fail-closed default is the safer reading of a fragment. (Codex review pass.)
  */
 function notFoundExecError(
   params: ShellProbeParams,
@@ -678,17 +701,22 @@ function notFoundExecError(
   return namesAFile
     ? {
         message:
-          `shell probe '${safeId(params.probeId, redaction)}' could not start: '${binary}' does not exist in the ` +
+          `shell probe '${safeId(params.probeId, redaction)}' could not start: ` +
+          `'${redactText(binary, redaction)}' does not exist in the ` +
           'verification worktree',
         hint:
           'probes run against the revision under verification, not your working copy — commit ' +
-          `'${binary}' (an untracked or uncommitted file will not be there), or correct ` +
+          `'${redactText(binary, redaction)}' (an untracked or uncommitted file will not ` +
+          `be there), or correct ` +
           `observations.${safeId(params.commandId, redaction)} in .specwitness/config.yaml`,
       }
     : {
-        message: `shell probe '${safeId(params.probeId, redaction)}' could not start: '${binary}' is not on PATH`,
+        message:
+          `shell probe '${safeId(params.probeId, redaction)}' could not start: ` +
+          `'${redactText(binary, redaction)}' is not on PATH`,
         hint:
-          `install '${binary}', or correct observations.${safeId(params.commandId, redaction)} in ` +
+          `install '${redactText(binary, redaction)}', or correct ` +
+          `observations.${safeId(params.commandId, redaction)} in ` +
           '.specwitness/config.yaml — this is an environment problem, not a failure of the ' +
           'branch under verification',
       };
