@@ -596,6 +596,14 @@ async function resolvePlan(input: {
     );
   }
 
+  // THE OUTPUT DIRECTORY IS CHECKED BEFORE THE PROVIDER IS INVOKED, not before the write.
+  // It is a provider-INDEPENDENT precondition, and every one of those has to run first:
+  // compilation happens before a run directory exists, so a failure after it spends quota
+  // that no run document records — and rerunning repeats the charge, since nothing was
+  // written. `commands/plan.ts` checks this first for the same reason. Found by the fifth
+  // Codex review pass, as the instance the fourth one's fix had missed.
+  await assertPlansDirectory(projectRoot);
+
   const provenance = await readProviderProvenance(resolvedProvider, processRunner);
   const startedAt = input.clock.now().getTime();
 
@@ -616,7 +624,6 @@ async function resolvePlan(input: {
   // and a run that compiled one and kept it to itself would make the NEXT run compile
   // another — spending quota every time, and verifying against a plan no human ever saw.
   // `specwitness plan`'s own atomic writer, so there is one write path rather than two.
-  await assertPlansDirectory(projectRoot);
   await writePlanFileAtomically(projectRoot, epic, serializePlan(plan), {
     onDurabilityWarning: printWarning,
   });

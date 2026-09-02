@@ -264,6 +264,35 @@ describe('nothing provider-independent may fail AFTER quota has been spent', () 
     ).rejects.toThrow();
   });
 
+  it('refuses a MISSING plans directory BEFORE invoking the provider', async () => {
+    // The instance the previous fix missed: `assertPlansDirectory` is the compiled plan's
+    // OUTPUT precondition and ran after compilation, so a project whose `.specwitness/plans`
+    // is absent paid for a plan it could not store — and rerunning paid again, since nothing
+    // was written.
+    //
+    // ABSENT, not "present but a file": a plans path that is a file makes `readPlanFile`
+    // fail with ENOTDIR long before compilation, so that case refuses identically either
+    // way and would make this test pass without proving anything. Checked, and it did.
+    //
+    // The provider is configured but given NO fixture script, which is what makes an
+    // invocation visible from outside: the fake refuses with "has no fixture for role". So
+    // the two orderings produce different messages, and this test can tell them apart —
+    // without that, both would fail with the same plans-directory error and the test would
+    // pass either way.
+    const project = await fixture({
+      plan: false,
+      fakePlanAuthorWithoutScript: true,
+      missingPlansDir: true,
+    });
+
+    const { exitCode, stderr } = await runCli(['verify', project.epic], { cwd: project.root });
+
+    expect(exitCode).toBe(3);
+    expect(stderr).toContain('plans');
+    // THE ASSERTION THAT MATTERS: the provider was never reached.
+    expect(stderr).not.toContain('has no fixture for role');
+  });
+
   it('still compiles when the run really can proceed', async () => {
     // The guard above must not turn into a refusal for every gate-less project: one whose
     // contract HAS automated criteria is exactly what this epic exists to verify.

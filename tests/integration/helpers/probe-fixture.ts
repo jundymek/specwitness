@@ -83,6 +83,24 @@ export interface ProbeFixtureOptions {
   readonly brokenObservation?: boolean;
   /** Configure the shipped `fake` provider for the `plan-author` role. Default false. */
   readonly fakePlanAuthor?: boolean;
+  /**
+   * Configure the fake provider but write NO fixture script for it.
+   *
+   * This makes an INVOCATION detectable from the outside: the fake refuses with "has no
+   * fixture for role", so a test can tell whether a provider-independent precondition ran
+   * before compilation or after it. Without it, both orderings produce the same message.
+   */
+  readonly fakePlanAuthorWithoutScript?: boolean;
+  /**
+   * Remove `.specwitness/plans` entirely, so the compiled plan has nowhere to be stored.
+   *
+   * REMOVED rather than replaced with a file, and the difference decides whether the case
+   * is reachable at all: a plans path that exists but is not a directory makes `readPlanFile`
+   * fail with ENOTDIR long before compilation, so both orderings refuse identically. Only an
+   * ABSENT directory reads as "no plan yet", proceeds to compile, and then discovers it has
+   * nowhere to put the result.
+   */
+  readonly missingPlansDir?: boolean;
   /** Declare the service, and probe it. Default true. */
   readonly service?: boolean;
 }
@@ -574,7 +592,8 @@ export async function buildProbeFixture(
   const service = options.service ?? true;
   const plannedNeedsHuman = options.plannedNeedsHuman ?? false;
   const writePlan = options.plan ?? true;
-  const fakePlanAuthor = options.fakePlanAuthor ?? false;
+  const fakePlanAuthor =
+    (options.fakePlanAuthor ?? false) || options.fakePlanAuthorWithoutScript === true;
 
   const port = await freePort();
   const root = await mkdtemp(join(tmpdir(), 'specwitness-probe-fixture-'));
@@ -628,7 +647,7 @@ export async function buildProbeFixture(
       'utf8',
     );
 
-    if (fakePlanAuthor) {
+    if (fakePlanAuthor && options.fakePlanAuthorWithoutScript !== true) {
       await mkdir(join(root, 'fake-provider'), { recursive: true });
       await writeFile(
         join(root, 'fake-provider', 'plan-author.json'),
@@ -646,6 +665,10 @@ export async function buildProbeFixture(
       throw new Error(
         `fixture: 'specwitness contract ${epic} --freeze' failed (${frozen.exitCode}): ${frozen.stderr}`,
       );
+    }
+
+    if (options.missingPlansDir === true) {
+      await rm(join(root, '.specwitness', 'plans'), { recursive: true, force: true });
     }
 
     if (writePlan) {
