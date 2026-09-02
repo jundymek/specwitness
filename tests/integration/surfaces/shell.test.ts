@@ -36,6 +36,7 @@ import { ShellSurfaceExecutor } from '../../../src/surfaces/shell.js';
 import type { ShellExecutorDeps, ShellProbeParams } from '../../../src/surfaces/shell.js';
 
 import {
+  probeParams,
   recordingSink,
   recordingWriter,
   throwingRunner,
@@ -123,21 +124,11 @@ async function runProbe(
   const attempt = await executor.execute({
     criterionId: 'E4-01',
     surface: 'shell',
-    params: {
-      probeId: 'checker-probe',
+    params: probeParams({
+      id: 'checker-probe',
       commandId: 'checker',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-      ...params,
-    } as unknown as Readonly<Record<string, unknown>>,
+      ...(params as Record<string, unknown>),
+    }),
   });
 
   return { attempt, writer, sink };

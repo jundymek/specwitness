@@ -278,7 +278,12 @@ type ShellTargetSource = 'exitCode' | 'stdout' | 'stderr';
 const TARGET_SOURCES: readonly ShellTargetSource[] = ['exitCode', 'stdout', 'stderr'];
 
 /**
- * The narrow shape this executor reads out of `ProbeRequest.params`.
+ * The normalised, FLAT form this executor works with internally.
+ *
+ * **It is not the shape `params` arrives in.** `readParams` reads the MERGED
+ * `ShellProbe` model — `{id, mechanics: {commandId, args, argumentAllowlist},
+ * assertions}` — because that is what a compiled plan actually holds and what
+ * the caller can pass through unchanged. See `readParams` for why.
  *
  * `params` is `Readonly<Record<string, unknown>>` and the per-surface zod
  * schemas in `src/schemas/plan.ts` are MODULE-PRIVATE (`ShellProbeSchema` is
@@ -409,29 +414,68 @@ function assertionSpec(value: unknown, index: number): ShellAssertionSpec {
 }
 
 /**
- * Reads and validates the params, or throws an `InfraError`.
+ * Reads and validates `ProbeRequest.params`, or throws an `InfraError`.
  *
- * Every absent or wrong-typed field is REFUSED rather than defaulted, and the
- * allowlist is the field where that matters most: defaulting an absent
- * `argumentAllowlist` to "everything permitted" is fail-open, and defaulting it
- * to "nothing permitted" would silently disable a probe an operator believes is
- * running. Neither is honest, so neither happens.
+ * THE SHAPE IS THE MERGED `ShellProbe`, NOT A FLATTENED INVENTION.
+ *
+ * A compiled plan holds `{id, surface, mechanics: {commandId, args,
+ * argumentAllowlist}, assertions}`. This reads exactly that, plus `attempt` as
+ * orchestration metadata the caller adds, so story 4.7 can pass a `ShellProbe`
+ * through the `SurfaceExecutor` boundary unchanged.
+ *
+ * An earlier revision required a FLATTENED object with `probeId`, `commandId`,
+ * `args` and `argumentAllowlist` all at the top level. Every test constructed
+ * that shape, so the whole suite passed green while an ordinary plan probe
+ * would have been refused with an `InfraError` before execution — the executor
+ * unusable through the very boundary it implements, and 4.7 left to invent a
+ * shell-specific conversion nobody documented. The merged
+ * `src/surfaces/observation.ts` (story 4.5) reads the nested shape, so the two
+ * surfaces would have demanded different params of the same caller.
+ *
+ * Caught by the Codex review pass. It is the one finding in this story that
+ * broke INTEGRATION rather than leaking anything, and it is precisely the class
+ * 4.7's conformance test would have found in cohort 3 with nobody left to ask.
+ * A suite built entirely from one hand-written shape cannot detect that the
+ * shape is wrong — only a reader comparing it against the merged model can.
+ *
+ * `probeId` is accepted as an alias for `id`: one line, and it removes a whole
+ * class of 4.7 wiring failure, since the merged observation executor reads a
+ * top-level `probeId` too. The canonical name is `id`, because that is what
+ * `ProbeSpec` declares.
+ *
+ * EVERYTHING IS REFUSED RATHER THAN DEFAULTED. The allowlist is where that
+ * matters most: defaulting an absent `argumentAllowlist` to "everything
+ * permitted" is fail-open, and defaulting it to "nothing permitted" would
+ * silently disable a probe an operator believes is running. Neither is honest,
+ * so neither happens.
  */
 function readParams(raw: Readonly<Record<string, unknown>>): ShellProbeParams {
   if (!isRecord(raw)) {
     throw wiringDefect('they are not an object');
   }
-  for (const field of ['probeId', 'commandId'] as const) {
-    if (typeof own(raw, field) !== 'string' || own(raw, field) === '') {
-      throw wiringDefect(`'${field}' is not a non-empty string`);
-    }
+
+  const identifier = own(raw, 'id') ?? own(raw, 'probeId');
+  if (typeof identifier !== 'string' || identifier === '') {
+    throw wiringDefect("'id' is not a non-empty string");
   }
-  if (!Array.isArray(own(raw, 'args'))) {
-    throw wiringDefect("'args' is not an array");
+
+  const mechanics = own(raw, 'mechanics');
+  if (!isRecord(mechanics)) {
+    throw wiringDefect("'mechanics' is not an object");
   }
-  if (!Array.isArray(own(raw, 'argumentAllowlist'))) {
-    throw wiringDefect("'argumentAllowlist' is not an array");
+
+  const commandId = own(mechanics, 'commandId');
+  if (typeof commandId !== 'string' || commandId === '') {
+    throw wiringDefect("'mechanics.commandId' is not a non-empty string");
   }
+
+  if (!Array.isArray(own(mechanics, 'args'))) {
+    throw wiringDefect("'mechanics.args' is not an array");
+  }
+  if (!Array.isArray(own(mechanics, 'argumentAllowlist'))) {
+    throw wiringDefect("'mechanics.argumentAllowlist' is not an array");
+  }
+
   const declaredAssertions = own(raw, 'assertions');
   if (!Array.isArray(declaredAssertions) || declaredAssertions.length === 0) {
     // A probe that adjudicates nothing reaches `outcomeOf`'s "nothing was
@@ -442,15 +486,21 @@ function readParams(raw: Readonly<Record<string, unknown>>): ShellProbeParams {
   }
 
   const attempt = own(raw, 'attempt');
-  if (attempt !== undefined && (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1)) {
+  if (
+    attempt !== undefined &&
+    (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1)
+  ) {
     throw wiringDefect("'attempt' is not a positive integer");
   }
 
   return {
-    probeId: own(raw, 'probeId') as string,
-    commandId: own(raw, 'commandId') as string,
-    args: stringArray(own(raw, 'args'), 'args'),
-    argumentAllowlist: stringArray(own(raw, 'argumentAllowlist'), 'argumentAllowlist'),
+    probeId: identifier,
+    commandId,
+    args: stringArray(own(mechanics, 'args'), 'mechanics.args'),
+    argumentAllowlist: stringArray(
+      own(mechanics, 'argumentAllowlist'),
+      'mechanics.argumentAllowlist',
+    ),
     assertions: declaredAssertions.map((entry, index) => assertionSpec(entry, index)),
     ...(attempt === undefined ? {} : { attempt: attempt as number }),
   };

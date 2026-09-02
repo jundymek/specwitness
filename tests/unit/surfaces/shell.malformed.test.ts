@@ -36,6 +36,8 @@ import { ShellSurfaceExecutor } from '../../../src/surfaces/shell.js';
 import { FixedClock } from '../../fakes/ports.js';
 
 import {
+  processResult,
+  recordingRunner,
   recordingSink,
   recordingWriter,
   resolvedCommand,
@@ -45,24 +47,91 @@ import {
 
 const CAPTURED_AT = '2026-09-02T00:00:00.000Z';
 
-const WELL_FORMED = {
-  probeId: 'migrations-check',
-  commandId: 'migrations-applied',
-  args: [] as unknown[],
-  argumentAllowlist: [] as unknown[],
-  assertions: [
-    {
-      description: 'exits cleanly',
-      target: { source: 'exitCode' },
-      comparison: 'equals',
-      expected: '0',
+/**
+ * The MERGED `ShellProbe` shape, which is what `params` actually arrives in.
+ *
+ * This suite is only meaningful if its baseline is CORRECT: an adversarial case
+ * built on a wrong baseline is refused for the baseline rather than for the
+ * malformation, so every test passes vacuously and proves nothing. That is not
+ * hypothetical — this file was first written against a flattened shape, and
+ * when the executor was corrected to read the merged model, all 44 cases went
+ * green for exactly that wrong reason. `wellFormedIsAccepted` below is the
+ * guard against a repeat: if the baseline ever stops being executable, it fails
+ * and takes the premise of the whole file with it.
+ */
+function wellFormed(): Record<string, unknown> {
+  return {
+    id: 'migrations-check',
+    surface: 'shell',
+    mechanics: {
+      commandId: 'migrations-applied',
+      args: [] as unknown[],
+      argumentAllowlist: [] as unknown[],
     },
-  ] as unknown[],
-};
+    assertions: [
+      {
+        description: 'exits cleanly',
+        target: { source: 'exitCode' },
+        comparison: 'equals',
+        expected: '0',
+      },
+    ] as unknown[],
+  };
+}
+
+/** `wellFormed()` with `mechanics` replaced wholesale. */
+function withMechanics(mechanics: unknown): Record<string, unknown> {
+  return { ...wellFormed(), mechanics };
+}
+
+/** `wellFormed()` with one `mechanics` field overridden. */
+function mech(field: string, value: unknown): Record<string, unknown> {
+  const base = wellFormed();
+  return { ...base, mechanics: { ...(base['mechanics'] as object), [field]: value } };
+}
+
+/** `wellFormed()` with one top-level field overridden. */
+function top(field: string, value: unknown): Record<string, unknown> {
+  return { ...wellFormed(), [field]: value };
+}
 
 /** Runs the executor and returns what it threw, with a runner that must never be called. */
 async function attempt(params: unknown): Promise<{ error: unknown; spawns: number }> {
   const runner = throwingRunner();
+  const executor = new ShellSurfaceExecutor({
+    runner,
+    clock: new FixedClock(CAPTURED_AT),
+    cwd: WORKTREE,
+    command: resolvedCommand(),
+    writeEvidence: recordingWriter(),
+    recordEvidence: recordingSink(),
+  });
+
+  let error: unknown;
+  try {
+    await executor.execute({
+      criterionId: 'E4-01',
+      surface: 'shell',
+      params: params as Readonly<Record<string, unknown>>,
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  return { error, spawns: runner.calls.length };
+}
+
+/**
+ * Runs the executor with a runner that ALLOWS the spawn, for the positive
+ * control only.
+ *
+ * `attempt()` above injects a runner that throws on any call — that is what
+ * makes "nothing was spawned" provable. It therefore cannot also be used to
+ * show that a well-formed probe DOES run, so the positive control needs its own
+ * harness. Using the throwing runner for both would make the control assert the
+ * opposite of what it means.
+ */
+async function accepts(params: unknown): Promise<{ error: unknown; spawns: number }> {
+  const runner = recordingRunner(processResult());
   const executor = new ShellSurfaceExecutor({
     runner,
     clock: new FixedClock(CAPTURED_AT),
@@ -112,12 +181,36 @@ describe('the params object itself', () => {
 
 describe('the identifiers', () => {
   it.each([
-    ['probeId missing', { ...WELL_FORMED, probeId: undefined }],
-    ['probeId empty', { ...WELL_FORMED, probeId: '' }],
-    ['probeId a number', { ...WELL_FORMED, probeId: 7 }],
-    ['probeId an object', { ...WELL_FORMED, probeId: {} }],
-    ['commandId missing', { ...WELL_FORMED, commandId: undefined }],
-    ['commandId a number', { ...WELL_FORMED, commandId: 7 }],
+    ['id missing', top('id', undefined)],
+    ['id empty', top('id', '')],
+    ['id a number', top('id', 7)],
+    ['id an object', top('id', {})],
+    ['mechanics.commandId missing', mech('commandId', undefined)],
+    ['mechanics.commandId empty', mech('commandId', '')],
+    ['mechanics.commandId a number', mech('commandId', 7)],
+  ])('refuses when %s', async (_label, params) => {
+    await expectRefused(params);
+  });
+
+  it('accepts probeId as an alias for id', async () => {
+    // The merged observation executor reads a top-level `probeId`, so the alias
+    // removes a class of 4.7 wiring failure. It must genuinely work rather than
+    // merely be documented.
+    const { id, ...withoutId } = wellFormed();
+    void id;
+    const { error, spawns } = await accepts({ ...withoutId, probeId: 'migrations-check' });
+
+    expect(error).toBeUndefined();
+    expect(spawns).toBe(1);
+  });
+});
+
+describe('mechanics itself', () => {
+  it.each([
+    ['mechanics missing', withMechanics(undefined)],
+    ['mechanics null', withMechanics(null)],
+    ['mechanics a string', withMechanics('migrations-applied')],
+    ['mechanics an array', withMechanics([])],
   ])('refuses when %s', async (_label, params) => {
     await expectRefused(params);
   });
@@ -129,16 +222,16 @@ describe('args and argumentAllowlist — the allowlist-bypass shapes', () => {
   // interesting failure is not a crash — it is an argument that is neither
   // rejected nor equal to anything, reaching the child unexamined.
   it.each([
-    ['args is null', { ...WELL_FORMED, args: null }],
-    ['args is a string', { ...WELL_FORMED, args: '--dry-run' }],
-    ['args is an object', { ...WELL_FORMED, args: { 0: '--dry-run' } }],
-    ['an arg is a number', { ...WELL_FORMED, args: [7], argumentAllowlist: [7] }],
-    ['an arg is null', { ...WELL_FORMED, args: [null], argumentAllowlist: [null] }],
-    ['an arg is an object', { ...WELL_FORMED, args: [{}], argumentAllowlist: [{}] }],
-    ['an arg is an array', { ...WELL_FORMED, args: [['x']], argumentAllowlist: [['x']] }],
-    ['argumentAllowlist is null', { ...WELL_FORMED, argumentAllowlist: null }],
-    ['argumentAllowlist is missing', { ...WELL_FORMED, argumentAllowlist: undefined }],
-    ['an allowlist entry is a number', { ...WELL_FORMED, args: ['7'], argumentAllowlist: [7] }],
+    ['args is null', mech('args', null)],
+    ['args is a string', mech('args', '--dry-run')],
+    ['args is an object', mech('args', { 0: '--dry-run' })],
+    ['an arg is a number', withMechanics({ commandId: 'c', args: [7], argumentAllowlist: [7] })],
+    ['an arg is null', withMechanics({ commandId: 'c', args: [null], argumentAllowlist: [null] })],
+    ['an arg is an object', withMechanics({ commandId: 'c', args: [{}], argumentAllowlist: [{}] })],
+    ['an arg is an array', withMechanics({ commandId: 'c', args: [['x']], argumentAllowlist: [['x']] })],
+    ['argumentAllowlist is null', mech('argumentAllowlist', null)],
+    ['argumentAllowlist is missing', mech('argumentAllowlist', undefined)],
+    ['an allowlist entry is a number', withMechanics({ commandId: 'c', args: ['7'], argumentAllowlist: [7] })],
   ])('refuses when %s', async (_label, params) => {
     await expectRefused(params);
   });
@@ -147,92 +240,74 @@ describe('args and argumentAllowlist — the allowlist-bypass shapes', () => {
     // The bypass shape stated directly: `7` and `'7'` are different values, and
     // an unvalidated `7` compared against a Set containing `'7'` is neither
     // rejected nor matched. It must never get as far as that comparison.
-    await expectRefused({ ...WELL_FORMED, args: [7], argumentAllowlist: ['7'] });
+    await expectRefused(withMechanics({ commandId: 'c', args: [7], argumentAllowlist: ['7'] }));
   });
 });
 
 describe('assertions — the two-level dereference 4.4 was bitten by', () => {
+  const assertion = (value: unknown): Record<string, unknown> => top('assertions', [value]);
+
   it.each([
-    ['assertions is missing', { ...WELL_FORMED, assertions: undefined }],
-    ['assertions is empty', { ...WELL_FORMED, assertions: [] }],
-    ['assertions is null', { ...WELL_FORMED, assertions: null }],
-    ['assertions is an object', { ...WELL_FORMED, assertions: { 0: {} } }],
+    ['assertions is missing', top('assertions', undefined)],
+    ['assertions is empty', top('assertions', [])],
+    ['assertions is null', top('assertions', null)],
+    ['assertions is an object', top('assertions', { 0: {} })],
     // THE EXACT SHAPE THAT BIT 4.4.
-    ['an assertion is {}', { ...WELL_FORMED, assertions: [{}] }],
-    ['an assertion is null', { ...WELL_FORMED, assertions: [null] }],
-    ['an assertion is a string', { ...WELL_FORMED, assertions: ['exitCode == 0'] }],
-    [
-      'target is missing',
-      {
-        ...WELL_FORMED,
-        assertions: [{ description: 'd', comparison: 'equals', expected: '0' }],
-      },
-    ],
+    ['an assertion is {}', assertion({})],
+    ['an assertion is null', assertion(null)],
+    ['an assertion is a string', assertion('exitCode == 0')],
+    ['target is missing', assertion({ description: 'd', comparison: 'equals', expected: '0' })],
     [
       'target is null',
-      {
-        ...WELL_FORMED,
-        assertions: [{ description: 'd', target: null, comparison: 'equals', expected: '0' }],
-      },
+      assertion({ description: 'd', target: null, comparison: 'equals', expected: '0' }),
     ],
     [
       'target is a string',
-      {
-        ...WELL_FORMED,
-        assertions: [
-          { description: 'd', target: 'exitCode', comparison: 'equals', expected: '0' },
-        ],
-      },
+      assertion({ description: 'd', target: 'exitCode', comparison: 'equals', expected: '0' }),
     ],
     [
       'target.source is missing',
-      {
-        ...WELL_FORMED,
-        assertions: [{ description: 'd', target: {}, comparison: 'equals', expected: '0' }],
-      },
+      assertion({ description: 'd', target: {}, comparison: 'equals', expected: '0' }),
     ],
     [
       'target.source is unknown',
-      {
-        ...WELL_FORMED,
-        assertions: [
-          { description: 'd', target: { source: 'file' }, comparison: 'equals', expected: '0' },
-        ],
-      },
+      assertion({
+        description: 'd',
+        target: { source: 'file' },
+        comparison: 'equals',
+        expected: '0',
+      }),
     ],
     [
       'comparison is unknown',
-      {
-        ...WELL_FORMED,
-        assertions: [
-          { description: 'd', target: { source: 'stdout' }, comparison: 'regex', expected: '.*' },
-        ],
-      },
+      assertion({
+        description: 'd',
+        target: { source: 'stdout' },
+        comparison: 'regex',
+        expected: '.*',
+      }),
     ],
     [
       'comparison is missing',
-      {
-        ...WELL_FORMED,
-        assertions: [{ description: 'd', target: { source: 'stdout' }, expected: '0' }],
-      },
+      assertion({ description: 'd', target: { source: 'stdout' }, expected: '0' }),
     ],
     [
       'description is not a string',
-      {
-        ...WELL_FORMED,
-        assertions: [
-          { description: 7, target: { source: 'stdout' }, comparison: 'equals', expected: '0' },
-        ],
-      },
+      assertion({
+        description: 7,
+        target: { source: 'stdout' },
+        comparison: 'equals',
+        expected: '0',
+      }),
     ],
     [
       'expected is not a string',
-      {
-        ...WELL_FORMED,
-        assertions: [
-          { description: 'd', target: { source: 'stdout' }, comparison: 'equals', expected: 0 },
-        ],
-      },
+      assertion({
+        description: 'd',
+        target: { source: 'stdout' },
+        comparison: 'equals',
+        expected: 0,
+      }),
     ],
   ])('refuses when %s', async (_label, params) => {
     await expectRefused(params);
@@ -241,11 +316,11 @@ describe('assertions — the two-level dereference 4.4 was bitten by', () => {
 
 describe('the attempt number', () => {
   it.each([
-    ['a string', { ...WELL_FORMED, attempt: '2' }],
-    ['zero', { ...WELL_FORMED, attempt: 0 }],
-    ['negative', { ...WELL_FORMED, attempt: -1 }],
-    ['fractional', { ...WELL_FORMED, attempt: 1.5 }],
-    ['NaN', { ...WELL_FORMED, attempt: Number.NaN }],
+    ['a string', top('attempt', '2')],
+    ['zero', top('attempt', 0)],
+    ['negative', top('attempt', -1)],
+    ['fractional', top('attempt', 1.5)],
+    ['NaN', top('attempt', Number.NaN)],
   ])('refuses an attempt that is %s', async (_label, params) => {
     await expectRefused(params);
   });
@@ -256,7 +331,61 @@ describe('prototype-pollution shapes reach the same refusal', () => {
   // `__proto__` must not resolve through the prototype chain into something
   // that looks valid — an own-property read is what makes that impossible.
   it('refuses a params object whose fields live only on the prototype', async () => {
-    const hostile = Object.create({ ...WELL_FORMED }) as Record<string, unknown>;
+    const hostile = Object.create(wellFormed()) as Record<string, unknown>;
     await expectRefused(hostile);
+  });
+});
+
+describe('the premise of this file', () => {
+  it('wellFormed() is ACCEPTED and runs — otherwise every case above is vacuous', async () => {
+    // THE POSITIVE CONTROL, and the guard that would have caught the real bug.
+    //
+    // This file was first written against a FLATTENED params shape that the
+    // executor happened to require but a compiled plan never produces. When the
+    // executor was corrected to read the merged `ShellProbe` model, every
+    // adversarial case here went green — refused for the baseline rather than
+    // for its malformation. A suite of negative tests is worth exactly what its
+    // positive control is worth, and this file had none.
+    const { error, spawns } = await accepts(wellFormed());
+
+    expect(error).toBeUndefined();
+    expect(spawns).toBe(1);
+  });
+});
+
+describe('the shape contract itself', () => {
+  it('REFUSES the flattened shape this executor used to require', async () => {
+    // The defect, pinned from the other side. Story 4.6 originally required
+    // `{probeId, commandId, args, argumentAllowlist, assertions}` all at the top
+    // level — a shape no compiled plan produces. Every test constructed it, so
+    // the suite was green while a real plan probe was refused before execution.
+    //
+    // Asserting the old shape is now refused is a stronger guard than asserting
+    // the new one is accepted: it fails loudly if anyone "helpfully" restores
+    // top-level fallbacks to make an old caller work, which is exactly how the
+    // two shapes would start coexisting and the ambiguity would return.
+    await expectRefused({
+      probeId: 'migrations-check',
+      commandId: 'migrations-applied',
+      args: [],
+      argumentAllowlist: [],
+      assertions: [
+        {
+          description: 'exits cleanly',
+          target: { source: 'exitCode' },
+          comparison: 'equals',
+          expected: '0',
+        },
+      ],
+    });
+  });
+
+  it('accepts a probe carrying the extra keys a real ProbeSpec has', async () => {
+    // 4.7 should be able to pass a `ShellProbe` straight through, so unknown
+    // extra keys must not be fatal — `surface` is already one of them.
+    const { error, spawns } = await accepts({ ...wellFormed(), attempt: 2 });
+
+    expect(error).toBeUndefined();
+    expect(spawns).toBe(1);
   });
 });

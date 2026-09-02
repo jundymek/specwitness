@@ -151,3 +151,48 @@ export function resolvedCommand(
     ...overrides,
   };
 }
+
+/**
+ * Builds `ProbeRequest.params` in the MERGED `ShellProbe` shape.
+ *
+ * Every test goes through this rather than hand-writing an object, because the
+ * whole reason the flattened shape survived so long is that each test wrote its
+ * own copy of it: a suite built entirely from one hand-written shape cannot
+ * detect that the shape is wrong. One builder means one place to be wrong, and
+ * `tests/integration/surfaces/shell-plan-shape.test.ts` pins it against a probe
+ * parsed from real plan YAML by the merged `parsePlan`.
+ */
+export function probeParams(
+  overrides: {
+    id?: string;
+    commandId?: string;
+    args?: unknown;
+    argumentAllowlist?: unknown;
+    assertions?: unknown;
+    attempt?: number;
+  } = {},
+): Readonly<Record<string, unknown>> {
+  const {
+    id = 'migrations-check',
+    commandId = 'migrations-applied',
+    args = [],
+    argumentAllowlist = [],
+    assertions = [
+      {
+        description: 'exits cleanly',
+        target: { source: 'exitCode' },
+        comparison: 'equals',
+        expected: '0',
+      },
+    ],
+    attempt,
+  } = overrides;
+
+  return {
+    id,
+    surface: 'shell',
+    mechanics: { commandId, args, argumentAllowlist },
+    assertions,
+    ...(attempt === undefined ? {} : { attempt }),
+  } as Readonly<Record<string, unknown>>;
+}

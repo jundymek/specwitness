@@ -33,6 +33,7 @@ import {
 import {
   processResult,
   recordingRunner,
+  probeParams,
   recordingSink,
   recordingWriter,
   resolvedCommand,
@@ -77,21 +78,10 @@ async function run(
   const attempt = await executor.execute({
     criterionId: 'E4-01',
     surface: 'shell',
-    params: {
-      probeId: 'migrations-check',
-      commandId: 'migrations-applied',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-      ...params,
-    } as unknown as Readonly<Record<string, unknown>>,
+    params: probeParams({
+      ...(params as Record<string, unknown>),
+      ...(('probeId' in params) ? { id: (params as { probeId?: string }).probeId } : {}),
+    }),
   });
 
   return { attempt, writer, sink };
@@ -550,20 +540,10 @@ describe('the seeded-secret proof for this capture path', () => {
       await executor.execute({
         criterionId: 'E4-01',
         surface: 'shell',
-        params: {
-          probeId: 'migrations-check',
-          commandId: 'migrations-applied',
+        params: probeParams({
           args: [`--token=${SEEDED_API_KEY}`],
           argumentAllowlist: ['--dry-run'],
-          assertions: [
-            {
-              description: 'exits cleanly',
-              target: { source: 'exitCode' },
-              comparison: 'equals',
-              expected: '0',
-            },
-          ],
-        } as unknown as Readonly<Record<string, unknown>>,
+        }),
       });
     } catch (caught) {
       error = caught;
@@ -599,26 +579,15 @@ describe('plan-supplied IDENTIFIERS are redacted in diagnostics too', () => {
       recordEvidence: recordingSink(),
     });
 
-    const base = {
-      probeId: 'migrations-check',
-      commandId: 'migrations-applied',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-    };
-
     try {
+      const { probeId, ...rest } = params as { probeId?: string };
       const attempt = await executor.execute({
         criterionId: 'E4-01',
         surface: 'shell',
-        params: { ...base, ...params } as unknown as Readonly<Record<string, unknown>>,
+        params: probeParams({
+          ...(probeId === undefined ? {} : { id: probeId }),
+          ...(rest as Record<string, unknown>),
+        }),
       });
       // No throw: the diagnostic may instead live on the execError.
       return `${attempt.execError?.message ?? ''}\n${attempt.execError?.hint ?? ''}`;
@@ -702,22 +671,12 @@ describe('AD-10 config-declared extraPatterns reach every redaction path', () =>
       await executor.execute({
         criterionId: 'E4-01',
         surface: 'shell',
-        params: {
-          probeId: 'migrations-check',
-          commandId: 'migrations-applied',
+        params: probeParams({
           args: [PROJECT_SECRET],
           // The permitted list carries one too, so BOTH renderings are covered:
           // the rejected argument and the "permitted arguments are:" hint.
           argumentAllowlist: [`--token=${PROJECT_SECRET}`],
-          assertions: [
-            {
-              description: 'exits cleanly',
-              target: { source: 'exitCode' },
-              comparison: 'equals',
-              expected: '0',
-            },
-          ],
-        } as unknown as Readonly<Record<string, unknown>>,
+        }),
       });
     } catch (caught) {
       error = caught;
@@ -828,20 +787,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     }).execute({
       criterionId: 'E4-01',
       surface: 'shell',
-      params: {
-        probeId: 'p',
-        commandId: 'migrations-applied',
-        args: [],
-        argumentAllowlist: [],
-        assertions: [
-          {
-            description: 'exits cleanly',
-            target: { source: 'exitCode' },
-            comparison: 'equals',
-            expected: '0',
-          },
-        ],
-      } as unknown as Readonly<Record<string, unknown>>,
+      params: probeParams({ id: 'p' }),
     });
 
     expect(runner.calls[0]?.onProcessGroup).toBeDefined();
@@ -895,20 +841,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     // this worse cross-criterion form after the Codex collision finding.)
     const writer1 = recordingWriter();
     const writer2 = recordingWriter();
-    const probe = {
-      probeId: 'health',
-      commandId: 'migrations-applied',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-    };
+    const probe = probeParams({ id: 'health' });
 
     for (const [criterionId, writer] of [
       ['E4-01', writer1],
@@ -924,7 +857,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
       }).execute({
         criterionId,
         surface: 'shell',
-        params: probe as unknown as Readonly<Record<string, unknown>>,
+        params: probe,
       });
     }
 
@@ -951,19 +884,6 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     // missed this entirely. Found by the Codex review pass.
     const writerA = recordingWriter();
     const writerB = recordingWriter();
-    const base = {
-      commandId: 'migrations-applied',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-    };
 
     for (const [criterionId, probeId, writer] of [
       ['a-b', 'c', writerA],
@@ -979,7 +899,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
       }).execute({
         criterionId,
         surface: 'shell',
-        params: { ...base, probeId } as unknown as Readonly<Record<string, unknown>>,
+        params: probeParams({ id: probeId }),
       });
     }
 
