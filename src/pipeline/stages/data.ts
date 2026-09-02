@@ -174,6 +174,86 @@ export interface DataStageDeps {
 }
 
 /**
+ * The largest value an ECMA-262 array index may take, exclusive: `2^32 - 1`.
+ *
+ * Keys at or above it are ordinary string properties and keep insertion order.
+ */
+const ARRAY_INDEX_LIMIT = 2 ** 32 - 1;
+
+/**
+ * Is this key one that JavaScript enumerates OUT of insertion order?
+ *
+ * ECMA-262's `OrdinaryOwnPropertyKeys` lists **array-index keys first, in ascending numeric
+ * order**, and only then string keys in insertion order. So an object built as
+ * `{"2": …, "1": …}` enumerates as `1, 2` — the reverse of how it was written — while
+ * `{"reset": …, "seed": …}` enumerates as written.
+ *
+ * The set is precise and this predicate matches it exactly: a canonical decimal for an integer
+ * in `[0, 2^32 - 2]`. `"01"`, `"1.5"`, `"-1"` and `"1e3"` are NOT array indices — they round-trip
+ * to a different string — so they keep insertion order and must not be refused. A wider guard
+ * would reject ordinary ids for a hazard they do not have.
+ */
+function isArrayIndexKey(key: string): boolean {
+  const asNumber = Number(key);
+
+  return (
+    Number.isInteger(asNumber) &&
+    asNumber >= 0 &&
+    asNumber < ARRAY_INDEX_LIMIT &&
+    // The round-trip is what makes this canonical: `Number('01')` is 1, but `String(1)` is '01'
+    // -> false, and `'01'` genuinely does keep its insertion position.
+    String(asNumber) === key
+  );
+}
+
+/**
+ * Refuse a declaration whose execution order this stage cannot honour.
+ *
+ * FOUND BY REVIEW, and it is the one hole in the "insertion order is declaration order"
+ * reliance this file's header states. That reliance holds for every ordinary id and fails
+ * silently for integer-like ones, because the JS engine — not `yaml`, not zod — reorders them
+ * during enumeration. A project writing
+ *
+ *     data:
+ *       "2": ./scripts/seed.sh
+ *       "1": ./scripts/reset.sh
+ *
+ * would have its seed run before its reset, with nothing anywhere saying so.
+ *
+ * WHY REFUSE RATHER THAN FIX. The ordering information is already gone by the time this stage
+ * sees the object: it was destroyed when the YAML mapping became a JS object, upstream in
+ * `src/config/schema.ts` — story 1.3's file, which this story does not own and must not change.
+ * Preserving it properly means the schema keeping an ordered structure, which is a change for
+ * the owner to direct rather than one to make in a story branch. Until then the honest options
+ * are "run them in an order the operator did not write" or "refuse and say why", and for a path
+ * whose commands plausibly drop schemas, the second is the only defensible one. Fail closed,
+ * then explain.
+ *
+ * The blast radius is small by construction: `reset`, `seed` and `migrate` are what real data
+ * commands are called, and an operator who did write `"1"` gets an exit-3 message telling them
+ * to rename the key.
+ *
+ * **The identical latent defect exists in the merged services stage** (4.1) for
+ * `config.services`, which relies on the same property. It is not this story's file to change;
+ * it is reported to the owner in this story's PR body instead.
+ */
+function assertDeclarationOrderIsHonoured(ids: readonly string[]): void {
+  const reordering = ids.filter((id) => isArrayIndexKey(id));
+  if (reordering.length === 0) {
+    return;
+  }
+
+  throw new InfraError(
+    `data command id(s) ${reordering.map((id) => `'${id}'`).join(', ')} are integer-like, and ` +
+      'their execution order cannot be guaranteed to match the order they are declared in',
+    'JavaScript enumerates integer-like object keys first and in ascending numeric order, ' +
+      'whatever order they appear in the file, so data commands named this way could run in an ' +
+      'order you did not write — a seed before its reset, for example. Rename them to ' +
+      "non-numeric ids such as 'reset' or 'seed' in .specwitness/config.yaml",
+  );
+}
+
+/**
  * Split one declared command line, refusing the three malformed forms.
  *
  * Refused BEFORE spawning, and the reasoning is `gates.ts`'s verbatim because the hazard is
@@ -466,6 +546,10 @@ export function createDataStage(deps?: DataStageDeps): Stage {
       if (entries.length === 0) {
         return stageOk('no data commands declared');
       }
+
+      // Refused BEFORE the worktree check and before anything is spawned: an id whose order
+      // cannot be honoured is a declaration this stage must not execute at all.
+      assertDeclarationOrderIsHonoured(entries.map(([dataId]) => dataId));
 
       const cwd = context.run.environment.worktreePath;
       if (cwd === null) {

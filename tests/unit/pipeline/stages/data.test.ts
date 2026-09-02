@@ -177,6 +177,72 @@ describe('every data-command failure is infrastructure, never a product FAIL (AC
   });
 });
 
+describe('integer-like ids cannot silently reorder execution (AC3)', () => {
+  // Found by Codex review. `config.data` is a `z.record`, and this stage relies on object
+  // insertion order being declaration order — which holds for ordinary keys but NOT for
+  // integer-like ones: ECMA-262 enumerates array-index keys FIRST, in ascending numeric order,
+  // whatever order they were inserted in. So `data: {"2": …, "1": …}` would run "1" before "2",
+  // silently, and a reset/seed pair declared that way would execute backwards.
+  //
+  // The order information is destroyed by the time the stage sees the object, and
+  // `src/config/schema.ts` is story 1.3's file which this story may not change — so the honest
+  // move is to REFUSE the ids whose order cannot be honoured rather than to run them in an order
+  // the operator did not write.
+
+  it('refuses integer-like ids, spawning nothing, rather than running them out of order', async () => {
+    const runner = refusingRunner();
+    const stage = createDataStage(
+      deps({
+        data: declaredData([
+          { id: '2', run: 'node -e "process.exit(0)"' },
+          { id: '1', run: 'node -e "process.exit(0)"' },
+        ]),
+        runner,
+      }),
+    );
+
+    const error = await infraErrorFrom(stage.run(stageContext()));
+
+    expect(error.message).toMatch(/order/i);
+    // Both offending ids are named, so the fix is obvious without a second run.
+    expect(error.message).toContain('1');
+    expect(error.message).toContain('2');
+    expect(runner.calls).toStrictEqual([]);
+  });
+
+  it('refuses even a single integer-like id, since order is not the only thing at stake', async () => {
+    const runner = refusingRunner();
+    const stage = createDataStage(
+      deps({ data: declaredData([{ id: '0', run: 'node -e "process.exit(0)"' }]), runner }),
+    );
+
+    await infraErrorFrom(stage.run(stageContext()));
+
+    expect(runner.calls).toStrictEqual([]);
+  });
+
+  it.each([
+    ['01', 'a leading zero is not a canonical index'],
+    ['1.5', 'a decimal is not an index'],
+    ['-1', 'a negative is not an index'],
+    ['1e3', 'exponent notation is not a canonical index'],
+    ['reset2', 'a name that merely contains a digit'],
+    ['2reset', 'a name that merely starts with a digit'],
+  ])('permits %s (%s), because it keeps insertion order', async (id) => {
+    // The guard must be exactly the array-index set. Anything wider would reject ordinary ids
+    // for a hazard they do not have — and these all enumerate in insertion order.
+    const runner = recordingRunner(processResult());
+    const stage = createDataStage(
+      deps({ data: declaredData([{ id, run: 'node -e "process.exit(0)"' }]), runner }),
+    );
+
+    const result = await stage.run(stageContext());
+
+    expect(result.status).toBe('ok');
+    expect(runner.calls).toHaveLength(1);
+  });
+});
+
 describe('the worktree refusal — the destructive-command path (AD-8, FR-19)', () => {
   it('throws InfraError, spawning nothing, when data is declared and there is no worktree', async () => {
     // Falling back to the project root would run the operator's `reset` command against the

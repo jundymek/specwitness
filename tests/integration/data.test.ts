@@ -155,6 +155,29 @@ describe('the data stage against real processes (AC3)', () => {
     );
   });
 
+  it('refuses integer-like ids, which the real loader really does reorder', async () => {
+    // Found by Codex review, and proved here against the REAL config loader rather than argued
+    // from the spec: ECMA-262 enumerates array-index keys first and in ascending numeric order,
+    // so a project declaring "2" before "1" would have them execute backwards. The first
+    // assertion below is the evidence that the hazard is real end to end; the second is the
+    // refusal that stops a reset and a seed running in an order the operator did not write.
+    const worktree = scratch('specwitness-worktree-numeric-');
+    const data = loadDataCommands([
+      { id: '2', run: `${JSON.stringify(NODE)} -e "console.log('second')"` },
+      { id: '1', run: `${JSON.stringify(NODE)} -e "console.log('first')"` },
+    ]);
+
+    // The YAML said 2 then 1. The loaded object says 1 then 2. Nothing upstream is at fault —
+    // this is the JS object model, and it is exactly why the refusal exists.
+    expect(Object.keys(data)).toStrictEqual(['1', '2']);
+
+    await expect(
+      createDataStage({ data, runner: createProcessRunner(new SystemClock()) }).run(
+        stageContext(worktree),
+      ),
+    ).rejects.toThrow(InfraError);
+  });
+
   it('classifies a failing data command as InfraError and stops there', async () => {
     const worktree = scratch('specwitness-worktree-fail-');
     const data = loadDataCommands([
