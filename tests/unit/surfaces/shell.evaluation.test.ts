@@ -376,20 +376,20 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
 
     expect(attempt.evidence).toHaveLength(1);
     expect(attempt.evidence[0]?.kind).toBe('command');
-    expect(attempt.evidence[0]?.path).toMatch(/^evidence\/shell-E4-01-migrations-check-1\.json$/);
-    expect(writer.writes.map((w) => w.name)).toEqual([
-      'evidence/shell-E4-01-migrations-check-1.json',
-    ]);
+    expect(attempt.evidence[0]?.path).toMatch(
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/,
+    );
+    expect(writer.writes).toHaveLength(1);
   });
 
   it('writes a full copy per NON-EMPTY stream and refs each separately', async () => {
     const { attempt, writer } = await run({ stdout: 'out\n', stderr: 'err\n' });
 
-    expect(writer.writes.map((w) => w.name)).toEqual([
-      'evidence/shell-E4-01-migrations-check-1.stdout.txt',
-      'evidence/shell-E4-01-migrations-check-1.stderr.txt',
-      'evidence/shell-E4-01-migrations-check-1.json',
-    ]);
+    const names = writer.writes.map((w) => w.name);
+    expect(names).toHaveLength(3);
+    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/);
+    expect(names[1]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stderr\.txt$/);
+    expect(names[2]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/);
     expect(attempt.evidence).toHaveLength(3);
   });
 
@@ -397,9 +397,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     // An empty file is an artifact implying output that never existed.
     const { writer } = await run({ stdout: 'out\n', stderr: '' });
 
-    expect(writer.writes.map((w) => w.name)).not.toContain(
-      'evidence/shell-E4-01-migrations-check-1.stderr.txt',
-    );
+    expect(writer.writes.map((w) => w.name).filter((n) => n.includes('.stderr.'))).toEqual([]);
   });
 
   it('records the member even when the binary was missing and produced no output', async () => {
@@ -427,9 +425,10 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     // Exactly one ref: the member. No stream files — an empty file is an
     // artifact implying output that never existed.
     expect(attempt.evidence).toHaveLength(1);
-    expect(writer.writes.map((w) => w.name)).toEqual([
-      'evidence/shell-E4-01-migrations-check-1.json',
-    ]);
+    expect(writer.writes).toHaveLength(1);
+    expect(writer.writes[0]?.name).toMatch(
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/,
+    );
   });
 
   it('gives an error-derived criterion at least one evidence reference (FR-28)', async () => {
@@ -468,16 +467,17 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     const member = sink.members[0] as CommandEvidence;
     expect(member.stdout.truncated).toBe(true);
     expect(member.stdout.totalBytes).toBe(EVIDENCE_INLINE_CAP_BYTES + 500);
-    expect(member.stdout.fullPath).toBe('evidence/shell-E4-01-migrations-check-1.stdout.txt');
+    expect(member.stdout.fullPath).toMatch(
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/,
+    );
   });
 
   it('names the evidence files by the 1-based attempt', async () => {
     const { writer } = await run({ stdout: 'out\n' }, { attempt: 2 });
 
-    expect(writer.writes.map((w) => w.name)).toEqual([
-      'evidence/shell-E4-01-migrations-check-2.stdout.txt',
-      'evidence/shell-E4-01-migrations-check-2.json',
-    ]);
+    const names = writer.writes.map((w) => w.name);
+    expect(names.every((n) => /-[0-9a-f]{8}-2\./.test(n))).toBe(true);
+    expect(names).toHaveLength(2);
   });
 
   it('derives a safe filename from an id that is not filesystem-safe', async () => {
@@ -571,6 +571,87 @@ describe('the seeded-secret proof for this capture path', () => {
 
     const rendered = `${(error as Error).message}\n${(error as { hint?: string }).hint ?? ''}`;
     expect(rendered).not.toContain(SEEDED_API_KEY);
+  });
+});
+
+describe('AD-10 config-declared extraPatterns reach every redaction path', () => {
+  // The built-in rules cannot know a project's own secret shapes. AD-10's
+  // "config-declared extra patterns" are the only thing that can redact them,
+  // so a path that drops the options silently applies the built-ins ONLY — and
+  // a secret covered exclusively by extraPatterns travels on unredacted.
+  //
+  // This uses a token that NO built-in rule matches (no sensitive name, no
+  // header shape), so the assertion fails unless extraPatterns is actually
+  // threaded through. Found by the Codex review pass on the rejection path,
+  // which reaches `printError` and is written to stderr verbatim.
+  const PROJECT_SECRET = 'zzq-internal-9f2c1a5b7d3e';
+  const redaction = { extraPatterns: [/zzq-internal-[a-z0-9]+/g] };
+
+  it('redacts a rejected argument in the ConfigError message and hint', async () => {
+    const executor = new ShellSurfaceExecutor({
+      runner: recordingRunner(),
+      clock: new FixedClock(CAPTURED_AT),
+      cwd: WORKTREE,
+      command: resolvedCommand(),
+      writeEvidence: recordingWriter(),
+      recordEvidence: recordingSink(),
+      redaction,
+    });
+
+    let error: unknown;
+    try {
+      await executor.execute({
+        criterionId: 'E4-01',
+        surface: 'shell',
+        params: {
+          probeId: 'migrations-check',
+          commandId: 'migrations-applied',
+          args: [PROJECT_SECRET],
+          // The permitted list carries one too, so BOTH renderings are covered:
+          // the rejected argument and the "permitted arguments are:" hint.
+          argumentAllowlist: [`--token=${PROJECT_SECRET}`],
+          assertions: [
+            {
+              description: 'exits cleanly',
+              target: { source: 'exitCode' },
+              comparison: 'equals',
+              expected: '0',
+            },
+          ],
+        } as unknown as Readonly<Record<string, unknown>>,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    const rendered = `${(error as Error).message}\n${(error as { hint?: string }).hint ?? ''}`;
+    // ABSENT, not "the marker is present" (Epic 3 retro section 7).
+    expect(rendered).not.toContain(PROJECT_SECRET);
+  });
+
+  it('redacts an extraPatterns secret in evidence and in expected/actual', async () => {
+    const { attempt, writer, sink } = await run(
+      { stdout: `token ${PROJECT_SECRET}\n` },
+      {
+        assertions: [
+          {
+            description: 'stdout has no internal token',
+            target: { source: 'stdout' },
+            comparison: 'contains',
+            expected: 'nothing-like-this',
+          },
+        ],
+      },
+      { redaction },
+    );
+
+    for (const haystack of [
+      JSON.stringify(sink.members),
+      ...writer.writes.map((w) => w.contents),
+      JSON.stringify(attempt.assertionEvaluations),
+    ]) {
+      expect(haystack).not.toContain(PROJECT_SECRET);
+    }
   });
 });
 
@@ -762,14 +843,58 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     );
   });
 
-  it('leaves an ordinary readable id unsuffixed, so a run directory stays browsable', async () => {
+  it('keeps two AMBIGUOUSLY-JOINED criterion/probe pairs apart', async () => {
+    // criterion `a-b` + probe `c` and criterion `a` + probe `b-c` both join to
+    // `a-b-c`. A discriminator computed from that joined string cannot separate
+    // them — it is the identical input — so the identity is hashed with a NUL
+    // separator instead. Both stems are otherwise CLEAN, which is why a
+    // conditional discriminator (appended only when the slug lost information)
+    // missed this entirely. Found by the Codex review pass.
+    const writerA = recordingWriter();
+    const writerB = recordingWriter();
+    const base = {
+      commandId: 'migrations-applied',
+      args: [],
+      argumentAllowlist: [],
+      assertions: [
+        {
+          description: 'exits cleanly',
+          target: { source: 'exitCode' },
+          comparison: 'equals',
+          expected: '0',
+        },
+      ],
+    };
+
+    for (const [criterionId, probeId, writer] of [
+      ['a-b', 'c', writerA],
+      ['a', 'b-c', writerB],
+    ] as const) {
+      await new ShellSurfaceExecutor({
+        runner: recordingRunner(processResult({ stdout: 'ok\n' })),
+        clock: new FixedClock(CAPTURED_AT),
+        cwd: WORKTREE,
+        command: resolvedCommand(),
+        writeEvidence: writer,
+        recordEvidence: recordingSink(),
+      }).execute({
+        criterionId,
+        surface: 'shell',
+        params: { ...base, probeId } as unknown as Readonly<Record<string, unknown>>,
+      });
+    }
+
+    expect(writerA.writes.map((w) => w.name)).not.toEqual(writerB.writes.map((w) => w.name));
+  });
+
+  it('keeps the readable criterion and probe id in the filename', async () => {
     // The fingerprint is a tiebreak for a LOSSY slug, not decoration on every
     // name. A clean id must keep the name it always had.
     const { writer } = await run({ stdout: 'ok\n' }, { probeId: 'migrations-check' });
 
-    expect(writer.writes.map((w) => w.name)).toEqual([
-      'evidence/shell-E4-01-migrations-check-1.stdout.txt',
-      'evidence/shell-E4-01-migrations-check-1.json',
-    ]);
+    const names = writer.writes.map((w) => w.name);
+    expect(names).toHaveLength(2);
+    // The readable prefix survives; only the discriminator is opaque.
+    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/);
   });
 });

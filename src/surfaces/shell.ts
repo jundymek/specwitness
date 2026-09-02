@@ -453,7 +453,11 @@ function looksUnsubstituted(value: string): boolean {
  * ever substitutes one array and not the other, the failure looks exactly like
  * a genuine allowlist violation, so the hint names the real cause.
  */
-function enforceAllowlist(params: ShellProbeParams, command: ResolvedShellCommand): void {
+function enforceAllowlist(
+  params: ShellProbeParams,
+  command: ResolvedShellCommand,
+  redaction: RedactionOptions | undefined,
+): void {
   if (params.commandId !== command.commandId) {
     throw new ConfigError(
       `shell probe '${params.probeId}' references command id '${params.commandId}', but the ` +
@@ -476,7 +480,16 @@ function enforceAllowlist(params: ShellProbeParams, command: ResolvedShellComman
   // reaches `printError`, which writes ERROR:/HINT: to stderr verbatim, so an
   // unredacted argument here would leak in the terminal while the persisted
   // copy stayed clean.
-  const show = (value: string): string => redactText(value);
+  //
+  // THE OPTIONS ARE PASSED, and that is the whole point of threading them here.
+  // AD-10's "config-declared extra patterns" are the ONLY thing that can redact
+  // a project's own secret shapes — a bearer token format the built-in rules do
+  // not recognise. Calling `redactText(value)` bare, as an earlier revision did,
+  // silently applied the built-in rules only, so a secret covered exclusively by
+  // `extraPatterns` reached stderr verbatim from precisely the path this story
+  // exists to make safe. Every other redaction in this file already threads
+  // them; this one was the outlier. (Codex review pass.)
+  const show = (value: string): string => redactText(value, redaction);
   const halfSubstituted =
     rejected.some(looksUnsubstituted) || params.argumentAllowlist.some(looksUnsubstituted);
 
@@ -722,41 +735,58 @@ function fingerprint(raw: string): string {
 }
 
 /**
- * `evidence/shell-E4-01-migrations-check-1` — the stem all three files share.
+ * `evidence/shell-E4-01-migrations-check-4f2a1b9c-1` — the stem all three files
+ * for one attempt share.
  *
- * WHY A FINGERPRINT IS SOMETIMES APPENDED. `slugify` is LOSSY in two ways, and
- * both make two distinct probes collide onto one filename — after which the
- * second write silently overwrites the first, and the first probe's evidence
- * references point at another probe's content. Silently wrong evidence is worse
- * than missing evidence in a product whose only output is evidence.
+ * WHY BOTH A SLUG AND A DISCRIMINATOR. `slugify` is readable but LOSSY, and the
+ * pair `(criterionId, probeId)` is not uniquely recoverable from a joined
+ * string. Three distinct collisions follow, and every one of them ends the same
+ * way: a later write silently overwrites an earlier file while the earlier
+ * probe's evidence references keep pointing at it — so a reader is shown
+ * another probe's output under this probe's name. Silently wrong evidence is
+ * worse than missing evidence in a product whose only output is evidence.
  *
- *  1. SUBSTITUTION collides without any truncation: `a.b` and `a..b` are two
- *     distinct, schema-valid probe ids (4.2 enforces uniqueness within a
+ *  1. SUBSTITUTION, with no truncation at all: `a.b` and `a..b` are two
+ *     distinct, schema-valid probe ids (4.2 enforces uniqueness only WITHIN a
  *     criterion, so both may exist side by side) and both normalise to `a.b`.
- *  2. TRUNCATION collides at 64 characters: `Identifier` permits 128, so two
- *     ids sharing a long prefix become one stem.
+ *  2. TRUNCATION at 64 characters: `Identifier` permits 128, so two ids sharing
+ *     a long prefix become one slug.
+ *  3. AMBIGUOUS JOINING: criterion `a-b` with probe `c` and criterion `a` with
+ *     probe `b-c` both concatenate to `a-b-c`. A discriminator computed from
+ *     that same joined string cannot separate them either — it is the identical
+ *     input. Found by the Codex review pass after the first two were fixed, and
+ *     it is the one a hand-written test would never have thought to try.
+ *
+ * So the discriminator is computed over an UNAMBIGUOUS encoding — the two ids
+ * separated by NUL, which no `Identifier` and no criterion id can contain — and
+ * it is ALWAYS present rather than conditional. An earlier revision appended it
+ * only when the slug lost information, which left case 3 undetected precisely
+ * because both of its stems are clean. A conditional discriminator has to be
+ * right about when it is needed; an unconditional one does not.
  *
  * The merged `pipeline/stages/gate-evidence-path.ts` solves the same problem
- * with the gate's DECLARATION INDEX, and its comment names this exact case —
- * "it keeps two ids that become identical AFTER truncation apart". A probe has
- * no index in `ProbeRequest`, so the tiebreak is derived from the id instead of
- * supplied by the caller: no params change, and nothing for 4.7 to remember.
+ * with the gate's DECLARATION INDEX — and its comment names two of these three
+ * cases. It is not importable here (`adapters-core-only` forbids
+ * `src/surfaces/**` from reaching into `src/pipeline/**`), and an executor has
+ * no index to use anyway: it is handed one probe at a time and never sees the
+ * list. Stories 4.4 and 4.5 arrived independently at the same index-free
+ * substitute, which is the strongest evidence available that the constraint
+ * drove the design rather than any one of us.
  *
- * Appended ONLY when the slug lost information, so the ordinary readable case
- * (`shell-E4-01-migrations-check-1`) is unchanged and a run directory stays
- * browsable by eye. Raised by the Codex review pass, which was right.
+ * DETERMINISTIC, and that is load-bearing rather than incidental: a re-run must
+ * produce byte-identical paths, or a stored run directory diffs against its own
+ * repeat. Pinned by test.
  */
 function evidenceStem(criterionId: string, params: ShellProbeParams, attempt: number): string {
-  const raw = `${criterionId}-${params.probeId}`;
-  const slug = slugify(raw);
-  if (slug === '') {
-    // Nothing survived normalisation, so the fingerprint is the only thing
-    // keeping two such probes apart.
-    return `shell-${fingerprint(raw)}-${attempt}`;
-  }
-  return slug === raw
-    ? `shell-${slug}-${attempt}`
-    : `shell-${slug}-${fingerprint(raw)}-${attempt}`;
+  // NUL separator: unrepresentable in a criterion id or an `Identifier`, so the
+  // pair round-trips unambiguously into the hash.
+  const identity = `${criterionId}\u0000${params.probeId}`;
+  const slug = slugify(`${criterionId}-${params.probeId}`);
+  const discriminator = fingerprint(identity);
+
+  return slug === ''
+    ? `shell-${discriminator}-${attempt}`
+    : `shell-${slug}-${discriminator}-${attempt}`;
 }
 
 export class ShellSurfaceExecutor implements SurfaceExecutor {
@@ -779,7 +809,7 @@ export class ShellSurfaceExecutor implements SurfaceExecutor {
     // Nothing above this line has spawned anything, and nothing below it runs
     // if this throws. That ordering is the acceptance criterion, and the unit
     // suite proves it with a runner that fails the test if it is ever called.
-    enforceAllowlist(params, command);
+    enforceAllowlist(params, command, redaction);
 
     const result = await this.#deps.runner.run({
       binary: command.binary,

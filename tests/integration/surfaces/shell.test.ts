@@ -243,9 +243,12 @@ describe('AC1 — real exit codes and real output', () => {
     });
 
     const names = writer.writes.map((write) => write.name);
-    expect(names).toContain('evidence/shell-E4-01-checker-probe-1.stdout.txt');
-    expect(names).toContain('evidence/shell-E4-01-checker-probe-1.stderr.txt');
-    expect(names).toContain('evidence/shell-E4-01-checker-probe-1.json');
+    // The stem carries both ids and a content-derived discriminator, so the
+    // readable prefix is asserted and the 8-hex suffix is matched by shape.
+    const stem = /^evidence\/shell-E4-01-checker-probe-[0-9a-f]{8}-1/;
+    expect(names.filter((name) => stem.test(name) && name.endsWith('.stdout.txt'))).toHaveLength(1);
+    expect(names.filter((name) => stem.test(name) && name.endsWith('.stderr.txt'))).toHaveLength(1);
+    expect(names.filter((name) => stem.test(name) && name.endsWith('.json'))).toHaveLength(1);
     expect(attempt.evidence).toHaveLength(3);
   });
 });
