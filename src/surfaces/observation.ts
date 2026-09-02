@@ -86,9 +86,22 @@
  * one adapter over. Settled with 4.6 at intent-sync so that exactly one splitter exists in
  * the product. Nothing here mints, casts or imports the brand.
  *
- * AD-1: an adapter. Imports `src/domain/**` and nothing else — no config, no pipeline, no
+ * AD-1: an adapter. Imports `src/domain/**`, plus `node:crypto` — no config, no pipeline, no
  * application layer, no edge, no npm package.
+ *
+ * `node:crypto` IS PERMITTED HERE, and the first version of this file wrongly assumed it was
+ * not. Verified against the merged config rather than assumed:
+ * `no-side-effect-builtins-in-core` scopes its ban to `^src/(domain|schemas)/`, and
+ * `adapters-core-only` constrains `to: '^src/'` — a node builtin is not under `src/`.
+ * `src/schemas/canonical.ts` and `src/infra/ids.ts` both already import it.
+ *
+ * That mistake was not free. All three Epic 4 surfaces carried the DOMAIN layer's
+ * dependency-freedom rule into `src/surfaces/**` where it does not apply, and each then
+ * hand-rolled a 32-bit hash because of it — three surfaces, three weak discriminators, one
+ * self-imposed constraint mistaken for a rule.
  */
+
+import { createHash } from 'node:crypto';
 
 import {
   type AssertionEvaluation,
@@ -266,6 +279,25 @@ function malformed(what: string): never {
   throw new InfraError(`observation probe params are malformed: ${what}`, PARAMS_HINT);
 }
 
+/**
+ * Reads an OWN property, never an inherited one.
+ *
+ * Bracket access walks the prototype chain, so a params object built with
+ * `Object.create({...wellFormed})` validated and executed while carrying no own fields at
+ * all. That is the SILENT direction of the hand-validation defect class: not a read that
+ * throws, but one that SUCCEEDS when it should not, so nothing anywhere looks wrong.
+ *
+ * The merged `getObservationCommand` already states the rule for exactly this reason — "a
+ * prototype walk would resolve `constructor` or `toString` into something that is not a
+ * declared observation at all" — and `readPath` below already followed it for the
+ * observation command's own output. This file previously had the guard where untrusted
+ * input had been reasoned about and not where it had not, which is an inconsistency rather
+ * than a decision.
+ */
+function own(record: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 function asRecord(value: unknown, what: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return malformed(`${what} is not an object`);
@@ -303,20 +335,20 @@ function readAttempt(raw: unknown): number {
 function readAssertion(raw: unknown, index: number): ObservationAssertionSpec {
   const at = `assertions[${index}]`;
   const assertion = asRecord(raw, at);
-  const target = asRecord(assertion['target'], `${at}.target`);
+  const target = asRecord(own(assertion, 'target'), `${at}.target`);
 
   // Exactly one source exists for this surface, and Q35 is the reason: observation commands
   // MUST emit JSON, so there is nothing else to read from.
-  if (target['source'] !== 'jsonPath') {
-    return malformed(`${at}.target.source is '${String(target['source'])}', not 'jsonPath'`);
+  if (own(target, 'source') !== 'jsonPath') {
+    return malformed(`${at}.target.source is '${String(own(target, 'source'))}', not 'jsonPath'`);
   }
 
-  const phase = target['phase'];
+  const phase = own(target, 'phase');
   if (typeof phase !== 'string' || !PHASES.includes(phase as ObservationPhase)) {
     return malformed(`${at}.target.phase is not one of ${PHASES.join(', ')}`);
   }
 
-  const comparison = assertion['comparison'];
+  const comparison = own(assertion, 'comparison');
   if (
     typeof comparison !== 'string' ||
     !ASSERTION_COMPARISONS.includes(comparison as AssertionComparison)
@@ -327,30 +359,68 @@ function readAssertion(raw: unknown, index: number): ObservationAssertionSpec {
   }
 
   return {
-    description: asNonEmptyString(assertion['description'], `${at}.description`),
-    path: asNonEmptyString(target['path'], `${at}.target.path`),
+    description: asNonEmptyString(own(assertion, 'description'), `${at}.description`),
+    path: asNonEmptyString(own(target, 'path'), `${at}.target.path`),
     phase: phase as ObservationPhase,
     comparison: comparison as AssertionComparison,
     // NOT non-empty: an expectation of the empty string is a real expectation, exactly as
     // 4.2's schema records ("`expected: ""` is unambiguous in a way a blank statement is not").
-    expected: asString(assertion['expected'], `${at}.expected`),
+    expected: asString(own(assertion, 'expected'), `${at}.expected`),
   };
+}
+
+/**
+ * The probe's own identity — `id` canonical, `probeId` an explicit alias.
+ *
+ * WHY THIS IS NOT A ONE-LINE `??`. It was, and that was a defect. The merged domain model
+ * names the field `id`, so a caller who spreads a compiled probe — the natural move —
+ * supplied no `probeId`, and the old fallback quietly used `mechanics.commandId` instead.
+ * Evidence was then named after the COMMAND rather than the probe, and because two
+ * observation probes in one criterion may legitimately share a commandId (the ordinary
+ * before/after case: two observations of the same command around different actions), their
+ * evidence stems collapsed into one and overwrote each other.
+ *
+ * That is misattributed evidence — a reader shown another probe's output under this
+ * probe's name, with nothing anywhere looking wrong — which is the exact defect the
+ * criterion-scoped discriminator was added to prevent, reintroduced one line away by a
+ * convenience. `getObservationCommand` states the principle this file should have
+ * followed: it refuses an unknown id rather than substituting, "because quietly
+ * substituting anything would be a hole in the AD-3 boundary".
+ *
+ * BOTH SPELLINGS PRESENT AND DISAGREEING IS REFUSED, matching 4.6: "an alias that can
+ * resolve to a semantically different value is not an alias." Picking a winner silently
+ * would be the same substitution one level up.
+ */
+function readProbeId(raw: Record<string, unknown>): string {
+  const canonical = own(raw, 'id');
+  const alias = own(raw, 'probeId');
+
+  if (canonical !== undefined && alias !== undefined && canonical !== alias) {
+    return malformed(
+      `'id' and 'probeId' are both present and disagree (${String(canonical)} vs ${String(alias)}) — ` +
+        'they name one probe, so one of them is wrong',
+    );
+  }
+
+  // NO FALLBACK. A caller that supplied neither has mis-wired the request, and a wrong
+  // mapping must be loud rather than silently well-named.
+  return asNonEmptyString(canonical ?? alias, "'id' (or its alias 'probeId')");
 }
 
 function readParams(request: ProbeRequest): ObservationParams {
   const raw = request.params;
-  const mechanics = asRecord(raw['mechanics'], 'mechanics');
+  const mechanics = asRecord(own(raw, 'mechanics'), 'mechanics');
 
-  const rawArgs = mechanics['args'];
+  const rawArgs = own(mechanics, 'args');
   if (!Array.isArray(rawArgs)) {
     return malformed('mechanics.args is not an array');
   }
   const args = rawArgs.map((arg, index) => asString(arg, `mechanics.args[${index}]`));
 
-  const rawAround = mechanics['around'];
+  const rawAround = own(mechanics, 'around');
   const around = rawAround === undefined ? undefined : asNonEmptyString(rawAround, 'mechanics.around');
 
-  const rawAssertions = raw['assertions'];
+  const rawAssertions = own(raw, 'assertions');
   if (!Array.isArray(rawAssertions) || rawAssertions.length === 0) {
     // 4.2's `.min(1)`: "a probe that adjudicates nothing cannot mint a PASS". Without it,
     // `outcomeOf` reaches its `needs_human` safety branch — reachable only via this door.
@@ -379,12 +449,12 @@ function readParams(request: ProbeRequest): ObservationParams {
   }
 
   return {
-    probeId: asNonEmptyString(raw['probeId'] ?? mechanics['commandId'], 'probeId'),
-    commandId: asNonEmptyString(mechanics['commandId'], 'mechanics.commandId'),
+    probeId: readProbeId(raw),
+    commandId: asNonEmptyString(own(mechanics, 'commandId'), 'mechanics.commandId'),
     args,
     ...(around === undefined ? {} : { around }),
     assertions,
-    attempt: readAttempt(raw['attempt']),
+    attempt: readAttempt(own(raw, 'attempt')),
     criterionId: request.criterionId,
   };
 }
@@ -669,25 +739,35 @@ function slugify(id: string): string {
  * This executor sees one probe per call and has no index, so the discriminator is derived
  * from the identity itself.)
  *
- * FNV-1a, inline over `criterionId` + probe id: deterministic, and dependency-free so this
- * module still imports nothing but `src/domain` (AD-1). Determinism is load-bearing rather
- * than incidental — two runs of the same plan must produce byte-identical evidence paths,
- * which is what makes a run directory comparable across runs.
+ * SHA-256 over `criterionId` + probe id, truncated to 24 hex characters (96 bits).
+ * Deterministic, which is load-bearing rather than incidental: two runs of the same plan must
+ * produce byte-identical evidence paths, or a run directory stops being comparable across runs.
  *
- * NOT a security control. Nothing here defends against an attacker choosing a colliding id;
- * it separates honest ids, so a short non-cryptographic digest is the right tool.
+ * IT IS A SECURITY CONTROL, and the first two versions of this comment denied it. A plan is
+ * PROVIDER-AUTHORED, so the ids are chosen by whoever wrote it — a colliding pair is a chosen
+ * input, not an unlucky one, and the consequence is that one probe's evidence silently replaces
+ * another's while the stale reference still resolves.
+ *
+ * WHY 96 BITS AND NOT 48. A birthday collision costs ~2^(n/2) candidates, and that is cheap
+ * far longer than it looks. Measured on this function rather than reasoned about:
+ *
+ *     32 bits -> collision after     81,757 candidates in     57ms
+ *     40 bits -> collision after  2,097,109 candidates in  1,932ms
+ *     48 bits -> ~16.7M candidates, ~30s by extrapolation
+ *
+ * So the 32-bit FNV this file shipped first was seconds of work, and the 48-bit interim digest
+ * was still under a minute. 96 bits puts it at ~2^48, which is infeasible rather than merely
+ * unlikely — the property that actually matters when the input is chosen. The shell surface
+ * (4.6) reached 24 characters independently; this now matches it. **The http surface (4.4) is
+ * merged at 12 and is therefore the remaining outlier**, reported rather than edited here.
+ *
+ * The 48-bit interim was not an oversight so much as a misplaced tie-break: three surfaces had
+ * three widths, and matching the wrong one for uniformity's sake shipped the weaker number.
+ * Uniformity is worth having, but not at the width the security argument rejects.
  */
 function discriminator(criterionId: string, probeId: string): string {
-  // The separator keeps ('ab','c') and ('a','bc') apart. It is a character `Identifier`
-  // forbids, so neither side can contain one and the concatenation stays unambiguous.
-  const identity = `${criterionId}/${probeId}`;
-  let hash = 0x811c_9dc5;
-  for (let index = 0; index < identity.length; index += 1) {
-    hash ^= identity.charCodeAt(index);
-    // The FNV prime. `Math.imul` keeps the multiply in 32 bits without a BigInt.
-    hash = Math.imul(hash, 0x0100_0193) >>> 0;
-  }
-  return hash.toString(36).padStart(7, '0');
+  // The separator is a character `Identifier` forbids, so the concatenation is unambiguous.
+  return createHash('sha256').update(`${criterionId} ${probeId}`, 'utf8').digest('hex').slice(0, 24);
 }
 
 export class ObservationSurfaceExecutor implements SurfaceExecutor {
