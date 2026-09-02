@@ -202,6 +202,8 @@
  * application layer, never the edge.
  */
 
+import { createHash } from 'node:crypto';
+
 import {
   evidenceRef,
   httpEvidence,
@@ -703,10 +705,36 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
     // (exit 3, "SpecWitness could not observe this") rather than a product verdict drawn
     // from bytes nobody saw. Evidence still follows the observation: a real status, real
     // headers and real bytes did arrive, and they are the diagnostic.
-    const incompleteBody = body.failure !== undefined || body.capped;
+    // ONLY BODY-DEPENDENT ASSERTIONS NEED A COMPLETE BODY.
+    //
+    // The first version of this discarded every evaluation whenever the read hit the cap,
+    // which made a status-only probe against a large response report INFRASTRUCTURE FAILURE
+    // for something it had observed perfectly — and the hint it printed ("assert on a header
+    // or status instead") named a remedy that path did not actually offer. Found in review.
+    //
+    // A status and a header are complete the moment the response line and headers arrive;
+    // truncating the body cannot change either. `body` and `jsonPath` are the only targets a
+    // missing tail can move.
+    //
+    // ALL OR NOTHING PER ATTEMPT, though: when a body-dependent assertion IS declared, the
+    // whole attempt errors and NO evaluation is emitted. Emitting the status ones alongside
+    // an `execError` would be the "unsatisfied assertions beside an exec error" mistake in
+    // reverse — `outcomeOf` makes the exec error outrank them anyway, so they would be
+    // recorded evidence that no verdict is derived from.
+    const needsWholeBody = probe.assertions.some((assertion) =>
+      dependsOnBody(assertion.target),
+    );
+
+    // A SOCKET THAT DIED MID-BODY IS NOT THE SAME AS OUR OWN CAP, and the two are treated
+    // differently on purpose. The cap is SpecWitness's self-imposed bound truncating an
+    // exchange that otherwise SUCCEEDED, so if nothing asserted on the body, nothing was
+    // lost. A transport failure means the exchange itself did not complete, which is a fact
+    // about the environment worth surfacing even when the assertions do not touch the body —
+    // and erring toward `error` there never mints a pass.
+    const incompleteBody = body.failure !== undefined || (body.capped && needsWholeBody);
 
     const explanation = body.capped
-      ? `the response body exceeded the ${HTTP_BODY_READ_CAP_BYTES}-byte read cap, so the observation is incomplete and no assertion was adjudicated`
+      ? `the response body exceeded the ${HTTP_BODY_READ_CAP_BYTES}-byte read cap and was truncated at capture${needsWholeBody ? ', so no assertion was adjudicated' : '; no declared assertion reads the body, so all were adjudicated normally'}`
       : body.failure === undefined
         ? undefined
         : 'the response body was not fully received; the captured bytes are partial';
@@ -1061,6 +1089,18 @@ function evaluate(
 }
 
 /**
+ * Whether adjudicating this target requires the WHOLE response body.
+ *
+ * `status` and `header` are complete once the response line and headers have arrived, so a
+ * truncated body cannot change either. `body` and `jsonPath` read the payload itself, and a
+ * missing tail can flip both — a `notContains` most dangerously, since the forbidden string
+ * may be exactly what was not read.
+ */
+function dependsOnBody(target: HttpAssertionTarget): boolean {
+  return target.source === 'body' || target.source === 'jsonPath';
+}
+
+/**
  * The name an assertion's target reads under, or `undefined` when it has none.
  *
  * A status code and a whole body are anonymous — there is no key whose name could make them
@@ -1222,7 +1262,7 @@ function cappedBodyError(url: string, redaction: RedactionOptions | undefined): 
       `the response from ${url} exceeded the ${HTTP_BODY_READ_CAP_BYTES}-byte read cap, so the observation is incomplete`,
       redaction,
     ),
-    hint: 'assertions are never adjudicated against a partial response — target a narrower endpoint, or assert on a header or status instead of a very large body',
+    hint: 'a body-reading assertion is never adjudicated against a partial response — target a narrower endpoint, or assert only on the status and headers, which are adjudicated normally however large the body is',
   };
 }
 
@@ -1401,7 +1441,7 @@ function slugify(id: string): string {
 }
 
 /**
- * A short, deterministic fingerprint of the criterion+probe pair. FNV-1a, base36.
+ * A short, deterministic fingerprint of the criterion+probe pair. SHA-256, truncated.
  *
  * THIS IS WHAT MAKES THE FILENAME UNIQUE, and the slugs beside it are for a human reading
  * the directory. Two collisions are real rather than theoretical here, and neither is solved
@@ -1421,15 +1461,19 @@ function slugify(id: string): string {
  * fingerprint is the index-free equivalent — and it must be deterministic, so that re-running
  * the same plan produces the same paths rather than a directory that diffs against itself.
  *
- * Not a security control, so a non-cryptographic hash is the right tool: it distinguishes
- * accidental collisions, which is all that is being asked of it.
+ * THE DIGEST IS SHA-256 RATHER THAN THE 32-BIT FNV-1a THIS FIRST USED, and the reason is the
+ * one review gave: a 32-bit hash does not GUARANTEE the uniqueness this scheme relies on, and
+ * the consequence of a collision here is not a crash but a silent overwrite — one probe's
+ * evidence file replaced by another's, with the first probe's reference still pointing at it.
+ * That is misattributed evidence, which a reader trusts and cannot detect, and it is the exact
+ * failure this fingerprint was introduced to prevent. Twelve hex characters (48 bits) over the
+ * FULL, untruncated ids puts an accidental collision far beyond the number of probes any plan
+ * will hold.
+ *
+ * Still not a security control — nothing here defends against a chosen collision, and the ids
+ * come from a plan a human reviewed. It is a digest chosen so the uniqueness argument does not
+ * have to be made at all.
  */
 function fingerprint(text: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    // FNV prime, via shifts because the 32-bit multiply overflows a JS number.
-    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
-  }
-  return hash.toString(36).padStart(7, '0');
+  return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
 }

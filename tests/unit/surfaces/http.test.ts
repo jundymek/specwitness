@@ -829,6 +829,52 @@ describe('an incomplete observation may not adjudicate (review findings)', () =>
     expect(attempt.evidence.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('still adjudicates status and header assertions when the body is capped', async () => {
+    // The over-broad first fix reported INFRASTRUCTURE FAILURE for a probe that had observed
+    // everything it asserted on: a status and a header are complete the moment the response
+    // line and headers arrive, and truncating the body cannot move either. Worse, the hint it
+    // printed named a remedy ("assert on a header or status") that the same path refused.
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain', 'x-flavour': 'vanilla' });
+      response.end('d'.repeat(1_100_000));
+    });
+
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([
+        assertion({ source: 'status' }, 'equals', '200'),
+        assertion({ source: 'header', name: 'x-flavour' }, 'equals', 'vanilla'),
+      ]),
+    );
+
+    expect(attempt.execError).toBeUndefined();
+    expect(attempt.assertionEvaluations).toHaveLength(2);
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('pass');
+  });
+
+  it('errors when ANY declared assertion reads the capped body, and evaluates none', async () => {
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('e'.repeat(1_100_000));
+    });
+
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([
+        // Fully observable on its own — but it is not emitted, because emitting evaluations
+        // beside an execError is the mistake this module refuses everywhere else.
+        assertion({ source: 'status' }, 'equals', '200'),
+        assertion({ source: 'body' }, 'contains', 'anything'),
+      ]),
+    );
+
+    expect(attempt.execError).toBeDefined();
+    expect(attempt.assertionEvaluations).toEqual([]);
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
+  });
+
   it('treats a body of EXACTLY the cap as complete, not truncated', async () => {
     // `>=` reported a fully-captured body as truncated, which — now that truncation means
     // "did not observe it" — turned a complete observation into criterion `error` at one
