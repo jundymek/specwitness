@@ -214,7 +214,7 @@ describe('AC2 — the classification, produced rather than mocked', () => {
     expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
   });
 
-  it('classifies a genuinely missing binary as error, and writes no evidence', async () => {
+  it('classifies a genuinely missing binary as error, recording a reference but no member', async () => {
     const cwd = await workspace();
     const { executor, recorder } = executorFor(cwd, 'unused', {
       resolveCommand: () => ({
@@ -229,9 +229,15 @@ describe('AC2 — the classification, produced rather than mocked', () => {
 
     expect(attempt.execError).toBeDefined();
     expect(attempt.execError?.message).toMatch(/not found/i);
-    // Nothing ran, so nothing was observed and no ref is invented.
-    expect(attempt.evidence).toEqual([]);
+    // Nothing was observed, so no typed MEMBER is recorded — the union cannot represent
+    // "nothing ran" honestly. But this derives to a persisted non-pass, and FR-28 requires
+    // a reference on every one of those, so an attempt RECORD is written and ref'd instead.
+    // Amended by story 4.7, which measured this surface as the only one of the three
+    // producing a non-pass with zero references. See
+    // `tests/unit/surfaces/observation-attempt-record.test.ts`.
     expect(recorder.members).toEqual([]);
+    expect(attempt.evidence.length).toBeGreaterThan(0);
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).evidence?.length ?? 0).toBeGreaterThan(0);
     expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
   });
 

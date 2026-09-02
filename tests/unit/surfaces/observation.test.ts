@@ -566,19 +566,35 @@ describe('AC2 — the classification that matters most', () => {
     expect(evidence.everythingPersisted()).toContain('this is not json at all');
   });
 
-  it('writes no evidence at all when NOTHING was observed', async () => {
-    // The cohort's shared rule (bob's final wording): "no OBSERVATION, no ref". Never invent
-    // a ref for a file that was not written — `deriveCriterionResult` tolerates zero
-    // deliberately, because "inventing a value would be worse than omitting one".
+  it('records no MEMBER when nothing was observed, but does carry a reference', async () => {
+    // AMENDED BY STORY 4.7, and the amendment is narrow. The half that stands: no typed
+    // member is recorded, because `ObservationEvidence.snapshot` is a `BoundedText` with no
+    // absence marker, so a member here would be indistinguishable from one saying "I
+    // observed the state and it was empty" — a claim this attempt never made.
+    //
+    // The half that changed: this path derives to criterion `error`, which is a PERSISTED
+    // NON-PASS, and FR-28 requires every one of those to carry at least one evidence
+    // reference. It carried none. 4.7's surface-conformance test measured this surface as
+    // the only one of the three leaving a non-pass with zero refs, and 4.5's own PR body had
+    // disclosed the gap and assigned it to 4.7 — on the belief that closing it required
+    // widening the closed evidence union.
+    //
+    // It did not. The member and the reference are separate channels, which is how 4.4's
+    // merged `http.ts` closed its own version of this on a refused connection: write a
+    // redacted record of what was ATTEMPTED — never of what was observed — and ref that. See
+    // `tests/unit/surfaces/observation-attempt-record.test.ts`.
     const { executor: subject, evidence } = executor(
       new ScriptedRunner(processResult({ outcome: 'not-found', exitCode: null })),
     );
 
     const attempt = await subject.execute(request());
 
-    expect(attempt.evidence).toEqual([]);
-    expect(evidence.files).toEqual([]);
     expect(evidence.members).toEqual([]);
+    expect(attempt.evidence.length).toBeGreaterThan(0);
+    // The one file is the attempt record, and it says what it is.
+    expect(evidence.files).toHaveLength(1);
+    expect(evidence.files[0]?.name).toContain('.attempt.txt');
+    expect(evidence.files[0]?.contents).toContain('what was attempted');
   });
 
   it('records nothing for a command that COMPLETED but printed nothing', async () => {
@@ -589,16 +605,17 @@ describe('AC2 — the classification that matters most', () => {
     // made. It would also be byte-identical to a `not-found` member, collapsing two
     // different facts about the run into one audit record.
     //
-    // The cost is real and stated rather than hidden: this derives to criterion `error`
-    // with ZERO evidence refs, which is this surface's remaining FR-28 exposure. Closing it
-    // means an absence marker on the member, i.e. an ADR widening a closed union.
+    // The FR-28 exposure this comment used to describe is CLOSED as of story 4.7, and
+    // without widening any union: an attempt record is written and ref'd instead, on the
+    // separate reference channel. The member rule above is unchanged.
     const { executor: subject, evidence } = executor(new ScriptedRunner(processResult()));
 
     const attempt = await subject.execute(request());
 
     expect(attempt.execError).toBeDefined();
-    expect(attempt.evidence).toEqual([]);
     expect(evidence.members).toEqual([]);
+    // The reference channel carries the fact instead — see the note above.
+    expect(attempt.evidence.length).toBeGreaterThan(0);
     expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
   });
 

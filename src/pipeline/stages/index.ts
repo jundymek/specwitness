@@ -23,6 +23,7 @@ import type { VerifiableContractGuard } from './integrity.js';
 import { createPersistStage } from './persist.js';
 import type { PersistDeps } from './persist.js';
 import { createProbesStage } from './probes.js';
+import type { ProbesStageDeps } from './probes.js';
 import { createResolveStage } from './resolve.js';
 import { createServicesStage } from './services.js';
 import type { ServicesStageDeps } from './services.js';
@@ -108,6 +109,26 @@ export interface StageDependencies {
    * bounded inline evidence and only the pointer to a full copy is lost.
    */
   readonly data?: DataStageDeps;
+  /**
+   * The compiled plan's criteria plus the means to execute one probe (story 4.7).
+   *
+   * Optional, and the asymmetry with `gates` is the same one `services` and `data` have,
+   * for the same reason: an unwired probes stage executes nothing and SAYS SO in its
+   * timeline, leaving every criterion `skipped`, which cannot manufacture a verdict.
+   *
+   * The green-for-nothing case — a project with neither gates nor probes, whose run would
+   * aggregate to PASS having observed nothing — is refused at the CLI EDGE before the run
+   * starts (`assertSomethingToAdjudicate`), not here. Refusing here would persist a
+   * `result.json` beside a CLI exiting 3, and whoever opens that run directory later has
+   * no exit code to compare it against.
+   *
+   * `dispatch` carries every resolution the pipeline may not perform itself: AD-1 keeps
+   * `src/pipeline/**` out of `src/authoring/**`, and `adapters-core-only` keeps
+   * `src/surfaces/**` out of both `src/config/**` and `src/pipeline/**`, so the edge is
+   * the only place that can turn a plan's `serviceId` or `commandId` into something
+   * runnable.
+   */
+  readonly probes?: ProbesStageDeps;
   /** Releases the worktree and the process group. Stories 3.1 and 3.2 bind it. */
   readonly teardown?: TeardownDeps;
   /**
@@ -131,7 +152,7 @@ export function createStages(deps: StageDependencies): Stage[] {
     deps.gates === undefined ? createUnwiredGatesStage() : createGatesStage(deps.gates),
     createServicesStage(deps.services),
     createDataStage(deps.data),
-    createProbesStage(),
+    createProbesStage(deps.probes),
     createAggregateStage(),
     createPersistStage(deps.persist ?? {}),
     createTeardownStage(deps.teardown ?? {}),
