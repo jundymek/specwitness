@@ -739,17 +739,35 @@ function slugify(id: string): string {
  * This executor sees one probe per call and has no index, so the discriminator is derived
  * from the identity itself.)
  *
- * FNV-1a, inline over `criterionId` + probe id: deterministic, and dependency-free so this
- * module still imports nothing but `src/domain` (AD-1). Determinism is load-bearing rather
- * than incidental — two runs of the same plan must produce byte-identical evidence paths,
- * which is what makes a run directory comparable across runs.
+ * SHA-256 over `criterionId` + probe id, truncated to 24 hex characters (96 bits).
+ * Deterministic, which is load-bearing rather than incidental: two runs of the same plan must
+ * produce byte-identical evidence paths, or a run directory stops being comparable across runs.
  *
- * NOT a security control. Nothing here defends against an attacker choosing a colliding id;
- * it separates honest ids, so a short non-cryptographic digest is the right tool.
+ * IT IS A SECURITY CONTROL, and the first two versions of this comment denied it. A plan is
+ * PROVIDER-AUTHORED, so the ids are chosen by whoever wrote it — a colliding pair is a chosen
+ * input, not an unlucky one, and the consequence is that one probe's evidence silently replaces
+ * another's while the stale reference still resolves.
+ *
+ * WHY 96 BITS AND NOT 48. A birthday collision costs ~2^(n/2) candidates, and that is cheap
+ * far longer than it looks. Measured on this function rather than reasoned about:
+ *
+ *     32 bits -> collision after     81,757 candidates in     57ms
+ *     40 bits -> collision after  2,097,109 candidates in  1,932ms
+ *     48 bits -> ~16.7M candidates, ~30s by extrapolation
+ *
+ * So the 32-bit FNV this file shipped first was seconds of work, and the 48-bit interim digest
+ * was still under a minute. 96 bits puts it at ~2^48, which is infeasible rather than merely
+ * unlikely — the property that actually matters when the input is chosen. The shell surface
+ * (4.6) reached 24 characters independently; this now matches it. **The http surface (4.4) is
+ * merged at 12 and is therefore the remaining outlier**, reported rather than edited here.
+ *
+ * The 48-bit interim was not an oversight so much as a misplaced tie-break: three surfaces had
+ * three widths, and matching the wrong one for uniformity's sake shipped the weaker number.
+ * Uniformity is worth having, but not at the width the security argument rejects.
  */
 function discriminator(criterionId: string, probeId: string): string {
   // The separator is a character `Identifier` forbids, so the concatenation is unambiguous.
-  return createHash('sha256').update(`${criterionId} ${probeId}`, 'utf8').digest('hex').slice(0, 12);
+  return createHash('sha256').update(`${criterionId} ${probeId}`, 'utf8').digest('hex').slice(0, 24);
 }
 
 export class ObservationSurfaceExecutor implements SurfaceExecutor {

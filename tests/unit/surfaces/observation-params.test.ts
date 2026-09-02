@@ -133,7 +133,7 @@ describe('`id` is canonical; `probeId` is an explicit alias', () => {
 });
 
 describe('the discriminator resists a CHOSEN collision, not merely a chance one', () => {
-  it('carries a 12-character hex digest, not the old 7-character base36 hash', async () => {
+  it('carries a 24-character hex digest — wide enough to resist a CHOSEN collision', async () => {
     // ASSERTS THE PROPERTY, NOT THE FORMULA. Recomputing sha256(criterion + probe) here
     // would MIRROR the implementation rather than check it — the two would agree even if
     // both were wrong, which is the same self-consistency trap that let the probeId
@@ -143,9 +143,11 @@ describe('the discriminator resists a CHOSEN collision, not merely a chance one'
     const { evidence } = await execute({ ...REAL_PROBE });
     const name = evidence.files[0]?.name ?? '';
 
-    expect(name).toMatch(/-[0-9a-f]{12}-snapshot-1\./);
+    expect(name).toMatch(/-[0-9a-f]{24}-snapshot-1\./);
     // Nothing as narrow as the old digest may appear again.
+    // Neither the original 7-char base36 hash nor the 12-char (48-bit) interim width.
     expect(name).not.toMatch(/-[0-9a-z]{7}-snapshot-1\./);
+    expect(name).not.toMatch(/-[0-9a-f]{12}-snapshot-1\./);
   });
 
   it('separates two ids that share a prefix past the slug budget', async () => {
