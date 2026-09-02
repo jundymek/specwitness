@@ -216,25 +216,49 @@ async function verify(
     throw refFailure;
   }
 
-  // THE PLAN IS RESOLVED BEFORE ANYTHING IS CREATED OR SPAWNED, for the same
-  // reason `assertSomethingToAdjudicate` runs before the run: the `--no-ai`
-  // refusal and the auto-compilation both have to happen while there is still
-  // no run directory, no worktree and no process group in existence. A refusal
-  // afterwards would leave a `result.json` on disk describing a run that never
-  // adjudicated anything.
+  const clock = new SystemClock();
+  const store = new RunStore(projectRoot, clock, new RandomIds());
+
+  // ==========================================================================
+  // EVERY PROVIDER-INDEPENDENT PRECONDITION RUNS ABOVE THIS LINE.
+  // ==========================================================================
   //
-  // AND IT IS RESOLVED LAST AMONG THE PRE-RUN CHECKS, because resolving it may
-  // SPEND PROVIDER QUOTA. Compilation happens before a run directory exists, so
-  // anything that can fail after it and before `createRun` spends quota that no
-  // run document will ever record — which is precisely the auditability this
-  // command promises. An unresolvable ref used to cost a compilation to
-  // discover; now it costs nothing. Found by the fourth Codex review pass.
+  // Resolving the plan may SPEND PROVIDER QUOTA, and compilation happens before
+  // a run directory exists — so anything able to fail after it and before
+  // `createRun` spends quota that no run document will ever record, which is
+  // exactly the auditability this command promises. Refs, the store, the plans
+  // directory and the contract-only half of the adjudicability refusal are all
+  // answerable without a provider, so all of them are answered first.
   //
-  // The refusal ordering above is unaffected: `resolvePlan` verifies the
-  // contract before invoking anything, so a tampered contract still refuses
-  // with its own hint rather than being masked.
+  // This was three separate review findings before it was stated as one rule
+  // (Codex passes four, five and six, each naming a different check that had
+  // drifted below the line). A NEW PRECONDITION THAT NEEDS NO PROVIDER GOES
+  // ABOVE HERE — that is the invariant, and it is cheaper to keep than to
+  // rediscover one check at a time.
+  //
+  // THE RESIDUAL, stated because it cannot be closed by ordering: `createRun`
+  // can still fail for reasons no pre-check predicts — a full disk, a revoked
+  // permission between the check and the write. Quota is then spent with no run
+  // document. It is not invisible even so: the compiled plan is written to disk
+  // first, and its `meta.provenance` records the provider, the model and the
+  // moment. `providerUsage` is the per-RUN view of a spend the artifact already
+  // records.
+  if (!store.isInitialized()) {
+    throw new InfraError(
+      `this project is not initialised for SpecWitness (no .specwitness directory in ${projectRoot})`,
+      "run 'specwitness init' first, or change to the project root",
+    );
+  }
+
   assertCouldEverAdjudicate(config, loaded);
 
+  // The `--no-ai` refusal and the auto-compilation both have to happen while
+  // there is still no run directory, no worktree and no process group in
+  // existence — a refusal afterwards would leave a `result.json` on disk
+  // describing a run that never adjudicated anything. The refusal ordering
+  // above is unaffected: `resolvePlan` verifies the contract before invoking
+  // anything, so a tampered contract still refuses with its own hint rather
+  // than being masked by a ref error.
   const planning = await resolvePlan({
     projectRoot,
     epic,
@@ -246,15 +270,6 @@ async function verify(
   });
 
   assertSomethingToAdjudicate(config, planning.plan);
-
-  const clock = new SystemClock();
-  const store = new RunStore(projectRoot, clock, new RandomIds());
-  if (!store.isInitialized()) {
-    throw new InfraError(
-      `this project is not initialised for SpecWitness (no .specwitness directory in ${projectRoot})`,
-      "run 'specwitness init' first, or change to the project root",
-    );
-  }
 
   // Creates the run directory and fsyncs its manifest BEFORE any resource is
   // acquired (AD-8), so a `kill -9` from here on still leaves a record that

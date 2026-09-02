@@ -15,7 +15,7 @@
  * here as well as in the PR body, so a green suite is not read as more than it is.
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -290,6 +290,19 @@ describe('nothing provider-independent may fail AFTER quota has been spent', () 
     expect(exitCode).toBe(3);
     expect(stderr).toContain('plans');
     // THE ASSERTION THAT MATTERS: the provider was never reached.
+    expect(stderr).not.toContain('has no fixture for role');
+  });
+
+  it('refuses an uninitialised project BEFORE invoking the provider', async () => {
+    // The third finding in this class, which is why the ordering is now stated as an
+    // invariant in `verify.ts` rather than patched one check at a time: EVERY
+    // provider-independent precondition runs before the plan is resolved.
+    const project = await fixture({ plan: false, fakePlanAuthorWithoutScript: true });
+    await rm(join(project.root, '.specwitness'), { recursive: true, force: true });
+
+    const { exitCode, stderr } = await runCli(['verify', project.epic], { cwd: project.root });
+
+    expect(exitCode).toBe(3);
     expect(stderr).not.toContain('has no fixture for role');
   });
 
