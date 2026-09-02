@@ -39,10 +39,22 @@ const openServers: (Server | SocketServer)[] = [];
 
 afterEach(async () => {
   // A leaked listener holds a port and the next run fails somewhere else entirely.
+  //
+  // `closeAllConnections()` BEFORE `close()`, because `close()` stops accepting new sockets but
+  // WAITS for live ones — and the black-hole fixture exists precisely to hold a request open.
+  // In practice the timeout tests do not hang: `AbortSignal.timeout` makes undici destroy the
+  // socket, so nothing is still active by the time this runs, and the suite has terminated at
+  // exit 0 on every run. But that termination depends on the HTTP CLIENT's abort behaviour
+  // rather than on anything this file does, and a hang here would present as the whole suite
+  // stalling with no failing test — the least diagnosable shape a test defect has. So it is
+  // made explicit rather than relied upon.
   await Promise.all(
     openServers.splice(0).map(
       (server) =>
         new Promise<void>((resolve) => {
+          if ('closeAllConnections' in server) {
+            server.closeAllConnections();
+          }
           server.close(() => resolve());
         }),
     ),
@@ -771,6 +783,35 @@ describe('mechanical assertion evaluation (AC1)', () => {
       true,
       true,
     ]);
+  });
+
+  it('survives a deeply nested JSON value, failing closed rather than throwing', async () => {
+    // JSON.stringify RECURSES, so a deeply nested object throws RangeError — and the value came
+    // out of an untrusted response body. Unguarded, that escaped execute() AFTER the request as
+    // an unclassified rejection: no attempt, no evidence, no verdict, from a payload well inside
+    // the 1 MiB read cap. The cap bounds SIZE; nothing bounded DEPTH.
+    let nested = '1';
+    for (let depth = 0; depth < 60_000; depth += 1) {
+      nested = `[${nested}]`;
+    }
+    const body = `{"deep":${nested}}`;
+    expect(body.length).toBeLessThan(HTTP_BODY_READ_CAP_BYTES);
+
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(body);
+    });
+
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'jsonPath', path: 'deep' }, 'equals', 'anything')]),
+    );
+
+    // A classified attempt came back at all — that is the point — and it fails closed.
+    expect(attempt.execError).toBeUndefined();
+    expect(attempt.assertionEvaluations).toHaveLength(1);
+    expect(attempt.assertionEvaluations[0]?.satisfied).toBe(false);
   });
 
   it('leaves a numeric comparison unsatisfied when a side is not a number, without crashing', async () => {

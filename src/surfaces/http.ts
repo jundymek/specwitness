@@ -597,7 +597,21 @@ function renderJsonValue(value: unknown): string {
   if (typeof value === 'number' || typeof value === 'boolean') {
     return String(value);
   }
-  return JSON.stringify(value) ?? '';
+
+  // `JSON.stringify` RECURSES, so a deeply nested object throws `RangeError: Maximum call stack
+  // size exceeded` — and the value came out of a response body, which is untrusted by
+  // definition. Unguarded, that escaped `execute()` AFTER the request as an unclassified
+  // rejection: no attempt, no evidence, no verdict, from a payload comfortably inside the
+  // 1 MiB read cap. The cap bounds SIZE; nothing bounded DEPTH. Found in review.
+  //
+  // Fails closed, as an unsatisfied assertion rather than an `execError`: the value really was
+  // observed, it simply cannot be rendered as text to compare — an honest statement about what
+  // was seen, and one that can never mint a pass, since no `expected` matches this marker.
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return '<value could not be rendered for comparison: too deeply nested>';
+  }
 }
 
 /* ── comparisons ────────────────────────────────────────────────────────────────────── */
