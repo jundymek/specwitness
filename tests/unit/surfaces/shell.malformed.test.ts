@@ -389,3 +389,47 @@ describe('the shape contract itself', () => {
     expect(spawns).toBe(1);
   });
 });
+
+describe('the id alias cannot become a silent substitution', () => {
+  it('gives the SAME evidence path whether the caller spreads id or maps probeId', async () => {
+    // Story 4.5 found this on their surface: their validator falls back from
+    // `probeId` to `mechanics.commandId`, so one probe produced two different
+    // evidence paths depending on whether the caller spread `{...probe}` or
+    // mapped `{probeId: probe.id}` — both accepted, silently. That is
+    // misattributed evidence arriving through a convenience rather than a hash
+    // collision.
+    //
+    // Here `probeId` is an ALIAS, so both callers must name the same files.
+    const spread = recordingWriter();
+    const mapped = recordingWriter();
+
+    for (const [params, writer] of [
+      [wellFormed(), spread],
+      [(() => {
+        const { id, ...rest } = wellFormed();
+        return { ...rest, probeId: id };
+      })(), mapped],
+    ] as const) {
+      await new ShellSurfaceExecutor({
+        runner: recordingRunner(processResult({ stdout: 'ok\n' })),
+        clock: new FixedClock(CAPTURED_AT),
+        cwd: WORKTREE,
+        command: resolvedCommand(),
+        writeEvidence: writer,
+        recordEvidence: recordingSink(),
+      }).execute({
+        criterionId: 'E4-01',
+        surface: 'shell',
+        params: params as Readonly<Record<string, unknown>>,
+      });
+    }
+
+    expect(spread.writes.map((w) => w.name)).toEqual(mapped.writes.map((w) => w.name));
+    expect(spread.writes.length).toBeGreaterThan(0);
+  });
+
+  it('REFUSES a params object where id and probeId disagree', async () => {
+    // An alias that can resolve to a different value is not an alias.
+    await expectRefused({ ...wellFormed(), probeId: 'a-different-probe' });
+  });
+});

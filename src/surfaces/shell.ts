@@ -456,7 +456,30 @@ function readParams(raw: Readonly<Record<string, unknown>>): ShellProbeParams {
     throw wiringDefect('they are not an object');
   }
 
-  const identifier = own(raw, 'id') ?? own(raw, 'probeId');
+  // `probeId` is an ALIAS for `id`, never a fallback to a different field. Both
+  // names must mean the same probe, so carrying both with different values is
+  // refused rather than silently resolved in favour of one.
+  //
+  // Story 4.5 found the cost of the looser reading on their own surface: their
+  // validator falls back from `probeId` to `mechanics.commandId`, so the SAME
+  // probe produced two different evidence paths depending on whether the caller
+  // spread `{...probe}` or mapped `{probeId: probe.id}` — silently, with both
+  // accepted. That is the misattributed-evidence defect again, arriving through
+  // a convenience rather than a hash collision. An alias that can resolve to a
+  // semantically different value is not an alias.
+  const declaredId = own(raw, 'id');
+  const aliasId = own(raw, 'probeId');
+  if (
+    typeof declaredId === 'string' &&
+    typeof aliasId === 'string' &&
+    declaredId !== aliasId
+  ) {
+    throw wiringDefect(
+      "'id' and its alias 'probeId' are both present and disagree — they name one probe",
+    );
+  }
+
+  const identifier = declaredId ?? aliasId;
   if (typeof identifier !== 'string' || identifier === '') {
     throw wiringDefect("'id' is not a non-empty string");
   }
