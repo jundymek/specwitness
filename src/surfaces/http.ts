@@ -1654,13 +1654,15 @@ function messageOf(error: unknown): string {
 /* ── evidence file names ────────────────────────────────────────────────────────────── */
 
 /**
- * Hex characters of SHA-256 kept in an evidence filename's discriminator: 24, i.e. 96 bits.
+ * Hex characters an evidence filename's discriminator carries: 64 — the FULL SHA-256 digest,
+ * not a truncation of it.
  *
- * Exported so a test can pin it — a width is the kind of constant that gets "tidied" smaller by
- * someone who reads it as cosmetic, and this one is load-bearing. Matches `shell.ts` and
- * `observation.ts` exactly; see `fingerprint` for why 48 bits was not enough.
+ * Exported so a test can pin it, because a width is the kind of constant that gets "tidied"
+ * smaller by someone reading it as cosmetic, and this one is load-bearing. `fingerprint`
+ * explains why truncation was wrong twice; the short version is that truncating a digest costs
+ * collision resistance and, here, buys nothing at all.
  */
-export const EVIDENCE_DIGEST_HEX = 24;
+export const EVIDENCE_DIGEST_HEX = 64;
 
 const UNSAFE = /[^A-Za-z0-9._-]+/g;
 const SLUG_MAX_CHARS = 64;
@@ -1734,16 +1736,40 @@ function slugify(id: string): string {
  * That is misattributed evidence, which a reader trusts and cannot detect, and it is the exact
  * failure this fingerprint was introduced to prevent.
  *
- * ── WIDTH IS 24 HEX CHARACTERS (96 BITS), AND IT IS A SECURITY CHOICE ──────────────────
+ * ── THE DIGEST IS NOT TRUNCATED, AND THAT IS A SECURITY CHOICE ─────────────────────────
  *
- * IT SHIPPED AT 12 (48 bits) AND THAT WAS WRONG. A chosen collision at 48 bits was MEASURED
- * at 7.9 seconds — 7,959,526 hashes — over ordinary schema-valid ids (`probe-4573894` and
- * `probe-7959525` share the digest `2e47b9d025b8`). Two probes in one criterion would then
- * write the same evidence file, and the first probe's reference would point at the second
- * probe's content.
+ * TRUNCATION WAS WRONG TWICE HERE, and the second time is the more instructive one.
  *
- * The comment that used to sit here said this was "still not a security control" because
- * "the ids come from a plan a human reviewed". BOTH HALVES WERE WRONG, and the comment is
+ * It first shipped at 12 hex (48 bits). A chosen collision was MEASURED at 7.9 seconds —
+ * 7,959,526 hashes — over ordinary schema-valid ids: `probe-4573894` and `probe-7959525`
+ * share the digest `2e47b9d025b8`. Two probes in one criterion then write the SAME evidence
+ * file, and the first probe's reference points at the second probe's content.
+ *
+ * It was then widened to 24 hex (96 bits) with a comment claiming a chosen collision "needs
+ * ~2^48 work and the argument disappears". THAT WAS ALSO WRONG, for a subtler reason worth
+ * spelling out because it is easy to repeat: a truncated 96-bit digest carries only ~48 bits
+ * of COLLISION resistance, because the birthday bound is half the width. 2^48 is roughly
+ * 2.8e14 hashes — single-digit GPU-hours, not infeasible. Digest WIDTH and collision
+ * RESISTANCE are not the same quantity, and conflating them is exactly the error the widening
+ * was supposed to fix, repeated one level up in the comment written to fix it.
+ *
+ * So the digest is now carried WHOLE. A chosen collision needs ~2^128 work, and the argument
+ * is not weakened — it is gone, which is what choosing a cryptographic digest was supposed to
+ * buy in the first place.
+ *
+ * AND TRUNCATION BOUGHT NOTHING. Worst case for this stem, with maximal slugs:
+ *
+ *     http- (5) + criterionSlug (64) + - + probeSlug (64) + - + digest (64) + - + NN (2)
+ *       + .body.txt (9)  =  211 characters
+ *
+ * against a 255-byte component limit on APFS and ext4 — 44 bytes of headroom, and `evidence/`
+ * is a separate component that does not count toward it. There was never a length pressure to
+ * trade resistance against.
+ *
+ * ── WHY THE OLD "NOT A SECURITY CONTROL" NOTE WAS WRONG ────────────────────────────────
+ *
+ * An earlier version of this comment said the discriminator was "still not a security control"
+ * because "the ids come from a plan a human reviewed". BOTH HALVES WERE WRONG, and the note is
  * corrected rather than deleted because a comment that licenses a weaker choice outlives the
  * choice:
  *
@@ -1753,18 +1779,11 @@ function slugify(id: string): string {
  *    that they collide under a truncated hash; that is precisely the class of defect review
  *    cannot catch, which is why it has to be structural.
  *
- * At 96 bits a chosen collision needs ~2^48 work and the argument disappears — which is what
- * choosing a cryptographic digest was supposed to buy in the first place. Shipping it at a
- * width that reinstated the argument was the same mistake made one order of magnitude up.
- *
- * 24 hex matches `shell.ts`'s `discriminator` and `observation.ts` EXACTLY. Not a third
- * width: three surfaces writing into one run directory should not each pick their own, and
- * "match the peers" only decides anything when the peers agree — when they disagreed, this
- * one took the weaker of the two.
- *
- * `tests/unit/surfaces/http-digest-width.test.ts` pins the width so it cannot be narrowed
- * again silently.
+ * `tests/unit/surfaces/http-digest-width.test.ts` pins the full width against a real evidence
+ * filename, so a reintroduced truncation fails loudly rather than silently.
  */
 function fingerprint(text: string): string {
-  return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, EVIDENCE_DIGEST_HEX);
+  // No `.slice()`. The full digest is the point; see above for the two truncations that were
+  // wrong and the arithmetic showing truncation bought no path budget.
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
