@@ -69,7 +69,7 @@ development_status:
   3-8-provider-provenance-wiring: done
   epic-3-retrospective: done
 
-  epic-4: in-progress
+  epic-4: done
   4-1-service-lifecycle-readiness: done
   4-2-plan-model-compilation-via-plan-author-provider: done
   4-3-deterministic-test-data: done
