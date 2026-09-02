@@ -878,43 +878,68 @@ function slugify(value: string): string {
 }
 
 /**
- * A collision-resistant discriminator for one `(criterionId, probeId)` pair.
+ * A collision-resistant discriminator for one `(criterionId, probeId)` pair:
+ * the FULL SHA-256 of the two ids joined by NUL, a separator neither can
+ * contain.
  *
- * SHA-256 of the two ids joined by NUL — a separator neither can contain — with
- * the first 24 hex characters kept.
+ * ── WHY THE DIGEST IS NOT TRUNCATED ────────────────────────────────────────
  *
- * WHY NOT THE 32-BIT FNV-1a THIS REPLACED. A review pass did not argue the
- * point, it BRUTE-FORCED it: it produced two valid 82-character probe ids
- * sharing a 70-character prefix whose FNV values are both `ee83bd36`. Both
- * truncate to the same 64-character slug, so both produced the identical
- * evidence stem — and the later probe silently overwrote the earlier one's files
- * while both results kept referencing them. A 32-bit digest reaches a birthday
- * collision at roughly 65k candidates, which is not an exotic attack; it is a
- * short script. A plan is provider-authored text, which is exactly the threat
- * model this story exists for.
+ * An earlier revision kept 24 hex characters and justified it as "96 bits puts
+ * a birthday collision at ~2^48 rather than ~2^16". **Both halves of that
+ * sentence were wrong in the same way, and the correction is kept here rather
+ * than deleted because the error recurred three times across this cohort.**
  *
- * Misattributed evidence is the worst failure available here: lost evidence is
- * visible, but a reader shown another probe's output under this probe's name has
- * no signal that anything is wrong.
+ * DIGEST WIDTH IS NOT COLLISION RESISTANCE. A truncated n-bit digest gives
+ * about n/2 bits of resistance, because a birthday search needs only ~2^(n/2)
+ * work to find *any* colliding pair:
  *
- * 96 bits puts a birthday collision at ~2^48 rather than ~2^16, and SHA-256
- * makes a DELIBERATE collision infeasible rather than merely unlikely — which is
- * the property that matters when the ids are chosen by whoever authored the
- * plan. `node:crypto` is available here because `no-side-effect-builtins-in-core`
- * scopes its ban to `src/(domain|schemas)/`; `src/surfaces/**` is an adapter, and
- * `src/schemas/canonical.ts` and `src/infra/ids.ts` already use it.
+ *     32-bit  ->  ~16 bits  ->  ~82k hashes, 57ms       (measured, story 4.5)
+ *     48-bit  ->  ~24 bits  ->  ~8M hashes, 7.9s        (measured, story 4.4)
+ *     96-bit  ->  ~48 bits  ->  ~2.8e14 ops, GPU-hours  (still an argument)
+ *     256-bit ->  ~128 bits ->  not an argument anyone has to have
  *
- * The ideal fix is the one `gate-evidence-path.ts` uses — a DECLARATION INDEX,
- * collision-free by construction rather than by probability. An executor has
- * none: it is handed one probe at a time and never sees the list. Adding `index`
- * to the params contract would need story 4.7 to supply it, so it is recorded as
- * the stronger follow-up rather than taken unilaterally here.
+ * And the "~2^48" in the old comment was the ATTACK COST, not a safety margin —
+ * quoting it as though it were the latter is exactly how each widening in this
+ * cohort concluded the question was closed while leaving it open. This surface
+ * was the origin of the mistake: the 32-bit FNV it replaced was BRUTE-FORCED by
+ * a review pass, which produced two valid 82-character probe ids sharing a
+ * 70-character prefix — so both truncate to the same slug — that collide at
+ * `ee83bd36`. Identical stem, so the later probe silently overwrote the
+ * earlier one's files while both attempts kept referencing them.
+ *
+ * TRUNCATION ALSO BUYS NOTHING HERE. The worst-case filename this surface can
+ * produce, with a maximal 64-character slug and the full 64-hex digest, is:
+ *
+ *     shell- (6) + slug (64) + - (1) + digest (64) + - (1)
+ *          + attempt (3, allowing 999) + .stdout.txt (11)  =  150 characters
+ *
+ * against the 255-BYTE limit on a single filename component — and `evidence/`
+ * does not count toward it, since the limit governs the component rather than
+ * the path. That leaves 105 bytes spare. Even a pathologically long attempt
+ * number cannot approach the limit, because this surface's slug is a single
+ * capped 64 rather than two. (Computed for THIS stem rather than copied from
+ * another surface's figure; the http stem carries two slugs and lands at 211.)
+ *
+ * So the only thing truncation ever bought was the need to have this argument.
+ *
+ * Misattributed evidence remains the worst failure available here: lost evidence
+ * is visible, but a reader shown another probe's output under this probe's name
+ * has no signal that anything is wrong.
+ *
+ * `node:crypto` is available because `no-side-effect-builtins-in-core` scopes
+ * its ban to `src/(domain|schemas)/`; `src/surfaces/**` is an adapter, and
+ * `src/schemas/canonical.ts` and `src/infra/ids.ts` already use it. All three
+ * surfaces first reached for an inline FNV because we carried a
+ * dependency-freedom constraint from the domain, where it is real, into a layer
+ * where it is not.
+ *
+ * The ideal fix is still the one `gate-evidence-path.ts` uses — a DECLARATION
+ * INDEX, collision-free by construction rather than by probability. An executor
+ * has none: it is handed one probe at a time and never sees the list. Adding
+ * `index` to the params contract would need story 4.7 to supply it.
  */
 function discriminator(criterionId: string, probeId: string): string {
-  return createHash('sha256')
-    .update(`${criterionId}\u0000${probeId}`)
-    .digest('hex')
-    .slice(0, 24);
+  return createHash('sha256').update(`${criterionId}\u0000${probeId}`).digest('hex');
 }
 
 /**

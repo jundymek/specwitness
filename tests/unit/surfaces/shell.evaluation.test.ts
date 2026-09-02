@@ -367,7 +367,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(attempt.evidence).toHaveLength(1);
     expect(attempt.evidence[0]?.kind).toBe('command');
     expect(attempt.evidence[0]?.path).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{64}-1\.json$/,
     );
     expect(writer.writes).toHaveLength(1);
   });
@@ -377,9 +377,9 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
 
     const names = writer.writes.map((w) => w.name);
     expect(names).toHaveLength(3);
-    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/);
-    expect(names[1]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stderr\.txt$/);
-    expect(names[2]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/);
+    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{64}-1\.stdout\.txt$/);
+    expect(names[1]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{64}-1\.stderr\.txt$/);
+    expect(names[2]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{64}-1\.json$/);
     expect(attempt.evidence).toHaveLength(3);
   });
 
@@ -417,7 +417,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(attempt.evidence).toHaveLength(1);
     expect(writer.writes).toHaveLength(1);
     expect(writer.writes[0]?.name).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{64}-1\.json$/,
     );
   });
 
@@ -458,7 +458,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(member.stdout.truncated).toBe(true);
     expect(member.stdout.totalBytes).toBe(EVIDENCE_INLINE_CAP_BYTES + 500);
     expect(member.stdout.fullPath).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{64}-1\.stdout\.txt$/,
     );
   });
 
@@ -466,7 +466,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     const { writer } = await run({ stdout: 'out\n' }, { attempt: 2 });
 
     const names = writer.writes.map((w) => w.name);
-    expect(names.every((n) => /-[0-9a-f]{24}-2\./.test(n))).toBe(true);
+    expect(names.every((n) => /-[0-9a-f]{64}-2\./.test(n))).toBe(true);
     expect(names).toHaveLength(2);
   });
 
@@ -914,7 +914,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     const names = writer.writes.map((w) => w.name);
     expect(names).toHaveLength(2);
     // The readable prefix survives; only the discriminator is opaque.
-    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/);
+    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{64}-1\.stdout\.txt$/);
   });
 });
 
@@ -1008,5 +1008,49 @@ describe('the binary is redacted in not-found diagnostics', () => {
 
     expect(attempt.execError?.message).toContain('node');
     expect(attempt.execError?.message).toContain('not on PATH');
+  });
+});
+
+describe('the evidence discriminator is wide enough to resist a CHOSEN collision', () => {
+  // NAMED FOR THE REASON, NOT THE NUMBER, deliberately. A test called "is 24
+  // hex characters" pins a value; this one pins the property, so widening is a
+  // deliberate act and narrowing fails for a stated cause.
+  //
+  // The property matters because the inputs are PROVIDER-AUTHORED: whoever
+  // wrote the plan chooses both ids, so this is a chosen-input collision rather
+  // than a chance one. Digest width is not collision resistance — a truncated
+  // n-bit digest gives about n/2 bits, because a birthday search needs only
+  // ~2^(n/2) work to find any colliding pair. This surface's own 32-bit
+  // predecessor was brute-forced in 57ms.
+  it('emits the FULL sha256 digest, untruncated', async () => {
+    const { writer } = await run({ stdout: 'ok\n' });
+    const name = writer.writes[0]?.name ?? '';
+
+    // 64 hex characters is the whole digest. A shorter run would still match a
+    // loose pattern, so the boundary is anchored on both sides.
+    expect(name).toMatch(/-[0-9a-f]{64}-1\.stdout\.txt$/);
+    expect(name).not.toMatch(/-[0-9a-f]{65,}-/);
+  });
+
+  it('keeps the worst-case filename inside the 255-byte component limit', async () => {
+    // Superman's arithmetic is for the http stem (two slugs, 211 chars). THIS
+    // surface has one capped slug, so the number differs and is computed here
+    // rather than copied — the copying is the failure this whole thread is made
+    // of.
+    //
+    //   shell- (6) + slug (64) + - (1) + digest (64) + - (1)
+    //        + attempt (3) + .stdout.txt (11)  =  150
+    //
+    // The 255 limit governs the FILENAME COMPONENT, so `evidence/` is excluded.
+    const maximal = 'p'.repeat(128); // `Identifier` permits 128
+    const { writer } = await run({ stdout: 'ok\n' }, { probeId: maximal, attempt: 999 });
+
+    for (const write of writer.writes) {
+      const component = write.name.split('/').at(-1) ?? '';
+      expect(Buffer.byteLength(component, 'utf8')).toBeLessThanOrEqual(255);
+      // Recorded so a future widening sees the real headroom rather than a
+      // remembered one.
+      expect(Buffer.byteLength(component, 'utf8')).toBeLessThanOrEqual(160);
+    }
   });
 });
