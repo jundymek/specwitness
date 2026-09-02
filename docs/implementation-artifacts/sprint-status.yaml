@@ -72,12 +72,12 @@ development_status:
   epic-4: in-progress
   4-1-service-lifecycle-readiness: done
   4-2-plan-model-compilation-via-plan-author-provider: done
-  4-3-deterministic-test-data: review
+  4-3-deterministic-test-data: done
   4-4-http-probe-executor: done
-  4-5-observation-probes-before-after-invariants: review
+  4-5-observation-probes-before-after-invariants: done
   4-6-shell-probes: done
-  4-7-ai-free-behavioral-verify-end-to-end: ready-for-dev
-  epic-4-retrospective: optional
+  4-7-ai-free-behavioral-verify-end-to-end: done
+  epic-4-retrospective: done
 
   epic-5: backlog
   5-1-playwright-integration-environment-resolution: backlog
