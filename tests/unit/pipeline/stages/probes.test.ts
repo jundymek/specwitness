@@ -508,6 +508,168 @@ describe("the probes stage — an observation's `around`", () => {
     expect(context.run.criteria[0]?.status).toBe('fail');
   });
 
+  it('runs a SHARED action exactly once, with both wrappers surrounding it', async () => {
+    // 4.2's schema explicitly permits two observations around one action and calls it "the
+    // case that actually occurs (rows created AND audit rows written, around one request)".
+    // Running the action once per wrapper duplicates its writes AND makes the second
+    // observation measure a state the FIRST action already changed — so both of its
+    // snapshots are wrong, silently, in the direction of a passing delta.
+    const context = stageContext();
+    context.run.contractCriteria.push(AUTOMATED);
+
+    const order: string[] = [];
+    const deps: ProbesStageDeps = {
+      criteria: [
+        automated('E7-01', [
+          shellProbe('action'),
+          observationProbe('rows', 'action'),
+          observationProbe('audit', 'action'),
+        ]),
+      ],
+      data: NO_DATA,
+      dispatch: ({ probe, attempt, runAction }) => ({
+        params: {},
+        executor: {
+          surface: probe.surface,
+          execute: async (request) => {
+            if (probe.surface === 'observation' && probe.mechanics.around !== undefined) {
+              order.push(`${probe.id}:before`);
+              await runAction(probe.mechanics.around);
+              order.push(`${probe.id}:after`);
+              return attemptFrom(request, attempt, {});
+            }
+            order.push(`${probe.id}:run`);
+            return attemptFrom(request, attempt, {});
+          },
+        },
+      }),
+    };
+
+    await createProbesStage(deps).run(context);
+
+    // Exactly one execution of the action...
+    expect(order.filter((entry) => entry === 'action:run')).toEqual(['action:run']);
+    // ...and BOTH observations really surround it: every `before` precedes it and every
+    // `after` follows it. Asserted as a property rather than as one literal ordering,
+    // because the two wrappers' snapshots may interleave with each other and that is fine.
+    const actionAt = order.indexOf('action:run');
+    for (const probeId of ['rows', 'audit']) {
+      expect(order.indexOf(`${probeId}:before`)).toBeLessThan(actionAt);
+      expect(order.indexOf(`${probeId}:after`)).toBeGreaterThan(actionAt);
+    }
+  }, 5_000);
+
+  it('derives the shared action from the ONE attempt it produced', async () => {
+    const context = stageContext();
+    context.run.contractCriteria.push(AUTOMATED);
+
+    const deps: ProbesStageDeps = {
+      criteria: [
+        automated('E7-01', [
+          shellProbe('action'),
+          observationProbe('rows', 'action'),
+          observationProbe('audit', 'action'),
+        ]),
+      ],
+      data: NO_DATA,
+      dispatch: ({ probe, attempt, runAction }) => ({
+        params: {},
+        executor: {
+          surface: probe.surface,
+          execute: async (request) => {
+            if (probe.surface === 'observation' && probe.mechanics.around !== undefined) {
+              await runAction(probe.mechanics.around);
+              return attemptFrom(request, attempt, {});
+            }
+            // The shared action FAILS its own assertion. One attempt, one result.
+            return attemptFrom(request, attempt, { satisfied: false });
+          },
+        },
+      }),
+    };
+
+    await createProbesStage(deps).run(context);
+
+    expect(context.run.criteria[0]?.status).toBe('fail');
+  });
+
+  it('never runs the action when EVERY wrapper fails before reaching it', async () => {
+    // 4.5 aborts a wrapping observation before the action when its "before" snapshot fails:
+    // performing it would mutate the system for a comparison that can no longer be made. So
+    // a wrapper can finish WITHOUT arriving, and the shared-action coordination must not
+    // wait for an arrival that will never come — a deadlock here would hang the whole run.
+    const context = stageContext();
+    context.run.contractCriteria.push(AUTOMATED);
+
+    const order: string[] = [];
+    const deps: ProbesStageDeps = {
+      criteria: [
+        automated('E7-01', [
+          shellProbe('action'),
+          observationProbe('rows', 'action'),
+          observationProbe('audit', 'action'),
+        ]),
+      ],
+      data: NO_DATA,
+      dispatch: ({ probe, attempt }) => ({
+        params: {},
+        executor: {
+          surface: probe.surface,
+          execute: async (request) => {
+            order.push(probe.id);
+            // Both wrappers fail their "before" and return without calling `runAction`.
+            return attemptFrom(request, attempt, { execError: true });
+          },
+        },
+      }),
+    };
+
+    await createProbesStage(deps).run(context);
+
+    expect(order).not.toContain('action');
+    expect(context.run.criteria[0]?.status).toBe('error');
+  }, 5_000);
+
+  it('still runs the action when only SOME wrappers reach it', async () => {
+    // One wrapper aborts before the action, the other does not. The action must still run
+    // exactly once, for the wrapper that got there.
+    const context = stageContext();
+    context.run.contractCriteria.push(AUTOMATED);
+
+    const order: string[] = [];
+    const deps: ProbesStageDeps = {
+      criteria: [
+        automated('E7-01', [
+          shellProbe('action'),
+          observationProbe('rows', 'action'),
+          observationProbe('audit', 'action'),
+        ]),
+      ],
+      data: NO_DATA,
+      dispatch: ({ probe, attempt, runAction }) => ({
+        params: {},
+        executor: {
+          surface: probe.surface,
+          execute: async (request) => {
+            if (probe.id === 'audit') {
+              return attemptFrom(request, attempt, { execError: true });
+            }
+            if (probe.surface === 'observation') {
+              await runAction('action');
+              return attemptFrom(request, attempt, {});
+            }
+            order.push('action:run');
+            return attemptFrom(request, attempt, {});
+          },
+        },
+      }),
+    };
+
+    await createProbesStage(deps).run(context);
+
+    expect(order).toEqual(['action:run']);
+  }, 5_000);
+
   it('refuses a dangling `around` as infrastructure, never as a product fail', async () => {
     const context = stageContext();
     context.run.contractCriteria.push(AUTOMATED);

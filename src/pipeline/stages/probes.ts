@@ -78,6 +78,10 @@
  * are still recorded under its own id, so its own assertions are derived exactly as any
  * other probe's are.
  *
+ * **SEVERAL OBSERVATIONS MAY WRAP ONE ACTION, AND IT STILL RUNS ONCE.** 4.2's schema permits
+ * that deliberately and calls it "the case that actually occurs"; `shareAction` below is how
+ * one execution ends up surrounded by all of their snapshots.
+ *
  * AD-1: application layer. Imports `domain`, `schemas` and siblings; never `cli`,
  * `authoring`, `ingest` or `report`.
  */
@@ -306,14 +310,6 @@ async function executeCriterion(
   };
 
   const byId = new Map(probes.map((probe) => [probe.id, probe]));
-  const wrapped = new Set(
-    probes.flatMap((probe) =>
-      probe.surface === 'observation' && probe.mechanics.around !== undefined
-        ? [probe.mechanics.around]
-        : [],
-    ),
-  );
-
   const attempts = new Map<string, ProbeAttempt[]>();
 
   const record = (probeId: string, attempt: ProbeAttempt): void => {
@@ -325,7 +321,13 @@ async function executeCriterion(
     existing.push(attempt);
   };
 
-  const runProbe = async (probe: ProbeSpec): Promise<void> => {
+  /**
+   * Executes one probe, `retries + 1` times, with the `runAction` its wrapper needs.
+   *
+   * `runAction` is injected rather than built here, because a probe wrapped by SEVERAL
+   * observations must run exactly once for all of them — see `shareAction`.
+   */
+  const runProbe = async (probe: ProbeSpec, runAction: ProbeActionRunner): Promise<void> => {
     // Substituted ONCE, before the executor sees anything (4.3). A value substituted
     // after a check is a value that was never checked — and `argumentAllowlist` is
     // substituted along with `args`, so a data-bound argument is compared against a
@@ -338,20 +340,6 @@ async function executeCriterion(
     const extra = deps.retries?.(probe.surface) ?? 0;
 
     for (let attempt = 1; attempt <= extra + 1; attempt += 1) {
-      const runAction: ProbeActionRunner = async (aroundProbeId) => {
-        const target = byId.get(aroundProbeId);
-        if (target === undefined) {
-          // 4.2's schema refuses a dangling `around` at compile time, so reaching here
-          // means a plan edited on disk. A wiring-shaped failure, not a product one.
-          throw new InfraError(
-            `probe '${probe.id}' wraps '${aroundProbeId}', which criterion ${criterionId} does not declare`,
-            "recompile the plan with 'specwitness plan <epic>' — an observation's " +
-              "'around' must name another probe of the same criterion",
-          );
-        }
-        await runProbe(target);
-      };
-
       const dispatch = deps.dispatch({
         criterionId,
         probe: resolved,
@@ -361,22 +349,203 @@ async function executeCriterion(
         recordEvidence,
       });
 
-      record(probe.id, await dispatch.executor.execute({
-        criterionId,
-        surface: probe.surface,
-        params: dispatch.params,
-      }));
+      record(
+        probe.id,
+        await dispatch.executor.execute({
+          criterionId,
+          surface: probe.surface,
+          params: dispatch.params,
+        }),
+      );
     }
   };
 
+  /** Resolves an `around` id to the probe it names, or refuses. */
+  const targetOf = (wrapperId: string, aroundProbeId: string): ProbeSpec => {
+    const target = byId.get(aroundProbeId);
+    if (target === undefined) {
+      // 4.2's schema refuses a dangling `around` at compile time, so reaching here means a
+      // plan edited on disk. A wiring-shaped failure, not a product one.
+      throw new InfraError(
+        `probe '${wrapperId}' wraps '${aroundProbeId}', which criterion ${criterionId} does not declare`,
+        "recompile the plan with 'specwitness plan <epic>' — an observation's 'around' must " +
+          'name another probe of the same criterion',
+      );
+    }
+    return target;
+  };
+
+  /** The ordinary runner: this wrapper is the only one around its action. */
+  const soleAction = (wrapperId: string): ProbeActionRunner => {
+    return async (aroundProbeId) => {
+      await runProbe(targetOf(wrapperId, aroundProbeId), rejectNestedAction);
+    };
+  };
+
+  // Probes executed inside a wrapper, and wrapper groups already handled together.
+  const wrapped = new Set(
+    probes.flatMap((probe) =>
+      probe.surface === 'observation' && probe.mechanics.around !== undefined
+        ? [probe.mechanics.around]
+        : [],
+    ),
+  );
+  const handled = new Set<string>();
+
   for (const probe of probes) {
-    if (wrapped.has(probe.id)) {
+    if (wrapped.has(probe.id) || handled.has(probe.id)) {
       continue;
     }
-    await runProbe(probe);
+
+    const group = wrappersSharing(probes, probe);
+    if (group.length <= 1) {
+      // The ordinary case: a plain probe, or the only observation around its action.
+      await runProbe(probe, soleAction(probe.id));
+      continue;
+    }
+
+    // Several observations share one action, so the group is executed together and the
+    // action runs once for all of them. Marked handled so the loop does not revisit them.
+    for (const member of group) {
+      handled.add(member.id);
+    }
+    await shareAction(group, targetOf(probe.id, aroundOf(probe)), runProbe);
   }
 
   return attempts;
+}
+
+/** The `around` id of a wrapping observation. Narrowing only — never called for others. */
+function aroundOf(probe: ProbeSpec): string {
+  if (probe.surface !== 'observation' || probe.mechanics.around === undefined) {
+    // Unreachable: only called for probes `wrappersSharing` already classified.
+    throw new InfraError(
+      `probe '${probe.id}' was treated as a wrapping observation but declares no 'around'`,
+      'this is a SpecWitness defect in the probes stage',
+    );
+  }
+  return probe.mechanics.around;
+}
+
+/** Every observation in this criterion that wraps the same action as `probe` does. */
+function wrappersSharing(probes: readonly ProbeSpec[], probe: ProbeSpec): readonly ProbeSpec[] {
+  if (probe.surface !== 'observation' || probe.mechanics.around === undefined) {
+    return [probe];
+  }
+  const around = probe.mechanics.around;
+  return probes.filter(
+    (candidate) =>
+      candidate.surface === 'observation' && candidate.mechanics.around === around,
+  );
+}
+
+/**
+ * An observation's action may not itself wrap something.
+ *
+ * 4.2's schema already refuses an `around` pointing at another observation — one rule
+ * closing a cycle, a chain of wraps, and the merely-meaningless case of wrapping a
+ * snapshot. This is the runtime half, for a plan edited on disk after compilation.
+ */
+const rejectNestedAction: ProbeActionRunner = async (aroundProbeId) => {
+  throw new InfraError(
+    `a wrapped action tried to wrap '${aroundProbeId}' in turn, which is not executable`,
+    "recompile the plan with 'specwitness plan <epic>' — an observation wraps an ACTION " +
+      '(http, browser or shell), never another observation',
+  );
+};
+
+/**
+ * Runs several observations that wrap the SAME action, so the action happens ONCE and every
+ * wrapper's before/after really surrounds it.
+ *
+ * `PlanCriterionSchema` permits this deliberately and names it "the case that actually
+ * occurs (rows created AND audit rows written, around one request)". The naive shape — each
+ * wrapper calling `runAction` for itself — runs the action once per wrapper, which
+ * duplicates its writes AND makes the second wrapper's "before" snapshot see the state the
+ * FIRST action already changed. Both of that wrapper's snapshots are then wrong, silently,
+ * in the direction of a delta that looks correct. Found by this story's Codex review pass.
+ *
+ * The wrappers therefore run CONCURRENTLY and meet at a barrier inside `runAction`. That is
+ * not a stylistic choice: 4.5's executor owns the before → action → after sequence
+ * internally, so the only way for two wrappers to surround one action is for both to be
+ * suspended inside their own `execute` at the moment it runs. Concurrency is confined to
+ * this function and bounded by the size of the group.
+ *
+ * **THE DEADLOCK THIS AVOIDS IS THE WHOLE DIFFICULTY.** A wrapper whose "before" snapshot
+ * fails returns WITHOUT calling `runAction` — 4.5 aborts there deliberately, because
+ * performing the action would mutate the system for a comparison that can no longer be
+ * made. So a wrapper may finish without ever arriving, and a barrier waiting for all N
+ * arrivals would hang the entire run with no timeout anywhere to end it. Instead the
+ * barrier fires as soon as no wrapper can still arrive: every one is either waiting at it or
+ * has already settled. If none arrived, the action never runs — which is correct, because
+ * nothing is left to measure it.
+ */
+async function shareAction(
+  wrappers: readonly ProbeSpec[],
+  target: ProbeSpec,
+  runProbe: (probe: ProbeSpec, runAction: ProbeActionRunner) => Promise<void>,
+): Promise<void> {
+  /** Wrappers that can still reach the barrier. */
+  let outstanding = wrappers.length;
+  const waiting: (() => void)[] = [];
+  const arrived = new Set<string>();
+
+  let actionRan = false;
+  let actionFailure: unknown;
+
+  const fireIfNobodyElseCanArrive = async (): Promise<void> => {
+    if (outstanding > 0 || waiting.length === 0 || actionRan) {
+      return;
+    }
+    actionRan = true;
+    try {
+      await runProbe(target, rejectNestedAction);
+    } catch (failure) {
+      // Captured rather than thrown: it must reach every waiting wrapper, and letting it
+      // escape here would be an unhandled rejection with nobody to observe it.
+      actionFailure = failure;
+    }
+    for (const wake of waiting.splice(0)) {
+      wake();
+    }
+  };
+
+  const runAction = (wrapperId: string): ProbeActionRunner => {
+    return async (aroundProbeId) => {
+      if (aroundProbeId !== target.id) {
+        throw new InfraError(
+          `probe '${wrapperId}' wraps '${aroundProbeId}', which is not the action its group shares`,
+          'this is a SpecWitness defect in the probes stage',
+        );
+      }
+
+      const wait = new Promise<void>((resolve) => waiting.push(resolve));
+      if (!arrived.has(wrapperId)) {
+        arrived.add(wrapperId);
+        outstanding -= 1;
+      }
+      void fireIfNobodyElseCanArrive();
+      await wait;
+
+      if (actionFailure !== undefined) {
+        throw actionFailure;
+      }
+    };
+  };
+
+  await Promise.all(
+    wrappers.map(async (wrapper) => {
+      try {
+        await runProbe(wrapper, runAction(wrapper.id));
+      } finally {
+        if (!arrived.has(wrapper.id)) {
+          // Finished without reaching the barrier — its "before" failed, so 4.5 aborted it.
+          outstanding -= 1;
+          await fireIfNobodyElseCanArrive();
+        }
+      }
+    }),
+  );
 }
 
 /**

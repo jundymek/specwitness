@@ -47,16 +47,27 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { buildFixture, CLI, type Fixture } from './helpers/verify-fixture.js';
 
 const fixtures: Fixture[] = [];
+/** Every `verify` this suite spawned, so none can outlive its test. See `interruptMidRun`. */
+const children: ReturnType<typeof execa>[] = [];
 
 afterEach(async () => {
+  // THE CHILD DIES FIRST, whatever happened above. A `verify` still running here is holding
+  // a gate that never ends, and `specwitness clean` will not reap a run whose owner is
+  // alive — so signalling the child is what makes the reap below able to work at all.
+  for (const child of children.splice(0)) {
+    child.kill('SIGKILL');
+    await child.catch(() => undefined);
+  }
+
   // REAPING HAPPENS IN THE HOOK, NOT IN THE TEST BODY. Every test here deliberately leaves
   // a live process group behind, so a reap that ran only on the happy path would leak one
   // per failed assertion — and this worktree runs `pnpm test` concurrently with the agent
-  // (harness defect H-8). Measured on this machine while writing the suite: 21 orphaned
-  // `node gates/slow.cjs` processes from earlier sessions, none newer than two hours old,
-  // and neither this suite nor the merged `verify.test.ts` adds to them when either runs to
-  // completion. So the leak comes from a test RUN being killed, which is exactly what a
-  // hook survives and a test body does not.
+  // (harness defect H-8).
+  //
+  // Measured by PID at ppid=1, per suite in isolation and across two full `pnpm test` runs:
+  // this suite adds zero. An earlier measurement here compared TOTAL COUNTS and was wrong
+  // for it — a count cannot tell "reaped four, leaked four" from "leaked nothing", and four
+  // real orphans were found afterwards that it had reported as none.
   for (const fixture of fixtures) {
     await execa(process.execPath, [CLI, 'clean', '--all'], {
       cwd: fixture.root,
@@ -72,6 +83,27 @@ afterEach(async () => {
  * Polling the MANIFEST rather than sleeping is what makes this deterministic: the signal is
  * sent when the run demonstrably holds a worktree and a live process group, not at a moment
  * that happens to work on this machine today.
+ *
+ * ============================================================================
+ * WHY THE CHILD IS TRACKED AND KILLED IN A HOOK
+ * ============================================================================
+ *
+ * Every test here starts a `verify` holding a gate that NEVER ENDS, so the only thing that
+ * stops it is this function signalling it. The first version put the poll's
+ * `expect(runDirectory).not.toBe('')` **before** the kill — so if the poll ever timed out,
+ * the assertion threw, the child was never signalled, and a `node gates/slow.cjs` survived
+ * with nobody left to reap it. One per test, four tests, four orphans.
+ *
+ * That is not hypothetical: the supervisor measured **four orphaned gate processes at
+ * ppid=1**, in four separate worktrees, spawned one second apart in the window right after
+ * this suite last ran under the auto-review's full `pnpm test`. My own before/after
+ * measurement had missed it because it compared TOTAL COUNTS, which cannot tell "reaped
+ * four, leaked four" from "leaked nothing".
+ *
+ * So the child is now registered the moment it is spawned and killed in `afterEach`,
+ * unconditionally, before anything else. The suite is structurally unable to leak whichever
+ * assertion fails and wherever it fails — which is the property Task 10 actually asks for,
+ * rather than "does not leak on the happy path on this machine today".
  */
 async function interruptMidRun(project: Fixture): Promise<{
   readonly signal: string | undefined;
@@ -82,6 +114,9 @@ async function interruptMidRun(project: Fixture): Promise<{
     cwd: project.root,
     reject: false,
   });
+  // REGISTERED BEFORE ANYTHING CAN THROW. Everything below this line may fail; none of it
+  // may leave the child running.
+  children.push(child);
 
   const runsRoot = join(project.root, '.specwitness', 'runs');
   let runDirectory = '';
