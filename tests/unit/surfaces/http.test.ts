@@ -938,6 +938,10 @@ describe('evidence capture (AC2, AD-10)', () => {
 
 describe('seeded secrets never reach a stored artifact (AC2, NFR-3)', () => {
   const SECRET = 'sw-secret-9f2c1ad4e7b6';
+  /** A credential a plan put in `expected`. Bare: no assignment syntax to recognise. */
+  const SENSITIVE_EXPECTED = 'Bearer plan-side-credential-4b21';
+  /** Matches NO built-in rule, so a guard using it cannot pass on the built-ins alone. */
+  const OPAQUE = 'qqqq-opaque-nomatch-qqqq';
 
   it('leaks the secret nowhere: not inline, not in the full copy, not in expected/actual', async () => {
     const { baseUrl } = await fixture((_request, response) => {
@@ -1016,6 +1020,82 @@ describe('seeded secrets never reach a stored artifact (AC2, NFR-3)', () => {
     );
 
     expect(JSON.stringify(attempt.execError)).not.toContain(SECRET);
+  });
+
+  it('redacts a sensitive EXPECTED value, not only the actual (both sides of one comparison)', async () => {
+    // Found by review. A plan asserting `header authorization equals <token>` puts the token
+    // in `expected`, where it is a BARE string with no assignment syntax for `redactText` to
+    // recognise — and `expected` is persisted to result.json and printed exactly like
+    // `actual`. Protecting only `actual` left the two sides of one comparison under different
+    // rules, which reads as deliberate and is not.
+    const { baseUrl } = await jsonFixture({}, 200, { authorization: 'Bearer server-side' });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'header', name: 'authorization' }, 'equals', SENSITIVE_EXPECTED)]),
+    );
+
+    const [evaluation] = attempt.assertionEvaluations;
+    expect(evaluation?.expected).not.toContain(SENSITIVE_EXPECTED);
+    expect(JSON.stringify(attempt)).not.toContain(SENSITIVE_EXPECTED);
+    expect(JSON.stringify(deriveCriterionResult(AUTOMATED, [attempt]))).not.toContain(
+      SENSITIVE_EXPECTED,
+    );
+  });
+
+  it('protects a sensitive expected value even when the target was ABSENT', async () => {
+    // The name is derived from the TARGET rather than from a successful read, so the
+    // protection does not evaporate on the branch where there was no value to read.
+    const { baseUrl } = await jsonFixture({});
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'jsonPath', path: 'data.api_key' }, 'equals', SENSITIVE_EXPECTED)]),
+    );
+
+    expect(attempt.assertionEvaluations[0]?.satisfied).toBe(false);
+    expect(JSON.stringify(attempt)).not.toContain(SENSITIVE_EXPECTED);
+  });
+
+  it('applies caller extraPatterns to a REJECTED baseUrl in the thrown error', async () => {
+    // `validateParams` quotes the offending value, and its message reaches stderr verbatim
+    // through printError. A bare `redactText` there would apply only the BUILT-IN rules, so
+    // this token deliberately matches none of them: it has no assignment syntax and no
+    // sensitive name beside it, which is exactly the case a project declares extraPatterns
+    // for. The guard fails unless extraPatterns is genuinely threaded through.
+    const { executor } = harness({ redaction: { extraPatterns: [new RegExp(OPAQUE, 'g')] } });
+
+    await expect(
+      executor.execute({
+        criterionId: 'E4-01',
+        surface: 'http',
+        params: {
+          probe: probe([assertion({ source: 'status' }, 'equals', '200')]),
+          baseUrl: `not-a-url-${OPAQUE}`,
+        },
+      }),
+    ).rejects.toThrow(
+      expect.objectContaining({ message: expect.not.stringContaining(OPAQUE) as unknown }),
+    );
+  });
+
+  it('applies caller extraPatterns to a REJECTED path in the thrown error', async () => {
+    const { executor } = harness({ redaction: { extraPatterns: [new RegExp(OPAQUE, 'g')] } });
+
+    await expect(
+      executor.execute({
+        criterionId: 'E4-01',
+        surface: 'http',
+        params: {
+          probe: probe([assertion({ source: 'status' }, 'equals', '200')], {
+            path: `https://evil.example/${OPAQUE}`,
+          }),
+          baseUrl: 'http://127.0.0.1:1',
+        },
+      }),
+    ).rejects.toThrow(
+      expect.objectContaining({ message: expect.not.stringContaining(OPAQUE) as unknown }),
+    );
   });
 
   it('honours caller-supplied extra patterns for a secret with no assignment shape', async () => {

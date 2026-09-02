@@ -546,7 +546,7 @@ function compare(comparison: AssertionComparison, actual: string, expected: stri
  * front of a human as the `actual` of a failing criterion.
  */
 type ReadValue =
-  | { readonly present: true; readonly value: string; readonly name?: string }
+  | { readonly present: true; readonly value: string }
   | { readonly present: false; readonly why: string };
 
 interface ObservedResponse {
@@ -565,7 +565,7 @@ function readTarget(target: HttpAssertionTarget, response: ObservedResponse): Re
       const value = response.headers.get(target.name);
       return value === null
         ? { present: false, why: `<no such header: ${target.name}>` }
-        : { present: true, value, name: target.name };
+        : { present: true, value };
     }
 
     case 'body':
@@ -603,11 +603,7 @@ function readTarget(target: HttpAssertionTarget, response: ObservedResponse): Re
           why: `<json path '${target.path}' did not resolve in the response body>`,
         };
       }
-      return {
-        present: true,
-        value: renderJsonValue(resolved),
-        name: steps.at(-1)?.kind === 'key' ? (steps.at(-1) as { name: string }).name : undefined,
-      };
+      return { present: true, value: renderJsonValue(resolved) };
     }
 
     default: {
@@ -634,11 +630,11 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
   async execute(request: ProbeRequest): Promise<ProbeAttempt> {
     // Everything structural is settled BEFORE any I/O, so a malformed plan or a mis-wired
     // caller can never be mistaken for a broken environment.
-    const params = validateParams(request);
+    const redaction = this.#deps.redaction;
+    const params = validateParams(request, redaction);
     const { probe, baseUrl, attempt } = params;
     const url = buildUrl(baseUrl, probe.mechanics.path);
 
-    const redaction = this.#deps.redaction;
     const timeoutMs = this.#deps.timeoutMs ?? HTTP_PROBE_TIMEOUT_MS;
     const doFetch = this.#deps.fetch ?? ((target, init) => fetch(target, init));
 
@@ -811,11 +807,24 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
 
 /* ── params validation: everything structural, before any I/O ───────────────────────── */
 
-function validateParams(request: ProbeRequest): {
+function validateParams(
+  request: ProbeRequest,
+  redaction: RedactionOptions | undefined,
+): {
   probe: HttpProbe;
   baseUrl: string;
   attempt: number;
 } {
+  // `redaction` is THREADED IN rather than left to the default, and that is the whole reason
+  // this parameter exists. These messages quote a PATH and a BASE URL — strings the caller
+  // supplied — and they reach stderr through `printError` verbatim. A bare
+  // `redactText(value)` applies only the BUILT-IN rules, so a secret shaped like nothing the
+  // built-ins recognise (precisely the case a project declares `extraPatterns` for) would be
+  // printed in full. Every other call in this module already threaded the options; these two
+  // were the outliers, found in review. The guard for them uses a token that matches NO
+  // built-in rule, so it cannot pass by accident on the built-ins alone.
+  const redact = (value: string): string => redactText(value, redaction);
+
   const fail = (why: string, hint: string): never => {
     throw new InfraError(`http probe params for ${request.criterionId}: ${why}`, hint);
   };
@@ -854,7 +863,7 @@ function validateParams(request: ProbeRequest): {
   // point with an absolute URL would be pointing a probe at a host nobody declared.
   if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
     return fail(
-      `path '${redactText(String(path))}' is not service-relative`,
+      `path '${redact(String(path))}' is not service-relative`,
       "a plan names a declared service and a path beginning with a single '/' — never a scheme, a host, or a protocol-relative '//'",
     );
   }
@@ -894,7 +903,7 @@ function validateParams(request: ProbeRequest): {
     void new URL(baseUrl);
   } catch {
     return fail(
-      `baseUrl '${redactText(baseUrl)}' is not a valid absolute URL`,
+      `baseUrl '${redact(baseUrl)}' is not a valid absolute URL`,
       'pass the origin resolved from the project config, e.g. http://127.0.0.1:3000',
     );
   }
@@ -970,11 +979,28 @@ function evaluate(
 ): AssertionEvaluation {
   const read = readTarget(assertion.target, observed);
   const description = redactText(assertion.description, redaction);
-  const expected = redactText(assertion.expected, redaction);
+
+  // THE NAME COMES FROM THE TARGET, NOT FROM WHAT WAS READ, and it is applied to BOTH sides.
+  //
+  // `expected` is as capable of holding a credential as `actual` is: a plan asserting
+  // `header authorization equals <token>` puts the token in `expected`, where it is a BARE
+  // string with no assignment syntax for `redactText` to recognise — and it is persisted to
+  // result.json and printed, exactly like `actual`. Protecting only `actual` (the first
+  // version of this function) left the two sides of one comparison under different rules,
+  // which is the kind of asymmetry that reads as deliberate and is not. Found by review.
+  //
+  // Deriving the name from the TARGET rather than from the successful read also means the
+  // protection does not evaporate on the path where the value was absent — the branch where
+  // there is no `read.value` to have carried a name at all.
+  const name = targetName(assertion.target);
+  const expected = namedValue(name, assertion.expected, redaction);
 
   if (!read.present) {
     // A value that does not exist cannot satisfy an expectation about that value — for
     // every comparison, the negative ones included. See the module header.
+    //
+    // `read.why` is prose naming the header or path, not a captured value, so it takes the
+    // ordinary text redaction: name-redacting it would replace the explanation itself.
     return { description, satisfied: false, expected, actual: redactText(read.why, redaction) };
   }
 
@@ -982,8 +1008,28 @@ function evaluate(
     description,
     satisfied: compare(assertion.comparison, read.value, assertion.expected),
     expected,
-    actual: namedValue(read.name, read.value, redaction),
+    actual: namedValue(name, read.value, redaction),
   };
+}
+
+/**
+ * The name an assertion's target reads under, or `undefined` when it has none.
+ *
+ * A status code and a whole body are anonymous — there is no key whose name could make them
+ * sensitive — while a header and a JSON path both name exactly one thing. That name is what
+ * `namedValue` tests, so it is derived once here and applied to `expected` and `actual`
+ * alike.
+ */
+function targetName(target: HttpAssertionTarget): string | undefined {
+  if (target.source === 'header') {
+    return target.name;
+  }
+  if (target.source === 'jsonPath') {
+    const steps = parseJsonPath(target.path);
+    const last = steps?.at(-1);
+    return last !== undefined && last.kind === 'key' ? last.name : undefined;
+  }
+  return undefined;
 }
 
 /**
