@@ -102,6 +102,7 @@ import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
 import { armInterruptNotice } from '../verify/interrupt.js';
 import { createProbeDispatcher } from '../verify/probe-dispatch.js';
+import { releaseRun } from '../verify/teardown.js';
 
 /** Injected at build time by tsup, and by vitest for source-level runs. */
 declare const __SW_VERSION__: string;
@@ -356,22 +357,24 @@ async function verify(
       // complete document afterwards — one writer, one serializer, two moments.
       persist: { writeResult: (runId, finished) => store.writeResult(runId, finished) },
       teardown: {
-        release: async (context) => {
-          // SERVICES FIRST, WORKTREE SECOND, and the order is load-bearing: a live
-          // service holds an open file handle inside the worktree, and on some
-          // platforms removing a tree out from under a running process fails or
-          // leaves it partially deleted. Draining first also means that if the
-          // worktree removal throws, every service is already gone.
-          await registry.releaseAll();
-
-          const worktreePath = context.run.environment.worktreePath;
-          if (worktreePath !== null) {
-            // The path is the only handle that escapes the stage, and
-            // `removeWorktreeAt` also clears the `mkdtemp` container it can
-            // prove it owns — so a successful run leaves nothing behind.
-            await vcs.removeWorktreeAt(root, worktreePath);
-          }
-        },
+        // Services first, worktree second, and NEITHER failure cancels the other
+        // attempt — see `verify/teardown.ts` for both reasons. The composition is
+        // extracted so the order and the failure handling are testable without an
+        // unkillable process, which is not something a test may create.
+        release: async (context) =>
+          await releaseRun({
+            releaseServices: () => registry.releaseAll(),
+            removeWorktree: async () => {
+              const worktreePath = context.run.environment.worktreePath;
+              if (worktreePath === null) {
+                return;
+              }
+              // The path is the only handle that escapes the stage, and
+              // `removeWorktreeAt` also clears the `mkdtemp` container it can prove
+              // it owns — so a successful run leaves nothing behind.
+              await vcs.removeWorktreeAt(root, worktreePath);
+            },
+          }),
       },
     }),
     // The complete document, after teardown. The persist stage already wrote a
