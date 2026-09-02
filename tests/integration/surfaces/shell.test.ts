@@ -236,7 +236,7 @@ describe('AC1 — real exit codes and real output', () => {
     const names = writer.writes.map((write) => write.name);
     // The stem carries both ids and a content-derived discriminator, so the
     // readable prefix is asserted and the 8-hex suffix is matched by shape.
-    const stem = /^evidence\/shell-E4-01-checker-probe-[0-9a-f]{8}-1/;
+    const stem = /^evidence\/shell-E4-01-checker-probe-[0-9a-f]{24}-1/;
     expect(names.filter((name) => stem.test(name) && name.endsWith('.stdout.txt'))).toHaveLength(1);
     expect(names.filter((name) => stem.test(name) && name.endsWith('.stderr.txt'))).toHaveLength(1);
     expect(names.filter((name) => stem.test(name) && name.endsWith('.json'))).toHaveLength(1);

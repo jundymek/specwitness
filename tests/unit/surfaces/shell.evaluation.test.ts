@@ -367,7 +367,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(attempt.evidence).toHaveLength(1);
     expect(attempt.evidence[0]?.kind).toBe('command');
     expect(attempt.evidence[0]?.path).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/,
     );
     expect(writer.writes).toHaveLength(1);
   });
@@ -377,9 +377,9 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
 
     const names = writer.writes.map((w) => w.name);
     expect(names).toHaveLength(3);
-    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/);
-    expect(names[1]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stderr\.txt$/);
-    expect(names[2]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/);
+    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/);
+    expect(names[1]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stderr\.txt$/);
+    expect(names[2]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/);
     expect(attempt.evidence).toHaveLength(3);
   });
 
@@ -417,7 +417,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(attempt.evidence).toHaveLength(1);
     expect(writer.writes).toHaveLength(1);
     expect(writer.writes[0]?.name).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/,
     );
   });
 
@@ -458,7 +458,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(member.stdout.truncated).toBe(true);
     expect(member.stdout.totalBytes).toBe(EVIDENCE_INLINE_CAP_BYTES + 500);
     expect(member.stdout.fullPath).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/,
     );
   });
 
@@ -466,7 +466,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     const { writer } = await run({ stdout: 'out\n' }, { attempt: 2 });
 
     const names = writer.writes.map((w) => w.name);
-    expect(names.every((n) => /-[0-9a-f]{8}-2\./.test(n))).toBe(true);
+    expect(names.every((n) => /-[0-9a-f]{24}-2\./.test(n))).toBe(true);
     expect(names).toHaveLength(2);
   });
 
@@ -914,7 +914,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     const names = writer.writes.map((w) => w.name);
     expect(names).toHaveLength(2);
     // The readable prefix survives; only the discriminator is opaque.
-    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/);
+    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/);
   });
 });
 

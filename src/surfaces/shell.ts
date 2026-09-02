@@ -138,6 +138,8 @@
  * AD-1: imports `src/domain/**` and npm only.
  */
 
+import { createHash } from 'node:crypto';
+
 import type {
   AssertionEvaluation,
   Observation,
@@ -853,22 +855,43 @@ function slugify(value: string): string {
 }
 
 /**
- * A short fingerprint of the RAW id, used only to disambiguate a lossy slug.
+ * A collision-resistant discriminator for one `(criterionId, probeId)` pair.
  *
- * FNV-1a over the UTF-16 code units, rendered as 8 lowercase hex characters.
- * Hand-rolled because `src/domain/**` and its importers may not reach for
- * `node:crypto`, and because this is a uniqueness tiebreak rather than a
- * security primitive — nothing trusts it, it only has to differ when the
- * inputs differ.
+ * SHA-256 of the two ids joined by NUL — a separator neither can contain — with
+ * the first 24 hex characters kept.
+ *
+ * WHY NOT THE 32-BIT FNV-1a THIS REPLACED. A review pass did not argue the
+ * point, it BRUTE-FORCED it: it produced two valid 82-character probe ids
+ * sharing a 70-character prefix whose FNV values are both `ee83bd36`. Both
+ * truncate to the same 64-character slug, so both produced the identical
+ * evidence stem — and the later probe silently overwrote the earlier one's files
+ * while both results kept referencing them. A 32-bit digest reaches a birthday
+ * collision at roughly 65k candidates, which is not an exotic attack; it is a
+ * short script. A plan is provider-authored text, which is exactly the threat
+ * model this story exists for.
+ *
+ * Misattributed evidence is the worst failure available here: lost evidence is
+ * visible, but a reader shown another probe's output under this probe's name has
+ * no signal that anything is wrong.
+ *
+ * 96 bits puts a birthday collision at ~2^48 rather than ~2^16, and SHA-256
+ * makes a DELIBERATE collision infeasible rather than merely unlikely — which is
+ * the property that matters when the ids are chosen by whoever authored the
+ * plan. `node:crypto` is available here because `no-side-effect-builtins-in-core`
+ * scopes its ban to `src/(domain|schemas)/`; `src/surfaces/**` is an adapter, and
+ * `src/schemas/canonical.ts` and `src/infra/ids.ts` already use it.
+ *
+ * The ideal fix is the one `gate-evidence-path.ts` uses — a DECLARATION INDEX,
+ * collision-free by construction rather than by probability. An executor has
+ * none: it is handed one probe at a time and never sees the list. Adding `index`
+ * to the params contract would need story 4.7 to supply it, so it is recorded as
+ * the stronger follow-up rather than taken unilaterally here.
  */
-function fingerprint(raw: string): string {
-  let hash = 0x811c_9dc5;
-  for (let index = 0; index < raw.length; index += 1) {
-    hash ^= raw.charCodeAt(index);
-    // FNV prime, via shifts so the arithmetic stays in 32 bits.
-    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
+function discriminator(criterionId: string, probeId: string): string {
+  return createHash('sha256')
+    .update(`${criterionId}\u0000${probeId}`)
+    .digest('hex')
+    .slice(0, 24);
 }
 
 /**
@@ -915,15 +938,10 @@ function fingerprint(raw: string): string {
  * repeat. Pinned by test.
  */
 function evidenceStem(criterionId: string, params: ShellProbeParams, attempt: number): string {
-  // NUL separator: unrepresentable in a criterion id or an `Identifier`, so the
-  // pair round-trips unambiguously into the hash.
-  const identity = `${criterionId}\u0000${params.probeId}`;
   const slug = slugify(`${criterionId}-${params.probeId}`);
-  const discriminator = fingerprint(identity);
+  const stamp = discriminator(criterionId, params.probeId);
 
-  return slug === ''
-    ? `shell-${discriminator}-${attempt}`
-    : `shell-${slug}-${discriminator}-${attempt}`;
+  return slug === '' ? `shell-${stamp}-${attempt}` : `shell-${slug}-${stamp}-${attempt}`;
 }
 
 export class ShellSurfaceExecutor implements SurfaceExecutor {
