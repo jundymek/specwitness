@@ -811,6 +811,43 @@ function discriminator(criterionId: string, probeId: string): string {
   return createHash('sha256').update(`${criterionId} ${probeId}`, 'utf8').digest('hex');
 }
 
+/**
+ * A record of what this observation ATTEMPTED, for a run in which nothing was observed.
+ *
+ * Deliberately shaped so it cannot be mistaken for a snapshot: it opens by saying so, and
+ * it carries no `snapshot:` field of any kind. That distinction is the whole point —
+ * reporting an attempt as an observation would manufacture evidence out of an
+ * infrastructure failure, which is the sin this module refuses everywhere else.
+ *
+ * Modelled on 4.4's `attemptedRequestReport` in `src/surfaces/http.ts`, down to the opening
+ * sentence, so the two read alike in a run directory holding both.
+ *
+ * REDACTED AS A WHOLE as well as per field. This string is assembled from the plan's own
+ * arguments and the command's captured streams, so it is capture — and AD-10 puts redaction
+ * at capture. `{shellCommand: true}` is NOT used: only `displayCommand` is declared text,
+ * and it is redacted as such by the caller before it reaches here.
+ */
+function attemptedCommandReport(
+  params: ObservationParams,
+  phase: Snapshot['phase'],
+  result: ProcessResult,
+  options: RedactionOptions | undefined,
+): string {
+  const lines = [
+    'nothing was observed; this records what was attempted, not what was observed',
+    '',
+    `command:  ${params.commandId}`,
+    `phase:    ${phase}`,
+    `attempt:  ${params.attempt}`,
+    ...params.args.map((argument) => `argument: ${argument}`),
+    '',
+    `outcome:  ${result.outcome}`,
+    `exit:     ${result.exitCode ?? 'none'}`,
+  ];
+
+  return `${redactText(lines.join('\n'), options)}\n`;
+}
+
 export class ObservationSurfaceExecutor implements SurfaceExecutor {
   readonly surface = 'observation' as const;
 
@@ -1036,25 +1073,60 @@ export class ObservationSurfaceExecutor implements SurfaceExecutor {
    * already redacted at capture, and a second pass would imply its output is untrusted —
    * which the whole design of `evidence.ts` denies. (Agreed with 4.4.)
    */
+  /**
+   * The evidence filename stem for one snapshot.
+   *
+   * criterion + probe + a discriminator over the FULL identity: probe ids are unique only
+   * within a criterion, and both slugs are truncated. See `discriminator`.
+   *
+   * Factored out so the snapshot record and the attempt record derive the same stem from
+   * one place — two derivations of an evidence path is how a collision gets reintroduced
+   * after being fixed, and this module's history already has three of those.
+   */
+  #evidenceStem(params: ObservationParams, phase: Snapshot['phase']): string {
+    return (
+      `${EVIDENCE_DIR}/observation-${slugify(params.criterionId)}-${slugify(params.probeId)}` +
+      `-${discriminator(params.criterionId, params.probeId)}-${phase}-${params.attempt}`
+    );
+  }
+
   async #persist(
     params: ObservationParams,
     phase: Snapshot['phase'],
     result: ProcessResult,
   ): Promise<EvidenceRef[]> {
     if (!observedAnything(result)) {
-      // Nothing was observed, so nothing is written and NO REF IS INVENTED.
-      // `deriveCriterionResult` tolerates zero refs deliberately: "a probe that crashed
-      // before observing anything has nothing honest to put there, and inventing a value
-      // would be worse than omitting one."
-      return [];
+      // NOTHING WAS OBSERVED — so no typed MEMBER is recorded, and none can be.
+      // `ObservationEvidence.snapshot` is a `BoundedText` with no absence marker, so a
+      // member here would make "the command never ran" and "it ran and printed nothing"
+      // byte-identical in the audit record. That part of the original reasoning stands and
+      // is unchanged.
+      //
+      // BUT THE MEMBER AND THE REFERENCE ARE SEPARATE CHANNELS, and FR-28 governs the
+      // reference: every non-pass result a repair agent reads must carry at least one. This
+      // path derives to criterion `error`, which IS a persisted non-pass, and it previously
+      // carried none — disclosed by this file's author (4.5) and assigned to 4.7, on the
+      // belief that closing it required widening the closed evidence union.
+      //
+      // It does not. 4.4's merged `http.ts` had already found the third way and used it: on
+      // a refused connection it writes a redacted record of what was ATTEMPTED — never of
+      // what was observed — and refs that. The artifact is honest, it is exactly what an
+      // operator needs in order to fix the environment, and it widens nothing. The same
+      // move applies verbatim here.
+      //
+      // Written for `not-found`, `spawn-failed`, a timeout before any output, and a
+      // `completed` run that printed nothing at all. Added by story 4.7, after its
+      // surface-conformance test measured this surface as the only one of the three leaving
+      // a non-pass criterion with zero references.
+      const path = await this.#deps.writeEvidence(
+        `${this.#evidenceStem(params, phase)}.attempt.txt`,
+        attemptedCommandReport(params, phase, result, this.#captureRedaction()),
+      );
+      return [evidenceRef('observation', path)];
     }
 
     const options = this.#captureRedaction();
-    // criterion + probe + a discriminator over the FULL identity: probe ids are unique only
-    // within a criterion, and both slugs are truncated. See `discriminator`.
-    const stem =
-      `${EVIDENCE_DIR}/observation-${slugify(params.criterionId)}-${slugify(params.probeId)}` +
-      `-${discriminator(params.criterionId, params.probeId)}-${phase}-${params.attempt}`;
+    const stem = this.#evidenceStem(params, phase);
     const refs: EvidenceRef[] = [];
 
     let fullPath: string | undefined;
