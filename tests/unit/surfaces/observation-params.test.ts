@@ -24,8 +24,6 @@
  * real probe is typed `ObservationProbe`, so the COMPILER supplies the shape.
  */
 
-import { createHash } from 'node:crypto';
-
 import { describe, expect, it } from 'vitest';
 
 import { InfraError } from '../../../src/domain/errors.js';
