@@ -545,6 +545,28 @@ describe('a value that is not there (AC1)', () => {
     expect(attempt.assertionEvaluations.map((each) => each.satisfied)).toEqual([false, false]);
   });
 
+  it('renders a faithful string for a key named __proto__, not the prototype object', async () => {
+    // JSON.parse makes `__proto__` an OWN property, so the path resolver reaches it. The
+    // redaction helper builds its result with `result[name] = …`, and assigning to
+    // `__proto__` hits the prototype setter — silently discarded for a string — so a naive
+    // read-back returns `Object.prototype`. That is not a leak, but it is an `actual` that
+    // serialises to `{}` and tells a reader nothing about what was seen.
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"__proto__":"polluted-value"}');
+    });
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'jsonPath', path: '__proto__' }, 'equals', 'something-else')]),
+    );
+
+    const [evaluation] = attempt.assertionEvaluations;
+    expect(typeof evaluation?.actual).toBe('string');
+    expect(evaluation?.actual).toBe('polluted-value');
+    expect(evaluation?.satisfied).toBe(false);
+  });
+
   it('treats a non-JSON body under a jsonPath assertion as unsatisfied, naming the content type', async () => {
     const { baseUrl } = await fixture((_request, response) => {
       response.writeHead(200, { 'content-type': 'text/html' });
@@ -750,6 +772,35 @@ describe('evidence capture (AC2, AD-10)', () => {
     expect(attempt.evidence.length).toBeGreaterThanOrEqual(1);
     expect(written.map((each) => each.name)).toContain(attempt.evidence[0]?.path);
     expect(attempt.evidence.every((ref) => ref.kind === 'http')).toBe(true);
+  });
+
+  it('gives the evidence member the SAME duration as the attempt, never zero', async () => {
+    // Found by Codex review: the member carried a hard-coded durationMs of 0 while the
+    // attempt carried the measured value, so every stored report claimed slow requests
+    // completed instantly. Two numbers for one request is two answers to one question, and
+    // the member is the copy a human reads.
+    const { baseUrl } = await jsonFixture({ ok: true });
+    const { executor, recorded } = harness({ clock: steppingClock(13) });
+    const attempt = await run(
+      executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    const [member] = recorded as [HttpEvidence];
+    expect(attempt.durationMs).toBe(13);
+    expect(member.durationMs).toBe(attempt.durationMs);
+  });
+
+  it('gives an exec-error attempt a measured duration too', async () => {
+    const port = await closedPort();
+    const attempt = await run(
+      harness({ clock: steppingClock(13) }).executor,
+      `http://127.0.0.1:${port}`,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(attempt.durationMs).toBe(13);
   });
 
   it('keeps evidence paths relative to the run directory (Q48)', async () => {

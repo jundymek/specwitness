@@ -659,13 +659,14 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
       // NOTHING was observed. No status, no headers, no bytes: no member of the closed
       // evidence union can represent this, and synthesising one — a status of 0, an empty
       // body — would manufacture an observation out of an infrastructure failure.
-      return this.#finish(startedAt, {
+      return {
         attempt,
-        observations: [requestObservations(probe, url, redaction)].flat(),
+        observations: requestObservations(probe, url, redaction),
         assertionEvaluations: [],
         evidence: [],
         execError: classifyFailure(error, url, timeoutMs, redaction),
-      });
+        durationMs: this.#elapsed(startedAt),
+      };
     }
 
     const body = await readBoundedBody(response, HTTP_BODY_READ_CAP_BYTES);
@@ -691,19 +692,25 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
         ? probe.assertions.map((assertion) => evaluate(assertion, observed, redaction))
         : [];
 
+    // Measured ONCE, before capture, and used for both the evidence member and the attempt.
+    // They describe the same request, so two different numbers would be two answers to one
+    // question — and the member is the copy a human reads in the report.
+    const durationMs = this.#elapsed(startedAt);
+
     const { refs, member } = await this.#captureEvidence({
       criterionId: request.criterionId,
       probe,
       url,
       attempt,
       startedAt,
+      durationMs,
       observed,
       explanation,
       redaction,
     });
     this.#deps.recordEvidence(member);
 
-    return this.#finish(startedAt, {
+    return {
       attempt,
       observations: responseObservations(probe, url, observed, redaction),
       assertionEvaluations: evaluations,
@@ -711,18 +718,23 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
       ...(body.failure === undefined
         ? {}
         : { execError: classifyFailure(body.failure, url, timeoutMs, redaction) }),
-    });
+      durationMs,
+    };
   }
 
   /**
-   * Stamps `durationMs` from the injected clock and returns the attempt.
+   * Whole milliseconds since `startedAt`, from the injected `Clock` (AD-9) — never
+   * `Date.now()`.
    *
-   * The clock is read exactly twice per `execute()` — once before the request, once here —
-   * so a test can inject a stepping clock and assert an exact number rather than a shape.
+   * Called EXACTLY ONCE per `execute()`, so the clock is read exactly twice in total: once
+   * before the request and once after. A test can therefore inject a stepping clock and
+   * assert an exact number rather than a shape. Calling it twice would also give the
+   * evidence member and the attempt two different durations for one request, which is the
+   * defect this replaced.
    */
-  #finish(startedAt: Date, attempt: Omit<ProbeAttempt, 'durationMs'>): ProbeAttempt {
+  #elapsed(startedAt: Date): number {
     const elapsed = this.#deps.clock.now().getTime() - startedAt.getTime();
-    return { ...attempt, durationMs: Math.max(0, Math.round(elapsed)) };
+    return Math.max(0, Math.round(elapsed));
   }
 
   /**
@@ -742,11 +754,13 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
     url: string;
     attempt: number;
     startedAt: Date;
+    durationMs: number;
     observed: ObservedResponse;
     explanation: string | undefined;
     redaction: RedactionOptions | undefined;
   }): Promise<{ refs: readonly EvidenceRef[]; member: Evidence }> {
-    const { criterionId, probe, url, attempt, startedAt, observed, explanation, redaction } = input;
+    const { criterionId, probe, url, attempt, startedAt, durationMs, observed, explanation, redaction } =
+      input;
     const stem = evidenceStem(criterionId, probe.id, attempt);
 
     const redactedBody = redactText(observed.bodyText, redaction);
@@ -769,7 +783,7 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
         status: observed.status,
         responseHeaders: headerRecord(observed.headers),
         body: observed.bodyText,
-        durationMs: 0,
+        durationMs,
         ...(explanation === undefined ? {} : { explanation }),
       },
       { ...redaction, ...(fullPath === undefined ? {} : { fullPath }) },
@@ -991,7 +1005,20 @@ function namedValue(
   if (name === undefined) {
     return redactText(value, redaction);
   }
-  return redactHeaders({ [name]: value }, redaction)[name] ?? redactText(value, redaction);
+
+  // `Object.hasOwn` + a typeof guard rather than `?? fallback`, and the reason is a real
+  // case rather than paranoia: a response body may legitimately contain a key named
+  // `__proto__` (`JSON.parse` makes it an OWN property, so the path resolver reaches it).
+  // `redactHeaders` builds its result with `result[name] = …`, and a plain assignment to
+  // `__proto__` goes through the prototype SETTER — silently discarded for a string value —
+  // so reading the key back yields `Object.prototype`, an object, from a function typed as
+  // returning strings. `??` does not catch that, because the value is not nullish. The
+  // result would be an `actual` that serialises to `{}` in `result.json`: not a leak, since
+  // the value never survives, but a criterion whose evidence says nothing at all about what
+  // was seen. Falling back to the ordinary text redaction keeps it a faithful string.
+  const record = redactHeaders({ [name]: value }, redaction);
+  const redacted = Object.hasOwn(record, name) ? record[name] : undefined;
+  return typeof redacted === 'string' ? redacted : redactText(value, redaction);
 }
 
 /** `Headers` as the plain record the evidence constructor takes. */
