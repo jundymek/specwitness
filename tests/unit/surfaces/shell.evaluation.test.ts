@@ -574,6 +574,105 @@ describe('the seeded-secret proof for this capture path', () => {
   });
 });
 
+describe('plan-supplied IDENTIFIERS are redacted in diagnostics too', () => {
+  // A schema-valid `Identifier` cannot contain `=` or `:`, so it cannot form a
+  // redactable assignment — but `readParams` deliberately accepts ANY non-empty
+  // string, because the runtime gate exists for a plan EDITED ON DISK AFTER
+  // COMPILATION, which never passed through 4.2's schema. Such a plan can carry
+  // a secret in `probeId` or `commandId`, and every diagnostic below reaches
+  // `printError`, which writes to stderr verbatim.
+  //
+  // This is the same rule already applied to rejected arguments; leaving ids out
+  // was an inconsistency, found by the Codex review pass.
+  const SEEDED = `ANTHROPIC_API_KEY=${SEEDED_API_KEY}`;
+
+  async function errorFrom(
+    params: Record<string, unknown>,
+    result: Parameters<typeof processResult>[0] = {},
+  ): Promise<string> {
+    const executor = new ShellSurfaceExecutor({
+      runner: recordingRunner(processResult(result)),
+      clock: new FixedClock(CAPTURED_AT),
+      cwd: WORKTREE,
+      command: resolvedCommand(),
+      writeEvidence: recordingWriter(),
+      recordEvidence: recordingSink(),
+    });
+
+    const base = {
+      probeId: 'migrations-check',
+      commandId: 'migrations-applied',
+      args: [],
+      argumentAllowlist: [],
+      assertions: [
+        {
+          description: 'exits cleanly',
+          target: { source: 'exitCode' },
+          comparison: 'equals',
+          expected: '0',
+        },
+      ],
+    };
+
+    try {
+      const attempt = await executor.execute({
+        criterionId: 'E4-01',
+        surface: 'shell',
+        params: { ...base, ...params } as unknown as Readonly<Record<string, unknown>>,
+      });
+      // No throw: the diagnostic may instead live on the execError.
+      return `${attempt.execError?.message ?? ''}\n${attempt.execError?.hint ?? ''}`;
+    } catch (error) {
+      return `${(error as Error).message}\n${(error as { hint?: string }).hint ?? ''}`;
+    }
+  }
+
+  it('redacts a secret probeId in the command-id mismatch rejection', async () => {
+    const rendered = await errorFrom({ probeId: SEEDED, commandId: 'wrong-id' });
+
+    expect(rendered).not.toContain(SEEDED_API_KEY);
+  });
+
+  it('redacts a secret commandId in the same rejection', async () => {
+    const rendered = await errorFrom({ commandId: SEEDED });
+
+    expect(rendered).not.toContain(SEEDED_API_KEY);
+  });
+
+  it('redacts a secret probeId in the allowlist-violation rejection', async () => {
+    const rendered = await errorFrom({
+      probeId: SEEDED,
+      args: ['--nope'],
+      argumentAllowlist: [],
+    });
+
+    expect(rendered).not.toContain(SEEDED_API_KEY);
+  });
+
+  it('redacts a secret probeId in every execError diagnostic', async () => {
+    for (const outcome of ['not-found', 'spawn-failed', 'timed-out'] as const) {
+      const rendered = await errorFrom({ probeId: SEEDED }, { outcome, exitCode: null });
+      expect(rendered).not.toContain(SEEDED_API_KEY);
+    }
+  });
+
+  it('redacts a secret commandId in the not-found remedy hint', async () => {
+    const rendered = await errorFrom(
+      { commandId: SEEDED },
+      { outcome: 'not-found', exitCode: null },
+    );
+
+    expect(rendered).not.toContain(SEEDED_API_KEY);
+  });
+
+  it('leaves an ordinary id untouched, so diagnostics stay readable', async () => {
+    const rendered = await errorFrom({ commandId: 'wrong-id' });
+
+    expect(rendered).toContain('migrations-check');
+    expect(rendered).toContain('wrong-id');
+  });
+});
+
 describe('AD-10 config-declared extraPatterns reach every redaction path', () => {
   // The built-in rules cannot know a project's own secret shapes. AD-10's
   // "config-declared extra patterns" are the only thing that can redact them,

@@ -442,6 +442,34 @@ function looksUnsubstituted(value: string): boolean {
 }
 
 /**
+ * Renders a PLAN-SUPPLIED identifier for a diagnostic message, redacted.
+ *
+ * `probeId` and the params' `commandId` come from the plan — provider-authored
+ * text — and every diagnostic below reaches `printError`, which writes
+ * `ERROR:`/`HINT:` to stderr verbatim. So they get the same fail-closed
+ * treatment as a rejected argument, and for the same reason.
+ *
+ * WHY THIS IS REACHABLE RATHER THAN THEORETICAL, since a schema-valid
+ * `Identifier` cannot contain `=` or `:` and so cannot form a redactable
+ * assignment: `readParams` deliberately accepts any non-empty string, because
+ * the whole point of the runtime gate is a plan **edited on disk after
+ * compilation**, which never passed through 4.2's schema at all. Such a plan can
+ * carry `probeId: "API_KEY=sk-ant-..."`. The gate that exists for hand-edited
+ * plans must not itself trust hand-edited input.
+ *
+ * The resolved command's own `commandId` is project-owner-declared rather than
+ * provider-authored, so it does not strictly need this — it is redacted anyway
+ * because uniformity costs nothing (an ordinary id matches no redaction pattern
+ * and passes through untouched) and a rule with an exception is a rule somebody
+ * eventually applies to the wrong side. Found by the Codex review pass, which
+ * correctly read it as an inconsistency with the argument redaction three lines
+ * away.
+ */
+function safeId(value: string, redaction: RedactionOptions | undefined): string {
+  return redactText(value, redaction);
+}
+
+/**
  * Refuses the probe unless every argument is permitted. Runs BEFORE any spawn.
  *
  * The half-substitution hint exists because of a cohort agreement with story
@@ -460,8 +488,9 @@ function enforceAllowlist(
 ): void {
   if (params.commandId !== command.commandId) {
     throw new ConfigError(
-      `shell probe '${params.probeId}' references command id '${params.commandId}', but the ` +
-        `command resolved for it was '${command.commandId}'`,
+      `shell probe '${safeId(params.probeId, redaction)}' references command id ` +
+        `'${safeId(params.commandId, redaction)}', but the command resolved for it was ` +
+        `'${safeId(command.commandId, redaction)}'`,
       'a plan may only run commands declared under `observations:` in .specwitness/config.yaml, ' +
         'and the id it names must be the one that was resolved — quietly running a different ' +
         'command would be a hole in the AD-3 boundary',
@@ -494,7 +523,8 @@ function enforceAllowlist(
     rejected.some(looksUnsubstituted) || params.argumentAllowlist.some(looksUnsubstituted);
 
   throw new ConfigError(
-    `shell probe '${params.probeId}' passes ${rejected.length} argument(s) outside its ` +
+    `shell probe '${safeId(params.probeId, redaction)}' passes ${rejected.length} argument(s) ` +
+      `outside its ` +
       `argumentAllowlist: ${rejected.map((value) => `'${show(value)}'`).join(', ')}`,
     (params.argumentAllowlist.length === 0
       ? `this probe's argumentAllowlist is empty, which permits NO arguments — add each ` +
@@ -614,22 +644,26 @@ function evaluate(
  * absent from the revision under verification. Same reasoning, and the same
  * two remedies, as the merged `notFoundError` in `pipeline/stages/gates.ts`.
  */
-function notFoundExecError(params: ShellProbeParams, binary: string): { message: string; hint: string } {
+function notFoundExecError(
+  params: ShellProbeParams,
+  binary: string,
+  redaction: RedactionOptions | undefined,
+): { message: string; hint: string } {
   const namesAFile = binary.includes('/') || binary.includes('\\');
   return namesAFile
     ? {
         message:
-          `shell probe '${params.probeId}' could not start: '${binary}' does not exist in the ` +
+          `shell probe '${safeId(params.probeId, redaction)}' could not start: '${binary}' does not exist in the ` +
           'verification worktree',
         hint:
           'probes run against the revision under verification, not your working copy — commit ' +
           `'${binary}' (an untracked or uncommitted file will not be there), or correct ` +
-          `observations.${params.commandId} in .specwitness/config.yaml`,
+          `observations.${safeId(params.commandId, redaction)} in .specwitness/config.yaml`,
       }
     : {
-        message: `shell probe '${params.probeId}' could not start: '${binary}' is not on PATH`,
+        message: `shell probe '${safeId(params.probeId, redaction)}' could not start: '${binary}' is not on PATH`,
         hint:
-          `install '${binary}', or correct observations.${params.commandId} in ` +
+          `install '${binary}', or correct observations.${safeId(params.commandId, redaction)} in ` +
           '.specwitness/config.yaml — this is an environment problem, not a failure of the ' +
           'branch under verification',
       };
@@ -657,7 +691,7 @@ function classify(
       return undefined;
 
     case 'not-found':
-      return notFoundExecError(params, binary);
+      return notFoundExecError(params, binary, redaction);
 
     case 'spawn-failed':
       return {
@@ -666,14 +700,14 @@ function classify(
         // writes to stderr verbatim, and the persisted copy would be clean
         // while the terminal showed the secret.
         message:
-          `shell probe '${params.probeId}' could not be spawned: ` +
+          `shell probe '${safeId(params.probeId, redaction)}' could not be spawned: ` +
           (redactText(result.stderr, redaction).trim() || 'the process did not start'),
         hint: 'check that the verification worktree exists and is readable, then rerun',
       };
 
     case 'timed-out':
       return {
-        message: `shell probe '${params.probeId}' timed out after ${timeoutMs}ms and was killed`,
+        message: `shell probe '${safeId(params.probeId, redaction)}' timed out after ${timeoutMs}ms and was killed`,
         hint:
           'a probe that hung observed nothing, so this is reported as an environment problem ' +
           'rather than as a failing criterion — rerun, or make the command faster',
@@ -683,7 +717,7 @@ function classify(
       const unreachable: never = result.outcome;
       return {
         message:
-          `shell probe '${params.probeId}' returned an unrecognised process outcome: ` +
+          `shell probe '${safeId(params.probeId, redaction)}' returned an unrecognised process outcome: ` +
           String(unreachable),
         hint: 'this is a defect in SpecWitness; please report it with the run directory',
       };
