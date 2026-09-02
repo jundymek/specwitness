@@ -33,6 +33,7 @@ import {
 import {
   processResult,
   recordingRunner,
+  probeParams,
   recordingSink,
   recordingWriter,
   resolvedCommand,
@@ -77,21 +78,10 @@ async function run(
   const attempt = await executor.execute({
     criterionId: 'E4-01',
     surface: 'shell',
-    params: {
-      probeId: 'migrations-check',
-      commandId: 'migrations-applied',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-      ...params,
-    } as unknown as Readonly<Record<string, unknown>>,
+    params: probeParams({
+      ...(params as Record<string, unknown>),
+      ...(('probeId' in params) ? { id: (params as { probeId?: string }).probeId } : {}),
+    }),
   });
 
   return { attempt, writer, sink };
@@ -377,7 +367,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(attempt.evidence).toHaveLength(1);
     expect(attempt.evidence[0]?.kind).toBe('command');
     expect(attempt.evidence[0]?.path).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/,
     );
     expect(writer.writes).toHaveLength(1);
   });
@@ -387,9 +377,9 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
 
     const names = writer.writes.map((w) => w.name);
     expect(names).toHaveLength(3);
-    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/);
-    expect(names[1]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stderr\.txt$/);
-    expect(names[2]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/);
+    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/);
+    expect(names[1]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stderr\.txt$/);
+    expect(names[2]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/);
     expect(attempt.evidence).toHaveLength(3);
   });
 
@@ -427,7 +417,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(attempt.evidence).toHaveLength(1);
     expect(writer.writes).toHaveLength(1);
     expect(writer.writes[0]?.name).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.json$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.json$/,
     );
   });
 
@@ -468,7 +458,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     expect(member.stdout.truncated).toBe(true);
     expect(member.stdout.totalBytes).toBe(EVIDENCE_INLINE_CAP_BYTES + 500);
     expect(member.stdout.fullPath).toMatch(
-      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/,
+      /^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/,
     );
   });
 
@@ -476,7 +466,7 @@ describe('AC1 — evidence: bounded, redacted at capture, and reachable by a ren
     const { writer } = await run({ stdout: 'out\n' }, { attempt: 2 });
 
     const names = writer.writes.map((w) => w.name);
-    expect(names.every((n) => /-[0-9a-f]{8}-2\./.test(n))).toBe(true);
+    expect(names.every((n) => /-[0-9a-f]{24}-2\./.test(n))).toBe(true);
     expect(names).toHaveLength(2);
   });
 
@@ -550,20 +540,10 @@ describe('the seeded-secret proof for this capture path', () => {
       await executor.execute({
         criterionId: 'E4-01',
         surface: 'shell',
-        params: {
-          probeId: 'migrations-check',
-          commandId: 'migrations-applied',
+        params: probeParams({
           args: [`--token=${SEEDED_API_KEY}`],
           argumentAllowlist: ['--dry-run'],
-          assertions: [
-            {
-              description: 'exits cleanly',
-              target: { source: 'exitCode' },
-              comparison: 'equals',
-              expected: '0',
-            },
-          ],
-        } as unknown as Readonly<Record<string, unknown>>,
+        }),
       });
     } catch (caught) {
       error = caught;
@@ -599,26 +579,15 @@ describe('plan-supplied IDENTIFIERS are redacted in diagnostics too', () => {
       recordEvidence: recordingSink(),
     });
 
-    const base = {
-      probeId: 'migrations-check',
-      commandId: 'migrations-applied',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-    };
-
     try {
+      const { probeId, ...rest } = params as { probeId?: string };
       const attempt = await executor.execute({
         criterionId: 'E4-01',
         surface: 'shell',
-        params: { ...base, ...params } as unknown as Readonly<Record<string, unknown>>,
+        params: probeParams({
+          ...(probeId === undefined ? {} : { id: probeId }),
+          ...(rest as Record<string, unknown>),
+        }),
       });
       // No throw: the diagnostic may instead live on the execError.
       return `${attempt.execError?.message ?? ''}\n${attempt.execError?.hint ?? ''}`;
@@ -702,22 +671,12 @@ describe('AD-10 config-declared extraPatterns reach every redaction path', () =>
       await executor.execute({
         criterionId: 'E4-01',
         surface: 'shell',
-        params: {
-          probeId: 'migrations-check',
-          commandId: 'migrations-applied',
+        params: probeParams({
           args: [PROJECT_SECRET],
           // The permitted list carries one too, so BOTH renderings are covered:
           // the rejected argument and the "permitted arguments are:" hint.
           argumentAllowlist: [`--token=${PROJECT_SECRET}`],
-          assertions: [
-            {
-              description: 'exits cleanly',
-              target: { source: 'exitCode' },
-              comparison: 'equals',
-              expected: '0',
-            },
-          ],
-        } as unknown as Readonly<Record<string, unknown>>,
+        }),
       });
     } catch (caught) {
       error = caught;
@@ -828,20 +787,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     }).execute({
       criterionId: 'E4-01',
       surface: 'shell',
-      params: {
-        probeId: 'p',
-        commandId: 'migrations-applied',
-        args: [],
-        argumentAllowlist: [],
-        assertions: [
-          {
-            description: 'exits cleanly',
-            target: { source: 'exitCode' },
-            comparison: 'equals',
-            expected: '0',
-          },
-        ],
-      } as unknown as Readonly<Record<string, unknown>>,
+      params: probeParams({ id: 'p' }),
     });
 
     expect(runner.calls[0]?.onProcessGroup).toBeDefined();
@@ -895,20 +841,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     // this worse cross-criterion form after the Codex collision finding.)
     const writer1 = recordingWriter();
     const writer2 = recordingWriter();
-    const probe = {
-      probeId: 'health',
-      commandId: 'migrations-applied',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-    };
+    const probe = probeParams({ id: 'health' });
 
     for (const [criterionId, writer] of [
       ['E4-01', writer1],
@@ -924,7 +857,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
       }).execute({
         criterionId,
         surface: 'shell',
-        params: probe as unknown as Readonly<Record<string, unknown>>,
+        params: probe,
       });
     }
 
@@ -951,19 +884,6 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     // missed this entirely. Found by the Codex review pass.
     const writerA = recordingWriter();
     const writerB = recordingWriter();
-    const base = {
-      commandId: 'migrations-applied',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-    };
 
     for (const [criterionId, probeId, writer] of [
       ['a-b', 'c', writerA],
@@ -979,7 +899,7 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
       }).execute({
         criterionId,
         surface: 'shell',
-        params: { ...base, probeId } as unknown as Readonly<Record<string, unknown>>,
+        params: probeParams({ id: probeId }),
       });
     }
 
@@ -994,6 +914,99 @@ describe('Codex review findings — AD-8 lifecycle and evidence-name uniqueness'
     const names = writer.writes.map((w) => w.name);
     expect(names).toHaveLength(2);
     // The readable prefix survives; only the discriminator is opaque.
-    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{8}-1\.stdout\.txt$/);
+    expect(names[0]).toMatch(/^evidence\/shell-E4-01-migrations-check-[0-9a-f]{24}-1\.stdout\.txt$/);
+  });
+});
+
+describe('every provider-authored string in an evaluation is redacted', () => {
+  // `description` sits in the same object as `expected` and `actual`, and all
+  // three are provider-authored plan text. Redacting two of the three was an
+  // inconsistency rather than a decision. (Codex review pass. Note the finding
+  // overstated the consequence — `deriveCriterionResult` copies only
+  // `expected`/`actual`/`evidence`, so `description` does not reach result.json
+  // today; this is defence in depth for a field a renderer is likely to surface.)
+  const PROJECT_SECRET = 'zzq-internal-9f2c1a5b7d3e';
+
+  it('redacts the assertion description, not just expected and actual', async () => {
+    const { attempt } = await run(
+      { exitCode: 0 },
+      {
+        assertions: [
+          {
+            description: `checks ANTHROPIC_API_KEY=${SEEDED_API_KEY} is unset`,
+            target: { source: 'exitCode' },
+            comparison: 'equals',
+            expected: '0',
+          },
+        ],
+      },
+    );
+
+    expect(attempt.assertionEvaluations[0]?.description).not.toContain(SEEDED_API_KEY);
+  });
+
+  it('applies configured extraPatterns to the description too', async () => {
+    const { attempt } = await run(
+      { exitCode: 0 },
+      {
+        assertions: [
+          {
+            description: `checks ${PROJECT_SECRET} is absent`,
+            target: { source: 'exitCode' },
+            comparison: 'equals',
+            expected: '0',
+          },
+        ],
+      },
+      { redaction: { extraPatterns: [/zzq-internal-[a-z0-9]+/g] } },
+    );
+
+    expect(attempt.assertionEvaluations[0]?.description).not.toContain(PROJECT_SECRET);
+  });
+
+  it('leaves an ordinary description readable', async () => {
+    const { attempt } = await run({ exitCode: 0 });
+
+    expect(attempt.assertionEvaluations[0]?.description).toBe('exits cleanly');
+  });
+});
+
+describe('the binary is redacted in not-found diagnostics', () => {
+  // `binary` is derived from the project-owner's DECLARED command, and
+  // `commandEvidence` already redacts `displayCommand` for the same reason: a
+  // declared command can legitimately carry a credential, and this message
+  // reaches `printError`, which writes it to stderr verbatim.
+  it('redacts a secret-bearing binary on the PATH branch', async () => {
+    const { attempt } = await run({ outcome: 'not-found', exitCode: null }, {}, {
+      command: resolvedCommand({
+        binary: `tool-ANTHROPIC_API_KEY=${SEEDED_API_KEY}`,
+        displayCommand: 'tool',
+      }),
+    });
+
+    const rendered = `${attempt.execError?.message ?? ''}\n${attempt.execError?.hint ?? ''}`;
+    expect(rendered).not.toContain(SEEDED_API_KEY);
+  });
+
+  it('redacts a secret-bearing binary on the worktree-path branch', async () => {
+    const { attempt } = await run({ outcome: 'not-found', exitCode: null }, {}, {
+      command: resolvedCommand({
+        binary: `./scripts/tool-ANTHROPIC_API_KEY=${SEEDED_API_KEY}`,
+        displayCommand: './scripts/tool',
+      }),
+    });
+
+    const rendered = `${attempt.execError?.message ?? ''}\n${attempt.execError?.hint ?? ''}`;
+    expect(rendered).not.toContain(SEEDED_API_KEY);
+    // The remedy must survive redaction — an operator still needs to be told to
+    // commit the file rather than install it.
+    expect(rendered).toContain('commit');
+  });
+
+  it('leaves an ordinary binary readable in the diagnosis', async () => {
+    const { attempt } = await run({ outcome: 'not-found', exitCode: null });
+
+    expect(attempt.execError?.message).toContain('node');
+    expect(attempt.execError?.message).toContain('not on PATH');
   });
 });

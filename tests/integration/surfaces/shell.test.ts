@@ -36,6 +36,7 @@ import { ShellSurfaceExecutor } from '../../../src/surfaces/shell.js';
 import type { ShellExecutorDeps, ShellProbeParams } from '../../../src/surfaces/shell.js';
 
 import {
+  probeParams,
   recordingSink,
   recordingWriter,
   throwingRunner,
@@ -123,21 +124,11 @@ async function runProbe(
   const attempt = await executor.execute({
     criterionId: 'E4-01',
     surface: 'shell',
-    params: {
-      probeId: 'checker-probe',
+    params: probeParams({
+      id: 'checker-probe',
       commandId: 'checker',
-      args: [],
-      argumentAllowlist: [],
-      assertions: [
-        {
-          description: 'exits cleanly',
-          target: { source: 'exitCode' },
-          comparison: 'equals',
-          expected: '0',
-        },
-      ],
-      ...params,
-    } as unknown as Readonly<Record<string, unknown>>,
+      ...(params as Record<string, unknown>),
+    }),
   });
 
   return { attempt, writer, sink };
@@ -245,7 +236,7 @@ describe('AC1 — real exit codes and real output', () => {
     const names = writer.writes.map((write) => write.name);
     // The stem carries both ids and a content-derived discriminator, so the
     // readable prefix is asserted and the 8-hex suffix is matched by shape.
-    const stem = /^evidence\/shell-E4-01-checker-probe-[0-9a-f]{8}-1/;
+    const stem = /^evidence\/shell-E4-01-checker-probe-[0-9a-f]{24}-1/;
     expect(names.filter((name) => stem.test(name) && name.endsWith('.stdout.txt'))).toHaveLength(1);
     expect(names.filter((name) => stem.test(name) && name.endsWith('.stderr.txt'))).toHaveLength(1);
     expect(names.filter((name) => stem.test(name) && name.endsWith('.json'))).toHaveLength(1);

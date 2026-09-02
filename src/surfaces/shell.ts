@@ -138,6 +138,8 @@
  * AD-1: imports `src/domain/**` and npm only.
  */
 
+import { createHash } from 'node:crypto';
+
 import type {
   AssertionEvaluation,
   Observation,
@@ -278,7 +280,12 @@ type ShellTargetSource = 'exitCode' | 'stdout' | 'stderr';
 const TARGET_SOURCES: readonly ShellTargetSource[] = ['exitCode', 'stdout', 'stderr'];
 
 /**
- * The narrow shape this executor reads out of `ProbeRequest.params`.
+ * The normalised, FLAT form this executor works with internally.
+ *
+ * **It is not the shape `params` arrives in.** `readParams` reads the MERGED
+ * `ShellProbe` model — `{id, mechanics: {commandId, args, argumentAllowlist},
+ * assertions}` — because that is what a compiled plan actually holds and what
+ * the caller can pass through unchanged. See `readParams` for why.
  *
  * `params` is `Readonly<Record<string, unknown>>` and the per-surface zod
  * schemas in `src/schemas/plan.ts` are MODULE-PRIVATE (`ShellProbeSchema` is
@@ -327,6 +334,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Reads one field, and ONLY as an own property.
+ *
+ * A plain `raw['probeId']` walks the prototype chain, so a params object whose
+ * fields live on its prototype passes every check below and the probe SPAWNS —
+ * silent acceptance rather than a crash, which is the worse of the two failures.
+ * `params` is derived from YAML a human may have hand-edited, which is the whole
+ * threat model this validator exists for, so it may not trust inherited shape.
+ *
+ * The merged `getObservationCommand` in `src/config/types.ts` guards the same
+ * class for the same reason, in as many words: "Own-property check on purpose: a
+ * prototype walk would resolve `constructor` or `toString` into something that
+ * is not a declared observation at all." This is that rule applied one layer out.
+ *
+ * Found by an adversarial params suite written after story 4.4 reported the
+ * shared "the interior of `params` is `unknown` and we all read it as typed"
+ * defect class — their instance was a two-level dereference, this one is a
+ * prototype read, and both hide in hand-validation because the type system stops
+ * helping at `Readonly<Record<string, unknown>>`.
+ */
+function own(raw: Record<string, unknown>, field: string): unknown {
+  return Object.hasOwn(raw, field) ? raw[field] : undefined;
+}
+
 function stringArray(value: unknown, field: string): readonly string[] {
   if (!Array.isArray(value)) {
     throw wiringDefect(`'${field}' is not an array`);
@@ -343,14 +374,14 @@ function assertionSpec(value: unknown, index: number): ShellAssertionSpec {
   if (!isRecord(value)) {
     throw wiringDefect(`'assertions[${index}]' is not an object`);
   }
-  if (typeof value['description'] !== 'string') {
+  if (typeof own(value, 'description') !== 'string') {
     throw wiringDefect(`'assertions[${index}].description' is not a string`);
   }
-  if (typeof value['expected'] !== 'string') {
+  if (typeof own(value, 'expected') !== 'string') {
     throw wiringDefect(`'assertions[${index}].expected' is not a string`);
   }
 
-  const comparison = value['comparison'];
+  const comparison = own(value, 'comparison');
   if (
     typeof comparison !== 'string' ||
     !(ASSERTION_COMPARISONS as readonly string[]).includes(comparison)
@@ -364,11 +395,11 @@ function assertionSpec(value: unknown, index: number): ShellAssertionSpec {
     );
   }
 
-  const target = value['target'];
+  const target = own(value, 'target');
   if (!isRecord(target)) {
     throw wiringDefect(`'assertions[${index}].target' is not an object`);
   }
-  const source = target['source'];
+  const source = own(target, 'source');
   if (typeof source !== 'string' || !(TARGET_SOURCES as readonly string[]).includes(source)) {
     throw wiringDefect(
       `'assertions[${index}].target.source' is ${JSON.stringify(source)}, which is not one of ` +
@@ -377,38 +408,101 @@ function assertionSpec(value: unknown, index: number): ShellAssertionSpec {
   }
 
   return {
-    description: value['description'],
+    description: own(value, 'description') as string,
     target: { source: source as ShellTargetSource },
     comparison: comparison as AssertionComparison,
-    expected: value['expected'],
+    expected: own(value, 'expected') as string,
   };
 }
 
 /**
- * Reads and validates the params, or throws an `InfraError`.
+ * Reads and validates `ProbeRequest.params`, or throws an `InfraError`.
  *
- * Every absent or wrong-typed field is REFUSED rather than defaulted, and the
- * allowlist is the field where that matters most: defaulting an absent
- * `argumentAllowlist` to "everything permitted" is fail-open, and defaulting it
- * to "nothing permitted" would silently disable a probe an operator believes is
- * running. Neither is honest, so neither happens.
+ * THE SHAPE IS THE MERGED `ShellProbe`, NOT A FLATTENED INVENTION.
+ *
+ * A compiled plan holds `{id, surface, mechanics: {commandId, args,
+ * argumentAllowlist}, assertions}`. This reads exactly that, plus `attempt` as
+ * orchestration metadata the caller adds, so story 4.7 can pass a `ShellProbe`
+ * through the `SurfaceExecutor` boundary unchanged.
+ *
+ * An earlier revision required a FLATTENED object with `probeId`, `commandId`,
+ * `args` and `argumentAllowlist` all at the top level. Every test constructed
+ * that shape, so the whole suite passed green while an ordinary plan probe
+ * would have been refused with an `InfraError` before execution — the executor
+ * unusable through the very boundary it implements, and 4.7 left to invent a
+ * shell-specific conversion nobody documented. The merged
+ * `src/surfaces/observation.ts` (story 4.5) reads the nested shape, so the two
+ * surfaces would have demanded different params of the same caller.
+ *
+ * Caught by the Codex review pass. It is the one finding in this story that
+ * broke INTEGRATION rather than leaking anything, and it is precisely the class
+ * 4.7's conformance test would have found in cohort 3 with nobody left to ask.
+ * A suite built entirely from one hand-written shape cannot detect that the
+ * shape is wrong — only a reader comparing it against the merged model can.
+ *
+ * `probeId` is accepted as an alias for `id`: one line, and it removes a whole
+ * class of 4.7 wiring failure, since the merged observation executor reads a
+ * top-level `probeId` too. The canonical name is `id`, because that is what
+ * `ProbeSpec` declares.
+ *
+ * EVERYTHING IS REFUSED RATHER THAN DEFAULTED. The allowlist is where that
+ * matters most: defaulting an absent `argumentAllowlist` to "everything
+ * permitted" is fail-open, and defaulting it to "nothing permitted" would
+ * silently disable a probe an operator believes is running. Neither is honest,
+ * so neither happens.
  */
 function readParams(raw: Readonly<Record<string, unknown>>): ShellProbeParams {
   if (!isRecord(raw)) {
     throw wiringDefect('they are not an object');
   }
-  for (const field of ['probeId', 'commandId'] as const) {
-    if (typeof raw[field] !== 'string' || raw[field] === '') {
-      throw wiringDefect(`'${field}' is not a non-empty string`);
-    }
+
+  // `probeId` is an ALIAS for `id`, never a fallback to a different field. Both
+  // names must mean the same probe, so carrying both with different values is
+  // refused rather than silently resolved in favour of one.
+  //
+  // Story 4.5 found the cost of the looser reading on their own surface: their
+  // validator falls back from `probeId` to `mechanics.commandId`, so the SAME
+  // probe produced two different evidence paths depending on whether the caller
+  // spread `{...probe}` or mapped `{probeId: probe.id}` — silently, with both
+  // accepted. That is the misattributed-evidence defect again, arriving through
+  // a convenience rather than a hash collision. An alias that can resolve to a
+  // semantically different value is not an alias.
+  const declaredId = own(raw, 'id');
+  const aliasId = own(raw, 'probeId');
+  if (
+    typeof declaredId === 'string' &&
+    typeof aliasId === 'string' &&
+    declaredId !== aliasId
+  ) {
+    throw wiringDefect(
+      "'id' and its alias 'probeId' are both present and disagree — they name one probe",
+    );
   }
-  if (!Array.isArray(raw['args'])) {
-    throw wiringDefect("'args' is not an array");
+
+  const identifier = declaredId ?? aliasId;
+  if (typeof identifier !== 'string' || identifier === '') {
+    throw wiringDefect("'id' is not a non-empty string");
   }
-  if (!Array.isArray(raw['argumentAllowlist'])) {
-    throw wiringDefect("'argumentAllowlist' is not an array");
+
+  const mechanics = own(raw, 'mechanics');
+  if (!isRecord(mechanics)) {
+    throw wiringDefect("'mechanics' is not an object");
   }
-  if (!Array.isArray(raw['assertions']) || raw['assertions'].length === 0) {
+
+  const commandId = own(mechanics, 'commandId');
+  if (typeof commandId !== 'string' || commandId === '') {
+    throw wiringDefect("'mechanics.commandId' is not a non-empty string");
+  }
+
+  if (!Array.isArray(own(mechanics, 'args'))) {
+    throw wiringDefect("'mechanics.args' is not an array");
+  }
+  if (!Array.isArray(own(mechanics, 'argumentAllowlist'))) {
+    throw wiringDefect("'mechanics.argumentAllowlist' is not an array");
+  }
+
+  const declaredAssertions = own(raw, 'assertions');
+  if (!Array.isArray(declaredAssertions) || declaredAssertions.length === 0) {
     // A probe that adjudicates nothing reaches `outcomeOf`'s "nothing was
     // adjudicated mechanically" branch, which returns `needs_human` rather than
     // minting a PASS out of nothing. The merged schema's `.min(1)` makes that
@@ -416,17 +510,23 @@ function readParams(raw: Readonly<Record<string, unknown>>): ShellProbeParams {
     throw wiringDefect("'assertions' is not a non-empty array");
   }
 
-  const attempt = raw['attempt'];
-  if (attempt !== undefined && (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1)) {
+  const attempt = own(raw, 'attempt');
+  if (
+    attempt !== undefined &&
+    (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1)
+  ) {
     throw wiringDefect("'attempt' is not a positive integer");
   }
 
   return {
-    probeId: raw['probeId'] as string,
-    commandId: raw['commandId'] as string,
-    args: stringArray(raw['args'], 'args'),
-    argumentAllowlist: stringArray(raw['argumentAllowlist'], 'argumentAllowlist'),
-    assertions: raw['assertions'].map((entry, index) => assertionSpec(entry, index)),
+    probeId: identifier,
+    commandId,
+    args: stringArray(own(mechanics, 'args'), 'mechanics.args'),
+    argumentAllowlist: stringArray(
+      own(mechanics, 'argumentAllowlist'),
+      'mechanics.argumentAllowlist',
+    ),
+    assertions: declaredAssertions.map((entry, index) => assertionSpec(entry, index)),
     ...(attempt === undefined ? {} : { attempt: attempt as number }),
   };
 }
@@ -621,7 +721,21 @@ function evaluate(
   return params.assertions.map((assertion) => {
     const actual = actualFor(assertion.target.source, result);
     return {
-      description: assertion.description,
+      // REDACTED like its two neighbours. `description` is provider-authored
+      // plan text sitting in the same object as `expected` and `actual`, which
+      // are redacted for exactly this threat model — leaving one of the three
+      // raw was an inconsistency rather than a decision.
+      //
+      // HONEST ABOUT THE BLAST RADIUS, because the review that found this
+      // overstated it: `description` does NOT reach `result.json` today.
+      // `deriveCriterionResult` copies only `expected`, `actual` and `evidence`
+      // into `DerivedCriterionResult` — verified in the merged source rather
+      // than assumed. So this is defence in depth, not the closing of a live
+      // leak. It is still worth doing: `description` is the human-readable
+      // label for an assertion, so a future renderer or a 4.7 timeline detail
+      // surfacing it is likely rather than far-fetched, and an ordinary
+      // description matches no redaction pattern, so the cost is nil.
+      description: redactText(assertion.description, redaction),
       satisfied: satisfies(assertion.comparison, actual, assertion.expected),
       // Redacted UNDECLARED. `actual` is captured output and `expected` is
       // provider-authored plan text; neither is a project owner's declared
@@ -643,6 +757,15 @@ function evaluate(
  * script present but untracked in the operator's working copy is genuinely
  * absent from the revision under verification. Same reasoning, and the same
  * two remedies, as the merged `notFoundError` in `pipeline/stages/gates.ts`.
+ *
+ * THE BINARY IS REDACTED even though it is project-owner-DECLARED, because it
+ * is derived from the declared command line and `commandEvidence` already
+ * redacts `displayCommand` for the same reason. The gates stage states the rule
+ * this follows: a declared command can legitimately carry a credential, and
+ * this message reaches `printError`, which writes it to stderr verbatim.
+ * Redacted UNDECLARED rather than with `{shellCommand: true}`, since a bare
+ * binary token is a fragment rather than a whole command line and the
+ * fail-closed default is the safer reading of a fragment. (Codex review pass.)
  */
 function notFoundExecError(
   params: ShellProbeParams,
@@ -653,17 +776,22 @@ function notFoundExecError(
   return namesAFile
     ? {
         message:
-          `shell probe '${safeId(params.probeId, redaction)}' could not start: '${binary}' does not exist in the ` +
+          `shell probe '${safeId(params.probeId, redaction)}' could not start: ` +
+          `'${redactText(binary, redaction)}' does not exist in the ` +
           'verification worktree',
         hint:
           'probes run against the revision under verification, not your working copy — commit ' +
-          `'${binary}' (an untracked or uncommitted file will not be there), or correct ` +
+          `'${redactText(binary, redaction)}' (an untracked or uncommitted file will not ` +
+          `be there), or correct ` +
           `observations.${safeId(params.commandId, redaction)} in .specwitness/config.yaml`,
       }
     : {
-        message: `shell probe '${safeId(params.probeId, redaction)}' could not start: '${binary}' is not on PATH`,
+        message:
+          `shell probe '${safeId(params.probeId, redaction)}' could not start: ` +
+          `'${redactText(binary, redaction)}' is not on PATH`,
         hint:
-          `install '${binary}', or correct observations.${safeId(params.commandId, redaction)} in ` +
+          `install '${redactText(binary, redaction)}', or correct ` +
+          `observations.${safeId(params.commandId, redaction)} in ` +
           '.specwitness/config.yaml — this is an environment problem, not a failure of the ' +
           'branch under verification',
       };
@@ -750,22 +878,43 @@ function slugify(value: string): string {
 }
 
 /**
- * A short fingerprint of the RAW id, used only to disambiguate a lossy slug.
+ * A collision-resistant discriminator for one `(criterionId, probeId)` pair.
  *
- * FNV-1a over the UTF-16 code units, rendered as 8 lowercase hex characters.
- * Hand-rolled because `src/domain/**` and its importers may not reach for
- * `node:crypto`, and because this is a uniqueness tiebreak rather than a
- * security primitive — nothing trusts it, it only has to differ when the
- * inputs differ.
+ * SHA-256 of the two ids joined by NUL — a separator neither can contain — with
+ * the first 24 hex characters kept.
+ *
+ * WHY NOT THE 32-BIT FNV-1a THIS REPLACED. A review pass did not argue the
+ * point, it BRUTE-FORCED it: it produced two valid 82-character probe ids
+ * sharing a 70-character prefix whose FNV values are both `ee83bd36`. Both
+ * truncate to the same 64-character slug, so both produced the identical
+ * evidence stem — and the later probe silently overwrote the earlier one's files
+ * while both results kept referencing them. A 32-bit digest reaches a birthday
+ * collision at roughly 65k candidates, which is not an exotic attack; it is a
+ * short script. A plan is provider-authored text, which is exactly the threat
+ * model this story exists for.
+ *
+ * Misattributed evidence is the worst failure available here: lost evidence is
+ * visible, but a reader shown another probe's output under this probe's name has
+ * no signal that anything is wrong.
+ *
+ * 96 bits puts a birthday collision at ~2^48 rather than ~2^16, and SHA-256
+ * makes a DELIBERATE collision infeasible rather than merely unlikely — which is
+ * the property that matters when the ids are chosen by whoever authored the
+ * plan. `node:crypto` is available here because `no-side-effect-builtins-in-core`
+ * scopes its ban to `src/(domain|schemas)/`; `src/surfaces/**` is an adapter, and
+ * `src/schemas/canonical.ts` and `src/infra/ids.ts` already use it.
+ *
+ * The ideal fix is the one `gate-evidence-path.ts` uses — a DECLARATION INDEX,
+ * collision-free by construction rather than by probability. An executor has
+ * none: it is handed one probe at a time and never sees the list. Adding `index`
+ * to the params contract would need story 4.7 to supply it, so it is recorded as
+ * the stronger follow-up rather than taken unilaterally here.
  */
-function fingerprint(raw: string): string {
-  let hash = 0x811c_9dc5;
-  for (let index = 0; index < raw.length; index += 1) {
-    hash ^= raw.charCodeAt(index);
-    // FNV prime, via shifts so the arithmetic stays in 32 bits.
-    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
+function discriminator(criterionId: string, probeId: string): string {
+  return createHash('sha256')
+    .update(`${criterionId}\u0000${probeId}`)
+    .digest('hex')
+    .slice(0, 24);
 }
 
 /**
@@ -812,15 +961,10 @@ function fingerprint(raw: string): string {
  * repeat. Pinned by test.
  */
 function evidenceStem(criterionId: string, params: ShellProbeParams, attempt: number): string {
-  // NUL separator: unrepresentable in a criterion id or an `Identifier`, so the
-  // pair round-trips unambiguously into the hash.
-  const identity = `${criterionId}\u0000${params.probeId}`;
   const slug = slugify(`${criterionId}-${params.probeId}`);
-  const discriminator = fingerprint(identity);
+  const stamp = discriminator(criterionId, params.probeId);
 
-  return slug === ''
-    ? `shell-${discriminator}-${attempt}`
-    : `shell-${slug}-${discriminator}-${attempt}`;
+  return slug === '' ? `shell-${stamp}-${attempt}` : `shell-${slug}-${stamp}-${attempt}`;
 }
 
 export class ShellSurfaceExecutor implements SurfaceExecutor {

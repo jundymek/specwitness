@@ -21,6 +21,7 @@ import { FixedClock } from '../../fakes/ports.js';
 
 import {
   processResult,
+  probeParams,
   recordingRunner,
   recordingSink,
   recordingWriter,
@@ -32,23 +33,13 @@ import {
 
 const CAPTURED_AT = '2026-09-02T00:00:00.000Z';
 
-function params(overrides: Partial<ShellProbeParams> = {}): ShellProbeParams {
-  return {
-    probeId: 'migrations-check',
-    commandId: 'migrations-applied',
-    args: [],
-    argumentAllowlist: [],
-    assertions: [
-      {
-        description: 'the migration checker exits cleanly',
-        target: { source: 'exitCode' },
-        comparison: 'equals',
-        expected: '0',
-      },
-    ],
-    ...overrides,
-  };
-}
+/**
+ * Overrides are expressed in this executor's FLAT internal vocabulary for
+ * brevity; `request()` converts them into the merged nested `ShellProbe` shape
+ * that `params` actually arrives in. Nothing here hand-writes that shape — see
+ * `probeParams` in the helpers for why.
+ */
+type ParamOverrides = Partial<ShellProbeParams>;
 
 function deps(overrides: Partial<ShellExecutorDeps> = {}): ShellExecutorDeps {
   return {
@@ -62,11 +53,23 @@ function deps(overrides: Partial<ShellExecutorDeps> = {}): ShellExecutorDeps {
   };
 }
 
-function request(overrides: Partial<ShellProbeParams> = {}) {
+function request(overrides: ParamOverrides = {}) {
+  const { probeId, ...rest } = overrides;
   return {
     criterionId: 'E4-01',
     surface: 'shell' as const,
-    params: params(overrides) as unknown as Readonly<Record<string, unknown>>,
+    params: probeParams({
+      ...(probeId === undefined ? {} : { id: probeId }),
+      assertions: [
+        {
+          description: 'the migration checker exits cleanly',
+          target: { source: 'exitCode' },
+          comparison: 'equals',
+          expected: '0',
+        },
+      ],
+      ...(rest as Record<string, unknown>),
+    }),
   };
 }
 
@@ -272,53 +275,68 @@ describe('malformed params are a WIRING defect, not a broken environment', () =>
     expect(await malformed('migrations-applied')).toBeInstanceOf(InfraError);
   });
 
+  it('rejects a probe with no mechanics', async () => {
+    // The merged `ShellProbe` nests the command fields; a probe without them is
+    // not a shell probe at all.
+    const { mechanics, ...withoutMechanics } = probeParams() as Record<string, unknown>;
+    void mechanics;
+    expect(await malformed(withoutMechanics)).toBeInstanceOf(InfraError);
+  });
+
   it('rejects a missing argumentAllowlist rather than defaulting it', async () => {
     // Defaulting an absent allowlist to "everything" is the fail-OPEN mistake;
     // defaulting it to "nothing" would silently disable a probe. Refuse.
-    const { argumentAllowlist, ...withoutAllowlist } = params();
-    void argumentAllowlist;
-    expect(await malformed(withoutAllowlist)).toBeInstanceOf(InfraError);
+    expect(
+      await malformed({
+        ...probeParams(),
+        mechanics: { commandId: 'migrations-applied', args: [] },
+      }),
+    ).toBeInstanceOf(InfraError);
   });
 
   it('rejects a non-string argument', async () => {
-    expect(await malformed({ ...params(), args: [7] })).toBeInstanceOf(InfraError);
+    expect(
+      await malformed(probeParams({ args: [7], argumentAllowlist: [7] })),
+    ).toBeInstanceOf(InfraError);
   });
 
   it('rejects a probe with no assertions', async () => {
     // A probe that adjudicates nothing cannot mint a PASS. The merged schema
     // enforces `.min(1)`; a hand-edited plan can still reach here.
-    expect(await malformed({ ...params(), assertions: [] })).toBeInstanceOf(InfraError);
+    expect(await malformed(probeParams({ assertions: [] }))).toBeInstanceOf(InfraError);
   });
 
   it('rejects an unknown assertion comparison', async () => {
     expect(
-      await malformed({
-        ...params(),
-        assertions: [
-          {
-            description: 'matches',
-            target: { source: 'stdout' },
-            comparison: 'regex',
-            expected: '.*',
-          },
-        ],
-      }),
+      await malformed(
+        probeParams({
+          assertions: [
+            {
+              description: 'matches',
+              target: { source: 'stdout' },
+              comparison: 'regex',
+              expected: '.*',
+            },
+          ],
+        }),
+      ),
     ).toBeInstanceOf(InfraError);
   });
 
   it('rejects an unknown assertion target source', async () => {
     expect(
-      await malformed({
-        ...params(),
-        assertions: [
-          {
-            description: 'reads a file',
-            target: { source: 'file' },
-            comparison: 'equals',
-            expected: 'x',
-          },
-        ],
-      }),
+      await malformed(
+        probeParams({
+          assertions: [
+            {
+              description: 'reads a file',
+              target: { source: 'file' },
+              comparison: 'equals',
+              expected: 'x',
+            },
+          ],
+        }),
+      ),
     ).toBeInstanceOf(InfraError);
   });
 });
