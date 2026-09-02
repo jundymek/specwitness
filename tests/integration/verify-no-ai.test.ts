@@ -219,6 +219,65 @@ describe('AC3 — no plan and no provider at all: Epic 3 gates-only survives', (
   });
 });
 
+describe('nothing provider-independent may fail AFTER quota has been spent', () => {
+  // My own claim, held to: "a run that quietly spent subscription quota while
+  // `providerUsage` stayed empty would make the FR-18 guarantee unauditable". Compilation
+  // happens before a run directory exists, so anything that can fail after it and before
+  // `createRun` spends quota that no run document will ever record. Every such check must
+  // therefore run FIRST. Found by the fourth Codex review pass.
+
+  it('refuses an unresolvable ref BEFORE compiling a plan', async () => {
+    const project = await fixture({ plan: false, fakePlanAuthor: true });
+
+    const { exitCode, stderr } = await runCli(
+      ['verify', project.epic, '--head', 'refs/heads/no-such-branch'],
+      { cwd: project.root },
+    );
+
+    expect(exitCode).toBe(3);
+    expect(stderr).toContain('no-such-branch');
+    // THE ASSERTION THAT MATTERS: no plan was compiled, so no quota was spent to learn
+    // that a ref does not resolve.
+    await expect(
+      stat(join(project.root, '.specwitness', 'plans', `${project.epic}.yaml`)),
+    ).rejects.toThrow();
+  });
+
+  it('refuses a project that could never adjudicate anything BEFORE compiling', async () => {
+    // No gates, and a contract whose every criterion is `human`. No plan the compiler could
+    // produce would make this verifiable — 4.2's schema requires a human criterion to be
+    // carried as needs-human — so compiling one is quota spent to reach a refusal that was
+    // knowable in advance.
+    const project = await fixture({
+      gates: [],
+      plan: false,
+      fakePlanAuthor: true,
+      humanOnly: true,
+    });
+
+    const { exitCode, stderr } = await runCli(['verify', project.epic], { cwd: project.root });
+
+    expect(exitCode).toBe(3);
+    expect(stderr).toContain('could not check anything');
+    await expect(
+      stat(join(project.root, '.specwitness', 'plans', `${project.epic}.yaml`)),
+    ).rejects.toThrow();
+  });
+
+  it('still compiles when the run really can proceed', async () => {
+    // The guard above must not turn into a refusal for every gate-less project: one whose
+    // contract HAS automated criteria is exactly what this epic exists to verify.
+    const project = await fixture({ gates: [], plan: false, fakePlanAuthor: true });
+
+    const { exitCode, stdout } = await runCli(['verify', project.epic, '--json'], {
+      cwd: project.root,
+    });
+
+    expect(exitCode).toBe(2);
+    expect((JSON.parse(stdout) as RunDocument).providerUsage).toHaveLength(1);
+  });
+});
+
 describe('a plan that no longer matches its contract is refused, never recompiled', () => {
   it('exits 3 telling the operator to recompile, rather than silently rewriting it', async () => {
     // A `verify` that quietly rewrote a committed, reviewed artifact would be the same

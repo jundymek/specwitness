@@ -62,6 +62,15 @@ export interface ProbeFixtureOptions {
   /** Include a `verifiability: human` criterion (and plan it as needs-human). Default false. */
   readonly human?: boolean;
   /**
+   * A contract whose criteria are ALL `verifiability: human`.
+   *
+   * Nothing mechanical can ever adjudicate such a contract, and 4.2's schema requires every
+   * one of its criteria to be carried as needs-human — so with no gates declared this is a
+   * project that is unverifiable no matter what a plan-author produces, which is knowable
+   * before a provider is invoked.
+   */
+  readonly humanOnly?: boolean;
+  /**
    * Plan the automated criteria as `needs-human` with reason `not-safely-automatable`,
    * rather than mapping them to probes. Default false.
    */
@@ -249,14 +258,14 @@ const HUMAN_CRITERION = `    - id: E1-04
       verifiability: human
 `;
 
-function draftContract(epic: string, human: boolean): string {
+function draftContract(epic: string, human: boolean, humanOnly = false): string {
   return `# Built by tests/integration/helpers/probe-fixture.ts — an inline fixture,
 # NOT a Golden Verification Corpus fixture (that is Epic 6).
 spec:
   epic: ${epic}
   version: 1
   criteria:
-${AUTOMATED_CRITERIA}${human ? HUMAN_CRITERION : ''}meta:
+${humanOnly ? HUMAN_CRITERION : `${AUTOMATED_CRITERIA}${human ? HUMAN_CRITERION : ''}`}meta:
   schemaVersion: 1
   frozen: false
   fingerprint: null
@@ -629,7 +638,7 @@ export async function buildProbeFixture(
     }
 
     const contractPath = join(root, '.specwitness', 'contracts', `${epic}.yaml`);
-    await writeFile(contractPath, draftContract(epic, human), 'utf8');
+    await writeFile(contractPath, draftContract(epic, human, options.humanOnly ?? false), 'utf8');
 
     // The SHIPPED freeze, so the fingerprint is the product's own.
     const frozen = await runCli(['contract', epic, '--freeze'], { cwd: root });

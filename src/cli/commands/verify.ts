@@ -186,24 +186,6 @@ async function verify(
   // story 2.2's parser rather than as a mystery inside a stage.
   const loaded = await loadContract(projectRoot, epic);
 
-  // THE PLAN IS RESOLVED BEFORE ANYTHING IS CREATED OR SPAWNED, for the same
-  // reason `assertSomethingToAdjudicate` runs before the run: the `--no-ai`
-  // refusal and the auto-compilation both have to happen while there is still
-  // no run directory, no worktree and no process group in existence. A refusal
-  // afterwards would leave a `result.json` on disk describing a run that never
-  // adjudicated anything.
-  const planning = await resolvePlan({
-    projectRoot,
-    epic,
-    loaded,
-    config,
-    clock: new SystemClock(),
-    ids: new RandomIds(),
-    allowCompilation: options.ai !== false,
-  });
-
-  assertSomethingToAdjudicate(config, planning.plan);
-
   // Refs are resolved HERE, not in the pipeline: `Vcs.resolveRef` never fetches
   // and the pipeline spawns no git, so the SHAs a run is about are fixed before
   // it starts and cannot change under it. The pipeline's resolve stage refuses
@@ -233,6 +215,37 @@ async function verify(
     }
     throw refFailure;
   }
+
+  // THE PLAN IS RESOLVED BEFORE ANYTHING IS CREATED OR SPAWNED, for the same
+  // reason `assertSomethingToAdjudicate` runs before the run: the `--no-ai`
+  // refusal and the auto-compilation both have to happen while there is still
+  // no run directory, no worktree and no process group in existence. A refusal
+  // afterwards would leave a `result.json` on disk describing a run that never
+  // adjudicated anything.
+  //
+  // AND IT IS RESOLVED LAST AMONG THE PRE-RUN CHECKS, because resolving it may
+  // SPEND PROVIDER QUOTA. Compilation happens before a run directory exists, so
+  // anything that can fail after it and before `createRun` spends quota that no
+  // run document will ever record — which is precisely the auditability this
+  // command promises. An unresolvable ref used to cost a compilation to
+  // discover; now it costs nothing. Found by the fourth Codex review pass.
+  //
+  // The refusal ordering above is unaffected: `resolvePlan` verifies the
+  // contract before invoking anything, so a tampered contract still refuses
+  // with its own hint rather than being masked.
+  assertCouldEverAdjudicate(config, loaded);
+
+  const planning = await resolvePlan({
+    projectRoot,
+    epic,
+    loaded,
+    config,
+    clock: new SystemClock(),
+    ids: new RandomIds(),
+    allowCompilation: options.ai !== false,
+  });
+
+  assertSomethingToAdjudicate(config, planning.plan);
 
   const clock = new SystemClock();
   const store = new RunStore(projectRoot, clock, new RandomIds());
@@ -656,6 +669,44 @@ function declaredPlanIds(config: SpecwitnessConfig): DeclaredIds {
     serviceIds: all.serviceIds.filter(isReferenceableId),
     commandIds: all.commandIds.filter(isReferenceableId),
   };
+}
+
+/**
+ * The half of the green-for-nothing refusal that is knowable BEFORE a provider is invoked.
+ *
+ * `assertSomethingToAdjudicate` needs the plan, because whether a criterion carries a probe
+ * is the plan's decision. But one case is decidable from the contract alone: a project with
+ * no gates whose contract declares NO automated criterion can never be verified mechanically
+ * — 4.2's schema requires every `verifiability: human` criterion to be carried as
+ * needs-human, so no plan the compiler could produce would contain a probe.
+ *
+ * Checked here so that case costs no provider quota. Compilation happens before a run
+ * directory exists, so quota spent on the way to a refusal is quota no run document records,
+ * and this command's whole claim is that such spending is auditable. Found by the fourth
+ * Codex review pass.
+ *
+ * It is deliberately the WEAKER of the two checks and does not replace the other: a contract
+ * with automated criteria that the plan-author then declines to automate is only knowable
+ * after compiling, and that residual costs one compilation whose output is written to disk
+ * with its provenance.
+ */
+function assertCouldEverAdjudicate(config: SpecwitnessConfig, loaded: LoadedContract): void {
+  if (config.gates.length > 0 || !loaded.present) {
+    // An absent contract is the integrity stage's refusal to report, not this one's.
+    return;
+  }
+
+  if (loaded.contract.spec.criteria.some((criterion) => criterion.verifiability === 'automated')) {
+    return;
+  }
+
+  throw new ConfigError(
+    'this project declares no deterministic gates, and every criterion of its contract is ' +
+      'marked verifiability: human, so a verification run could not check anything',
+    "declare at least one gate under 'gates:' in .specwitness/config.yaml — a contract whose " +
+      'criteria may only be adjudicated by a person has nothing for a run to execute, and a ' +
+      'PASS that executed nothing would tell your harness the branch is merge-eligible',
+  );
 }
 
 /**
