@@ -100,6 +100,7 @@ import { readProviderProvenance } from '../contract/provenance.js';
 import { createDoctorEffects } from '../doctor/effects.js';
 import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
+import { armInterruptNotice } from '../verify/interrupt.js';
 import { createProbeDispatcher } from '../verify/probe-dispatch.js';
 
 /** Injected at build time by tsup, and by vitest for source-level runs. */
@@ -269,6 +270,24 @@ async function verify(
   // unrepresentable; draining it from teardown is the half this file owes.
   const registry = createServiceGroupRegistry({ terminate: terminateProcessGroup });
 
+  // ARMED THE MOMENT THERE IS SOMETHING TO SAY, and disarmed in the `finally`
+  // below. Before `createRun` an interruption leaves nothing behind; from here
+  // on it can leave a worktree and a live process group, and the operator has no
+  // other way to learn the run directory's name. See `verify/interrupt.ts` for
+  // why this prints and re-raises rather than attempting teardown.
+  const disarmInterrupt = armInterruptNotice({
+    runDirectory: environment.runDirectory,
+  });
+
+  try {
+    return await execute();
+  } finally {
+    // A listener outliving its run would name a stale directory on the next
+    // interruption, which is worse than saying nothing at all.
+    disarmInterrupt();
+  }
+
+  async function execute(): Promise<ReturnType<typeof exitCodeForOutcome>> {
   const result = await runPipeline({
     runId: created.runId,
     epic,
@@ -392,6 +411,7 @@ async function verify(
   reportInfraFailure(result);
 
   return exitCodeForOutcome(result.outcome);
+  }
 }
 
 /**
