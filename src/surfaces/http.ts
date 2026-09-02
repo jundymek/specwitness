@@ -267,6 +267,24 @@ export const HTTP_PROBE_TIMEOUT_MS = 30_000;
 export const HTTP_BODY_READ_CAP_BYTES = 1_048_576;
 
 /**
+ * The plan schema's own patterns for a request path and a header, MIRRORED here.
+ *
+ * Copied deliberately rather than imported: `src/schemas/plan.ts` keeps them module-private,
+ * which is the same missing-export gap that forces all three surfaces to hand-validate. They
+ * are duplicated with their source named so a reviewer can diff them, and so that a divergence
+ * is a visible copy rather than an invisible approximation — the first version of this file
+ * approximated `RelativePath` with a prefix test and let whitespace through.
+ *
+ * `RELATIVE_PATH` mirrors `RelativePath`: one leading slash, no second slash or backslash after
+ * it, and no whitespace, control character or backslash anywhere.
+ * `HEADER_NAME` mirrors `HeaderName` (RFC 7230). `HEADER_VALUE` mirrors `HeaderValue`, whose
+ * CR/LF refusal is what makes header injection unrepresentable.
+ */
+const RELATIVE_PATH = /^\/(?![/\\])[^\s\u0000-\u001f\\]*$/;
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+const HEADER_VALUE = /^[^\r\n\u0000]*$/;
+
+/**
  * The `source` discriminants `HttpAssertionTarget` admits.
  *
  * Listed here because the union is a TYPE and params arrive untyped, so the discriminant has
@@ -925,20 +943,51 @@ function validateParams(
   }
 
   const path = mechanics.path;
-  // AD-3, enforced again at the point of use. The plan schema already refuses anything but
-  // a service-relative path; re-checking here costs nothing and means the executor's own
-  // guarantee does not depend on which validator ran upstream. A plan that reached this
-  // point with an absolute URL would be pointing a probe at a host nobody declared.
-  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
+  // AD-3, enforced again at the point of use, with THE SCHEMA'S OWN PATTERN rather than an
+  // approximation of it. The first version here checked only the prefix and backslashes, which
+  // let `/admin secret` and paths carrying control characters through to `fetch` — where they
+  // are normalised or percent-encoded and SENT, instead of being refused as the wiring defect
+  // they are. Found in review. Re-validating at all is not redundant: `params` arrives untyped,
+  // so this executor's guarantee must not depend on which validator ran upstream.
+  if (typeof path !== 'string' || !RELATIVE_PATH.test(path)) {
     return fail(
       `path '${redact(String(path))}' is not service-relative`,
-      "a plan names a declared service and a path beginning with a single '/' — never a scheme, a host, or a protocol-relative '//'",
+      "a plan names a declared service and a path beginning with a single '/', with no scheme, host, protocol-relative '//', backslash, whitespace or control character",
     );
   }
-  if (path.includes('\\')) {
+
+  // Headers and body are read straight into the request, so an unchecked value is one `fetch`
+  // coerces and SENDS. `headers: null` spreads to nothing, a numeric value is stringified, and
+  // a numeric body is serialised — each producing a request the plan did not declare, which is
+  // exactly what this executor promises never to issue. Found in review.
+  const headers: unknown = mechanics.headers;
+  if (headers !== undefined) {
+    if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) {
+      return fail(
+        'mechanics.headers is not an object',
+        "declare headers as a name/value map, or omit the key entirely",
+      );
+    }
+    for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (!HEADER_NAME.test(name)) {
+        return fail(
+          `header name '${redact(name)}' is not a valid HTTP field name`,
+          'RFC 7230 field names are letters, digits and !#$%&\'*+.^_`|~-',
+        );
+      }
+      if (typeof value !== 'string' || !HEADER_VALUE.test(value)) {
+        return fail(
+          `header '${redact(name)}' has a value that is not a CR/LF/NUL-free string`,
+          'a header value carrying a newline is header injection: it would append a header or a second request',
+        );
+      }
+    }
+  }
+
+  if (mechanics.body !== undefined && typeof mechanics.body !== 'string') {
     return fail(
-      'the path contains a backslash',
-      'a backslash has no legitimate place in a request path, and WHATWG URL parsing treats it as a separator for special schemes',
+      'mechanics.body is not a string',
+      "a request body is text; omit the key when the probe sends none ('' is a body, absent is not)",
     );
   }
 

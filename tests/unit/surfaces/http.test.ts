@@ -369,6 +369,65 @@ describe('malformed params (a wiring defect, never an execError)', () => {
     });
   }
 
+  const malformedMechanics: { why: string; mechanics: Record<string, unknown> }[] = [
+    { why: 'a path containing a space', mechanics: { path: '/admin secret' } },
+    { why: 'a path containing a tab', mechanics: { path: '/a\tb' } },
+    { why: 'a path containing a control character', mechanics: { path: '/a\u0001b' } },
+    { why: 'a path containing a newline', mechanics: { path: '/a\nb' } },
+    { why: 'a protocol-relative path', mechanics: { path: '//evil.example/x' } },
+    { why: 'a path with a backslash after the slash', mechanics: { path: '/\\evil.example/x' } },
+    { why: 'headers that are not an object', mechanics: { headers: null } },
+    { why: 'headers given as an array', mechanics: { headers: ['x-a', 'b'] } },
+    { why: 'a numeric header value', mechanics: { headers: { 'x-count': 3 } } },
+    {
+      why: 'a header value carrying CRLF (header injection)',
+      mechanics: { headers: { 'x-a': 'b\r\nx-evil: 1' } },
+    },
+    { why: 'an invalid header field name', mechanics: { headers: { 'bad name': 'v' } } },
+    { why: 'a numeric body', mechanics: { method: 'POST', body: 42 } },
+  ];
+
+  for (const { why, mechanics } of malformedMechanics) {
+    it(`throws InfraError before any I/O: ${why}`, async () => {
+      // Unchecked, these reach `fetch`, where they are normalised, coerced or percent-encoded
+      // and SENT — producing a request the plan never declared, which is exactly what this
+      // executor promises never to issue.
+      const { baseUrl, received } = await jsonFixture({ ok: true });
+
+      await expect(
+        harness().executor.execute({
+          criterionId: 'E4-01',
+          surface: 'http',
+          params: {
+            probe: probe([assertion({ source: 'status' }, 'equals', '200')], mechanics),
+            baseUrl,
+          },
+        }),
+      ).rejects.toBeInstanceOf(InfraError);
+
+      expect(received).toHaveLength(0);
+    });
+  }
+
+  it('still accepts an ordinary path, headers and body', async () => {
+    // The other half of a validator: over-refusal is its own defect, and a guard that only
+    // proves things are rejected cannot tell a correct rule from one that rejects everything.
+    const { baseUrl, received } = await jsonFixture({ ok: true });
+    await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')], {
+        method: 'POST',
+        path: '/orders/A-1?dry=1',
+        headers: { 'x-trace': 'abc', 'content-type': 'application/json' },
+        body: '{"sku":"A-1"}',
+      }),
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.url).toBe('/orders/A-1?dry=1');
+  });
+
   it('never issues a request when the params are malformed', async () => {
     const { baseUrl, received } = await jsonFixture({ ok: true });
     await expect(
