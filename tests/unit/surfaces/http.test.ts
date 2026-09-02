@@ -27,7 +27,11 @@ import { InfraError } from '../../../src/domain/errors.js';
 import type { Evidence, HttpEvidence } from '../../../src/domain/evidence.js';
 import type { Assertion, HttpAssertionTarget, HttpProbe } from '../../../src/domain/plan.js';
 import type { Clock } from '../../../src/domain/ports.js';
-import { HttpSurfaceExecutor, type HttpExecutorDeps } from '../../../src/surfaces/http.js';
+import {
+  HttpSurfaceExecutor,
+  HTTP_BODY_READ_CAP_BYTES,
+  type HttpExecutorDeps,
+} from '../../../src/surfaces/http.js';
 
 /* ── fixtures ───────────────────────────────────────────────────────────────────────── */
 
@@ -687,18 +691,55 @@ describe('could not look vs looked and saw wrong (AC3)', () => {
     expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
   });
 
-  it('records NOTHING when it observed nothing — no evidence, no member', async () => {
+  it('records WHAT WAS ATTEMPTED when no response arrived — a ref, but no member', async () => {
     const port = await closedPort();
     const { executor, written, recorded } = harness();
     const attempt = await run(
       executor,
       `http://127.0.0.1:${port}`,
-      probe([assertion({ source: 'status' }, 'equals', '200')]),
+      probe([assertion({ source: 'status' }, 'equals', '200')], {
+        method: 'POST',
+        path: '/orders',
+        body: '{}',
+      }),
     );
 
-    expect(attempt.evidence).toEqual([]);
-    expect(written).toEqual([]);
+    // NO MEMBER: the closed union cannot represent "no response", and a fabricated status
+    // would manufacture an observation out of an infrastructure failure.
     expect(recorded).toEqual([]);
+
+    // BUT A REFERENCE, because FR-28 wants one on every non-pass and this derives to
+    // criterion `error`. The artifact states what was ATTEMPTED — a fact — rather than
+    // claiming anything was observed.
+    expect(attempt.evidence).toHaveLength(1);
+    expect(written).toHaveLength(1);
+    const [file] = written;
+    expect(file?.name).toBe(attempt.evidence[0]?.path);
+    expect(file?.contents).toContain('no response was received');
+    expect(file?.contents).toContain('POST');
+    expect(file?.contents).toContain('/orders');
+    expect(file?.contents).toMatch(/error:/);
+  });
+
+  it('keeps the attempted-request record redacted, including caller extra patterns', async () => {
+    const opaque = 'wwww-opaque-attempted-wwww';
+    const port = await closedPort();
+    const { executor, written } = harness({
+      redaction: { extraPatterns: [new RegExp(opaque, 'g')] },
+    });
+
+    await run(
+      executor,
+      `http://127.0.0.1:${port}`,
+      probe([assertion({ source: 'status' }, 'equals', '200')], {
+        path: `/x?trace=${opaque}`,
+        headers: { authorization: `Bearer ${opaque}`, 'x-note': opaque },
+      }),
+    );
+
+    for (const file of written) {
+      expect(file.contents).not.toContain(opaque);
+    }
   });
 
   it('derives `fail`, not `error`, when the probe DID look and saw the wrong value', async () => {
@@ -745,6 +786,117 @@ describe('a timeout AFTER the headers arrived (the observed-yet-errored case)', 
     expect(member.response.body.text).toContain('"partial"');
     expect(member.explanation).toBeTruthy();
     expect(attempt.evidence.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('an incomplete observation may not adjudicate (review findings)', () => {
+  it('refuses to evaluate assertions against a body larger than the read cap', async () => {
+    // THE FALSE-PASS VECTOR. Assertions used to be evaluated against the first megabyte, so a
+    // `notContains` passed while the forbidden string sat in bytes nobody read. Minting a PASS
+    // from a partial observation is the worst direction this product can fail in.
+    const forbidden = 'FORBIDDEN-MARKER';
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      // Well past the 1 MiB read cap, with the marker only in the tail.
+      response.end('a'.repeat(1_100_000) + forbidden);
+    });
+
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'body' }, 'notContains', forbidden)]),
+    );
+
+    expect(attempt.assertionEvaluations).toEqual([]);
+    expect(attempt.execError?.message).toMatch(/incomplete/i);
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('error');
+  });
+
+  it('still captures the partial response as the diagnostic', async () => {
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('b'.repeat(1_100_000));
+    });
+    const { executor, recorded } = harness();
+    const attempt = await run(
+      executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(recorded).toHaveLength(1);
+    expect((recorded[0] as HttpEvidence).explanation).toMatch(/read cap/i);
+    expect(attempt.evidence.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('treats a body of EXACTLY the cap as complete, not truncated', async () => {
+    // `>=` reported a fully-captured body as truncated, which — now that truncation means
+    // "did not observe it" — turned a complete observation into criterion `error` at one
+    // exact size.
+    const { baseUrl } = await fixture((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('c'.repeat(HTTP_BODY_READ_CAP_BYTES));
+    });
+
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')]),
+    );
+
+    expect(attempt.execError).toBeUndefined();
+    expect(attempt.assertionEvaluations).toHaveLength(1);
+    expect(deriveCriterionResult(AUTOMATED, [attempt]).status).toBe('pass');
+  });
+});
+
+describe('faithful capture of awkward names and methods (review findings)', () => {
+  // A RESPONSE HEADER NAMED `__proto__` HAS NO TEST HERE, DELIBERATELY, and the reason is
+  // worth more than the test would have been.
+  //
+  // Node's `fetch` really does surface such a header (verified), and this module's
+  // `headerRecord` really did drop it, because a plain `record[name] = value` runs the
+  // prototype setter for that key and silently discards a string. That half is FIXED —
+  // `headerRecord` now uses `defineProperty`, so the record this module builds is faithful.
+  //
+  // But the header still does not reach the persisted member, because merged
+  // `redactHeaders` rebuilds its result with the same `result[name] = …` pattern and drops
+  // it again. That is merged domain code, outside this story, and it fails in the SAFE
+  // direction — the header vanishes rather than leaking — so it is reported in the PR body
+  // rather than patched from a story branch.
+  //
+  // A test asserting the header is ABSENT would certify that defect rather than catch it,
+  // which is precisely the failure mode `evidence.ts`'s own header warns about. So the fix
+  // stays, the limitation is reported, and no test here pretends the gap is a decision.
+
+  it('refuses a GET carrying a body as a malformed plan, not an infra failure', async () => {
+    // Node's fetch throws for this, so without the check it surfaced as an execError — an
+    // INFRASTRUCTURE verdict for what is actually a bad plan.
+    const { baseUrl, received } = await jsonFixture({ ok: true });
+
+    await expect(
+      run(
+        harness().executor,
+        baseUrl,
+        probe([assertion({ source: 'status' }, 'equals', '200')], { method: 'GET', body: '{}' }),
+      ),
+    ).rejects.toBeInstanceOf(InfraError);
+
+    expect(received).toHaveLength(0);
+  });
+
+  it('still allows a POST to carry a body', async () => {
+    const { baseUrl, received } = await jsonFixture({ ok: true });
+    await run(
+      harness().executor,
+      baseUrl,
+      probe([assertion({ source: 'status' }, 'equals', '200')], {
+        method: 'POST',
+        body: '{"sku":"A-1"}',
+      }),
+    );
+
+    expect(received[0]?.body).toBe('{"sku":"A-1"}');
   });
 });
 

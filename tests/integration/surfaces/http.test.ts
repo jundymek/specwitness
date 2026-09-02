@@ -140,7 +140,7 @@ describe('real probe attempts through the single derivation (AC1, AC3)', () => {
     expect(derived.evidence?.length ?? 0).toBeGreaterThanOrEqual(1);
   });
 
-  it('ERROR: an attempt that could not observe, carrying actual and no invented evidence', async () => {
+  it('ERROR: an attempt that could not observe, carrying actual AND a reference (FR-28)', async () => {
     const baseUrl = await closedBaseUrl();
     const attempt = await executor().run(baseUrl, 1);
 
@@ -148,9 +148,10 @@ describe('real probe attempts through the single derivation (AC1, AC3)', () => {
     expect(derived.status).toBe('error');
     // `actual` comes from the exec error's message, which is the operator's diagnostic.
     expect(derived.actual).toBeTruthy();
-    // Nothing was observed, so nothing is referenced. Inventing a ref would be worse than
-    // omitting one — the merged derivation says so in as many words.
-    expect(derived.evidence).toBeUndefined();
+    // FR-28 wants at least one reference on EVERY non-pass, and criterion `error` is a
+    // non-pass. Nothing is invented to satisfy it: the artifact records what was ATTEMPTED,
+    // which is a fact, rather than claiming a response that never arrived was observed.
+    expect(derived.evidence?.length ?? 0).toBeGreaterThanOrEqual(1);
   });
 
   it('FLAKY: fail then pass is a flaky pass', async () => {

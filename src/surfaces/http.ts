@@ -652,15 +652,29 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
-      // NOTHING was observed. No status, no headers, no bytes: no member of the closed
-      // evidence union can represent this, and synthesising one — a status of 0, an empty
-      // body — would manufacture an observation out of an infrastructure failure.
+      // NO RESPONSE AROSE, so no member of the closed union can represent this: synthesising
+      // one — a status of 0, an empty header map — would manufacture an observation out of an
+      // infrastructure failure. `recordEvidence` is therefore NOT called.
+      //
+      // But FR-28 wants at least one evidence reference on every non-pass result, and this
+      // path derives to criterion `error`, which is a non-pass. The way out is not a
+      // fabricated member: it is to record WHAT WAS ATTEMPTED, which is a fact rather than an
+      // observation — the method, the URL, the declared headers and the failure itself. That
+      // artifact is honest, it is exactly what an operator needs to fix the environment, and
+      // it needs no widening of anything. Found in review, after I had wrongly concluded the
+      // only options were "fabricate a status" or "carry no reference".
+      const execError = classifyFailure(error, url, timeoutMs, redaction);
+      const path = await this.#deps.writeEvidence(
+        `${evidenceStem(request.criterionId, probe.id, attempt)}.request.txt`,
+        attemptedRequestReport(probe, url, execError, redaction),
+      );
+
       return {
         attempt,
         observations: requestObservations(probe, url, redaction),
         assertionEvaluations: [],
-        evidence: [],
-        execError: classifyFailure(error, url, timeoutMs, redaction),
+        evidence: [evidenceRef('http', path)],
+        execError,
         durationMs: this.#elapsed(startedAt),
       };
     }
@@ -672,21 +686,34 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
       bodyText: body.text,
     };
 
-    // A body that never finished means the observation is INCOMPLETE, so nothing may be
-    // adjudicated from it — but a real status, real headers and real bytes did arrive, and
-    // they are the diagnostic. Evidence follows the observation; classification does not.
-    const truncatedByRead = body.capped
-      ? `the response body exceeded the ${HTTP_BODY_READ_CAP_BYTES}-byte read cap and was truncated at capture`
-      : undefined;
-    const explanation =
-      body.failure === undefined
-        ? truncatedByRead
+    // AN INCOMPLETE OBSERVATION MAY NOT ADJUDICATE ANYTHING.
+    //
+    // Two ways the body can be incomplete, and they are treated identically because the
+    // consequence is identical: the socket died mid-body (`failure`), or the body was larger
+    // than the read cap and reading stopped (`capped`).
+    //
+    // The `capped` half was a FALSE-PASS vector, found in review, and it is the worst
+    // direction this product can fail in. Assertions were being evaluated against the first
+    // megabyte: a `notContains` would happily pass while the forbidden string sat in the
+    // bytes that were never read, and a `body equals` would compare against a prefix. That is
+    // minting a PASS out of a partial observation — the same sin as `outcomeOf` refuses when
+    // it declines to pass a probe that adjudicated nothing.
+    //
+    // So both set `execError` and evaluate NOTHING, which makes the criterion `error`
+    // (exit 3, "SpecWitness could not observe this") rather than a product verdict drawn
+    // from bytes nobody saw. Evidence still follows the observation: a real status, real
+    // headers and real bytes did arrive, and they are the diagnostic.
+    const incompleteBody = body.failure !== undefined || body.capped;
+
+    const explanation = body.capped
+      ? `the response body exceeded the ${HTTP_BODY_READ_CAP_BYTES}-byte read cap, so the observation is incomplete and no assertion was adjudicated`
+      : body.failure === undefined
+        ? undefined
         : 'the response body was not fully received; the captured bytes are partial';
 
-    const evaluations =
-      body.failure === undefined
-        ? probe.assertions.map((assertion) => evaluate(assertion, observed, redaction))
-        : [];
+    const evaluations = incompleteBody
+      ? []
+      : probe.assertions.map((assertion) => evaluate(assertion, observed, redaction));
 
     // Measured ONCE, before capture, and used for both the evidence member and the attempt.
     // They describe the same request, so two different numbers would be two answers to one
@@ -711,9 +738,14 @@ export class HttpSurfaceExecutor implements SurfaceExecutor {
       observations: responseObservations(probe, url, observed, redaction),
       assertionEvaluations: evaluations,
       evidence: refs,
-      ...(body.failure === undefined
-        ? {}
-        : { execError: classifyFailure(body.failure, url, timeoutMs, redaction) }),
+      ...(incompleteBody
+        ? {
+            execError:
+              body.failure === undefined
+                ? cappedBodyError(url, redaction)
+                : classifyFailure(body.failure, url, timeoutMs, redaction),
+          }
+        : {}),
       durationMs,
     };
   }
@@ -871,6 +903,22 @@ function validateParams(
     return fail(
       'the path contains a backslash',
       'a backslash has no legitimate place in a request path, and WHATWG URL parsing treats it as a separator for special schemes',
+    );
+  }
+
+  // Node's `fetch` throws outright for a GET or HEAD carrying a body, so without this the
+  // probe would surface as an `execError` — an INFRASTRUCTURE verdict for what is actually a
+  // malformed plan, in the one story whose subject is not confusing those two. The plan
+  // schema makes `body` optional on every method, so the combination is schema-valid and has
+  // to be refused here. Refusing beats silently dropping the body: a probe that quietly did
+  // not send what it declared would report on a request nobody wrote.
+  if (
+    mechanics.body !== undefined &&
+    (mechanics.method === 'GET' || mechanics.method === 'HEAD')
+  ) {
+    return fail(
+      `a ${mechanics.method} probe declares a request body`,
+      'GET and HEAD requests carry no body — drop mechanics.body, or use a method that takes one',
     );
   }
 
@@ -1071,7 +1119,16 @@ function namedValue(
 function headerRecord(headers: Headers): Record<string, string> {
   const record: Record<string, string> = {};
   headers.forEach((value, name) => {
-    record[name] = value;
+    // `defineProperty`, not `record[name] = value`. A server may legitimately send a header
+    // named `__proto__`, and a plain assignment to that key runs the prototype SETTER — which
+    // silently discards a string — so the header would vanish from the evidence rather than
+    // appear in it. Found in review. `namedValue` guards the same key one function over.
+    Object.defineProperty(record, name, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   });
   return record;
 }
@@ -1114,7 +1171,12 @@ async function readBoundedBody(response: Response, capBytes: number): Promise<Bo
       if (value !== undefined) {
         chunks.push(value);
         total += value.byteLength;
-        if (total >= capBytes) {
+        // STRICTLY GREATER, not `>=`. A body of exactly `capBytes` was captured in full, and
+        // `>=` reported it as truncated — which, now that truncation means "did not observe
+        // it", would have turned a complete observation into criterion `error` at one exact
+        // size. Reading one chunk past the cap is what makes the boundary decidable at all;
+        // chunk sizes are bounded, so the overshoot is too.
+        if (total > capBytes) {
           capped = true;
           await reader.cancel();
           break;
@@ -1145,6 +1207,55 @@ function decodeChunks(chunks: readonly Uint8Array[], capBytes: number): string {
 }
 
 /* ── classifying a failure to observe ───────────────────────────────────────────────── */
+
+/**
+ * The exec error for a body that was larger than the read cap.
+ *
+ * Its own function rather than a branch in `classifyFailure`, because nothing was thrown:
+ * the read succeeded and simply stopped. The message says "incomplete" rather than
+ * "truncated" on purpose — truncated describes the artifact, incomplete describes why no
+ * assertion may be adjudicated from it.
+ */
+function cappedBodyError(url: string, redaction: RedactionOptions | undefined): ProbeExecError {
+  return {
+    message: redactText(
+      `the response from ${url} exceeded the ${HTTP_BODY_READ_CAP_BYTES}-byte read cap, so the observation is incomplete`,
+      redaction,
+    ),
+    hint: 'assertions are never adjudicated against a partial response — target a narrower endpoint, or assert on a header or status instead of a very large body',
+  };
+}
+
+/**
+ * A redacted record of WHAT WAS ATTEMPTED, for the path where no response ever arrived.
+ *
+ * This is not an observation and does not pretend to be one: it states the request that was
+ * issued and the failure that answered it. That distinction is the whole reason it is a plain
+ * text artifact rather than an `HttpEvidence` member — the union has no way to say "no
+ * response", and this file has no need to.
+ */
+function attemptedRequestReport(
+  probe: HttpProbe,
+  url: string,
+  execError: ProbeExecError,
+  redaction: RedactionOptions | undefined,
+): string {
+  const headers = redactHeaders({ ...probe.mechanics.headers }, redaction);
+  const lines = [
+    'no response was received; this records what was attempted, not what was observed',
+    '',
+    `method:   ${probe.mechanics.method}`,
+    `url:      ${redactText(url, redaction)}`,
+    ...Object.entries(headers).map(([name, value]) => `header:   ${name}: ${value}`),
+    '',
+    `error:    ${execError.message}`,
+    ...(execError.hint === undefined ? [] : [`hint:     ${execError.hint}`]),
+  ];
+  // Redacted as a whole as well as per field: this string is assembled here, so it is capture,
+  // and capture is where AD-10 says redaction happens.
+  return `${redactText(lines.join('\n'), redaction)}\n`;
+}
+
 
 /**
  * Turns a thrown fetch failure into a `ProbeExecError` with a message and a useful hint.
