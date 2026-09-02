@@ -49,6 +49,20 @@ import { buildFixture, CLI, type Fixture } from './helpers/verify-fixture.js';
 const fixtures: Fixture[] = [];
 
 afterEach(async () => {
+  // REAPING HAPPENS IN THE HOOK, NOT IN THE TEST BODY. Every test here deliberately leaves
+  // a live process group behind, so a reap that ran only on the happy path would leak one
+  // per failed assertion — and this worktree runs `pnpm test` concurrently with the agent
+  // (harness defect H-8). Measured on this machine while writing the suite: 21 orphaned
+  // `node gates/slow.cjs` processes from earlier sessions, none newer than two hours old,
+  // and neither this suite nor the merged `verify.test.ts` adds to them when either runs to
+  // completion. So the leak comes from a test RUN being killed, which is exactly what a
+  // hook survives and a test body does not.
+  for (const fixture of fixtures) {
+    await execa(process.execPath, [CLI, 'clean', '--all'], {
+      cwd: fixture.root,
+      reject: false,
+    });
+  }
   await Promise.all(fixtures.splice(0).map(async (fixture) => await fixture.cleanup()));
 });
 
@@ -92,7 +106,9 @@ async function interruptMidRun(project: Fixture): Promise<{
   child.kill('SIGINT');
   const result = await child;
 
-  // Reap whatever the interrupted run left, so this suite leaks nothing (H-8).
+  // Reaped here AS WELL as in `afterEach`, because one test asserts on the manifest AFTER
+  // `clean` has run. `clean` is idempotent, so the hook's second call is a no-op — and the
+  // hook is what makes the suite safe when an assertion below this line throws.
   await execa(process.execPath, [CLI, 'clean', '--all'], { cwd: project.root, reject: false });
 
   return { signal: result.signal, stderr: result.stderr, runDirectory };
