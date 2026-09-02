@@ -1653,6 +1653,15 @@ function messageOf(error: unknown): string {
 
 /* ── evidence file names ────────────────────────────────────────────────────────────── */
 
+/**
+ * Hex characters of SHA-256 kept in an evidence filename's discriminator: 24, i.e. 96 bits.
+ *
+ * Exported so a test can pin it — a width is the kind of constant that gets "tidied" smaller by
+ * someone who reads it as cosmetic, and this one is load-bearing. Matches `shell.ts` and
+ * `observation.ts` exactly; see `fingerprint` for why 48 bits was not enough.
+ */
+export const EVIDENCE_DIGEST_HEX = 24;
+
 const UNSAFE = /[^A-Za-z0-9._-]+/g;
 const SLUG_MAX_CHARS = 64;
 
@@ -1723,14 +1732,39 @@ function slugify(id: string): string {
  * the consequence of a collision here is not a crash but a silent overwrite — one probe's
  * evidence file replaced by another's, with the first probe's reference still pointing at it.
  * That is misattributed evidence, which a reader trusts and cannot detect, and it is the exact
- * failure this fingerprint was introduced to prevent. Twelve hex characters (48 bits) over the
- * FULL, untruncated ids puts an accidental collision far beyond the number of probes any plan
- * will hold.
+ * failure this fingerprint was introduced to prevent.
  *
- * Still not a security control — nothing here defends against a chosen collision, and the ids
- * come from a plan a human reviewed. It is a digest chosen so the uniqueness argument does not
- * have to be made at all.
+ * ── WIDTH IS 24 HEX CHARACTERS (96 BITS), AND IT IS A SECURITY CHOICE ──────────────────
+ *
+ * IT SHIPPED AT 12 (48 bits) AND THAT WAS WRONG. A chosen collision at 48 bits was MEASURED
+ * at 7.9 seconds — 7,959,526 hashes — over ordinary schema-valid ids (`probe-4573894` and
+ * `probe-7959525` share the digest `2e47b9d025b8`). Two probes in one criterion would then
+ * write the same evidence file, and the first probe's reference would point at the second
+ * probe's content.
+ *
+ * The comment that used to sit here said this was "still not a security control" because
+ * "the ids come from a plan a human reviewed". BOTH HALVES WERE WRONG, and the comment is
+ * corrected rather than deleted because a comment that licenses a weaker choice outlives the
+ * choice:
+ *
+ *  - A hostile plan-author is IN the threat model, not outside it. Provider output being
+ *    untrusted is the product's founding assumption — it is the whole reason AD-3 exists.
+ *  - Human review cannot carry that weight. A reviewer reading two probe ids will not notice
+ *    that they collide under a truncated hash; that is precisely the class of defect review
+ *    cannot catch, which is why it has to be structural.
+ *
+ * At 96 bits a chosen collision needs ~2^48 work and the argument disappears — which is what
+ * choosing a cryptographic digest was supposed to buy in the first place. Shipping it at a
+ * width that reinstated the argument was the same mistake made one order of magnitude up.
+ *
+ * 24 hex matches `shell.ts`'s `discriminator` and `observation.ts` EXACTLY. Not a third
+ * width: three surfaces writing into one run directory should not each pick their own, and
+ * "match the peers" only decides anything when the peers agree — when they disagreed, this
+ * one took the weaker of the two.
+ *
+ * `tests/unit/surfaces/http-digest-width.test.ts` pins the width so it cannot be narrowed
+ * again silently.
  */
 function fingerprint(text: string): string {
-  return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
+  return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, EVIDENCE_DIGEST_HEX);
 }
