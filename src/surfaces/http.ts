@@ -446,12 +446,58 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
     }
 
     if (char === '[') {
+      const quote = path[index + 1];
+
+      // A QUOTED KEY IS SCANNED, NOT SPLIT ON THE FIRST `]`.
+      //
+      // `indexOf(']')` picked the bracket INSIDE `$['a]b']`, so a key this module documents as
+      // supported was refused — and escaped quotes were kept verbatim instead of decoded, so
+      // `$['it\'s']` could never match the key it names. Over-refusal rather than a wrong
+      // answer, but it made the documented grammar false, and a grammar nobody can trust is
+      // worse than a smaller one stated honestly. Found in review.
+      if (quote === "'" || quote === '"') {
+        let cursor = index + 2;
+        let name = '';
+        let closed = false;
+
+        while (cursor < path.length) {
+          const current = path[cursor];
+          if (current === '\\') {
+            const escaped = path[cursor + 1];
+            if (escaped === undefined) {
+              return undefined;
+            }
+            // Decode: the character after a backslash is taken literally, which covers `\'`,
+            // `\"` and `\\` without inventing an escape language of its own.
+            name += escaped;
+            cursor += 2;
+            continue;
+          }
+          if (current === quote) {
+            closed = true;
+            cursor += 1;
+            break;
+          }
+          name += current;
+          cursor += 1;
+        }
+
+        if (!closed || path[cursor] !== ']' || name === '') {
+          return undefined;
+        }
+
+        steps.push({ kind: 'key', name });
+        index = cursor + 1;
+        expectSeparator = true;
+        awaitingKey = false;
+        continue;
+      }
+
       const close = path.indexOf(']', index);
       if (close === -1) {
         return undefined;
       }
-      const inner = path.slice(index + 1, close);
-      const step = parseBracket(inner);
+      const step = parseBracket(path.slice(index + 1, close));
       if (step === undefined) {
         return undefined;
       }
@@ -486,17 +532,12 @@ function parseJsonPath(path: string): readonly PathStep[] | undefined {
   return steps.length === 0 || awaitingKey ? undefined : steps;
 }
 
-/** `0` -> an index; `'a'` / `"a"` -> a key; anything else is outside the subset. */
+/**
+ * `[0]` -> an array index. Quoted keys never reach here: the caller scans those itself, because
+ * a key may legally contain the `]` this function would have to split on.
+ */
 function parseBracket(inner: string): PathStep | undefined {
-  if (/^\d+$/.test(inner)) {
-    return { kind: 'index', at: Number.parseInt(inner, 10) };
-  }
-  const quoted = /^(['"])(.*)\1$/s.exec(inner);
-  if (quoted !== null) {
-    const name = quoted[2];
-    return name === undefined ? undefined : { kind: 'key', name };
-  }
-  return undefined;
+  return /^\d+$/.test(inner) ? { kind: 'index', at: Number.parseInt(inner, 10) } : undefined;
 }
 
 /** Walks the parsed path. `undefined` means the path did not resolve — never a crash. */
@@ -941,6 +982,17 @@ function validateParams(
       "the caller puts {probe, baseUrl, attempt?} in ProbeRequest.params — see HttpProbeParams in src/surfaces/http.ts",
     );
   }
+  // THE ENVELOPE'S SURFACE, checked before the nested one. A `ProbeRequest` addressed to
+  // another surface reaching this executor is a DISPATCHER defect, and executing it anyway
+  // because the nested probe happened to say `http` would mask exactly the wiring bug the
+  // routing contract exists to make visible. Found in review.
+  if (request.surface !== 'http') {
+    return fail(
+      `the request is routed to surface '${redact(String(request.surface))}', not 'http'`,
+      'each probe goes to the executor whose surface matches its request; this is a dispatcher defect, not a plan error',
+    );
+  }
+
   if (probe.surface !== 'http') {
     return fail(
       `the probe declares surface '${redact(String(probe.surface))}', not 'http'`,

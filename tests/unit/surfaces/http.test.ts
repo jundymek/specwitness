@@ -643,6 +643,47 @@ describe('mechanical assertion evaluation (AC1)', () => {
     });
   });
 
+  it('resolves bracket-quoted keys, including ones containing brackets and escapes', async () => {
+    // `indexOf(']')` used to pick the bracket INSIDE `$['a]b']`, so a key this module documents
+    // as supported was refused; escaped quotes were kept verbatim rather than decoded, so
+    // `$['it\'s']` could never match the key it names. Over-refusal, not a wrong answer — but
+    // it made the documented grammar false.
+    const { baseUrl } = await jsonFixture({
+      'a]b': 'bracketed',
+      "it's": 'apostrophe',
+      'dotted.key': 'dotted',
+    });
+
+    const attempt = await run(
+      harness().executor,
+      baseUrl,
+      probe([
+        assertion({ source: 'jsonPath', path: "$['a]b']" }, 'equals', 'bracketed'),
+        assertion({ source: 'jsonPath', path: "$['it\\'s']" }, 'equals', 'apostrophe'),
+        assertion({ source: 'jsonPath', path: "$['dotted.key']" }, 'equals', 'dotted'),
+      ]),
+    );
+
+    expect(attempt.assertionEvaluations.map((each) => each.satisfied)).toEqual([true, true, true]);
+  });
+
+  it('refuses a request routed to another surface, before any I/O', async () => {
+    // A ProbeRequest addressed elsewhere reaching this executor is a DISPATCHER defect.
+    // Executing it because the nested probe happened to say `http` would mask exactly the
+    // wiring bug the routing contract exists to make visible.
+    const { baseUrl, received } = await jsonFixture({ ok: true });
+
+    await expect(
+      harness().executor.execute({
+        criterionId: 'E4-01',
+        surface: 'shell',
+        params: { probe: probe([assertion({ source: 'status' }, 'equals', '200')]), baseUrl },
+      }),
+    ).rejects.toBeInstanceOf(InfraError);
+
+    expect(received).toHaveLength(0);
+  });
+
   it('evaluates header assertions case-insensitively, both ways', async () => {
     const { baseUrl } = await jsonFixture({}, 200, { 'x-flavour': 'vanilla' });
     const attempt = await run(
