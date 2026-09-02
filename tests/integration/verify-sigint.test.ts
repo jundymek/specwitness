@@ -64,18 +64,57 @@ afterEach(async () => {
   // per failed assertion — and this worktree runs `pnpm test` concurrently with the agent
   // (harness defect H-8).
   //
-  // Measured by PID at ppid=1, per suite in isolation and across two full `pnpm test` runs:
-  // this suite adds zero. An earlier measurement here compared TOTAL COUNTS and was wrong
-  // for it — a count cannot tell "reaped four, leaked four" from "leaked nothing", and four
-  // real orphans were found afterwards that it had reported as none.
+  // Measured by PID at ppid=1: three consecutive runs of this suite add zero, and a full
+  // `pnpm test` from a zero baseline adds zero. See the header for the two wrong answers
+  // that preceded that, and for why the reap below targets a GROUP rather than a pid.
   for (const fixture of fixtures) {
     await execa(process.execPath, [CLI, 'clean', '--all'], {
       cwd: fixture.root,
       reject: false,
     });
+    // BELT AND BRACES, and the braces are the part that matters. `clean` reaps through the
+    // manifest, which is right — but it deliberately SKIPS a run whose recorded owner is
+    // still alive, so a race between the child dying and `clean` probing it leaves the
+    // group behind. And the group is what has to die: the gate runs DETACHED, so killing
+    // the `specwitness` child above does not touch it.
+    await killRecordedGroups(fixture.root);
   }
   await Promise.all(fixtures.splice(0).map(async (fixture) => await fixture.cleanup()));
 });
+
+/**
+ * Terminates every process group any run of this fixture recorded, reading the manifests
+ * directly.
+ *
+ * The product's own answer to this problem is a process-GROUP kill driven by the manifest,
+ * and a test harness that kills a pid where the product kills a group leaks exactly the way
+ * this suite was measured leaking. This is that same move, done unconditionally, so the
+ * suite's cleanup does not depend on `clean` having judged the run reapable.
+ */
+async function killRecordedGroups(root: string): Promise<void> {
+  const runsRoot = join(root, '.specwitness', 'runs');
+  for (const run of await readdir(runsRoot).catch(() => [] as string[])) {
+    const manifest = await readFile(join(runsRoot, run, 'manifest.json'), 'utf8').catch(() => '');
+    if (manifest === '') {
+      continue;
+    }
+    const { processGroups = [] } = JSON.parse(manifest) as {
+      readonly processGroups?: readonly number[];
+    };
+    for (const pgid of processGroups) {
+      try {
+        // NEGATIVE pid: the GROUP, not the leader. A pgid of 0 or 1 would signal this
+        // process's own group or every process on the machine, so both are refused — the
+        // same floor `infra/process-runner.ts` puts on its own group kill.
+        if (pgid > 1) {
+          process.kill(-pgid, 'SIGKILL');
+        }
+      } catch {
+        // Already gone, which is the outcome this wanted.
+      }
+    }
+  }
+}
 
 /**
  * Starts a verify and interrupts it once its process group is on disk.
@@ -85,25 +124,34 @@ afterEach(async () => {
  * that happens to work on this machine today.
  *
  * ============================================================================
- * WHY THE CHILD IS TRACKED AND KILLED IN A HOOK
+ * WHY CLEANUP REAPS A PROCESS GROUP AND NOT A PID
  * ============================================================================
  *
- * Every test here starts a `verify` holding a gate that NEVER ENDS, so the only thing that
- * stops it is this function signalling it. The first version put the poll's
- * `expect(runDirectory).not.toBe('')` **before** the kill — so if the poll ever timed out,
- * the assertion threw, the child was never signalled, and a `node gates/slow.cjs` survived
- * with nobody left to reap it. One per test, four tests, four orphans.
+ * Every test here starts a `verify` holding a gate that does not end on its own, so cleanup
+ * is not optional. Getting it right took three attempts and two of them were wrong in ways
+ * worth recording, because the same trap is waiting for anything that spawns through this
+ * product.
  *
- * That is not hypothetical: the supervisor measured **four orphaned gate processes at
- * ppid=1**, in four separate worktrees, spawned one second apart in the window right after
- * this suite last ran under the auto-review's full `pnpm test`. My own before/after
- * measurement had missed it because it compared TOTAL COUNTS, which cannot tell "reaped
- * four, leaked four" from "leaked nothing".
+ *  1. The first measurement compared TOTAL COUNTS of orphaned processes, which cannot tell
+ *     "reaped four, leaked four" from "leaked nothing". It reported clean while four
+ *     orphans existed.
+ *  2. The second fix closed a real hole — the poll's assertion ran BEFORE the child was
+ *     signalled, so a timeout left a `verify` running — and the leak reproduced anyway.
+ *  3. **The actual cause: the gate runs in a DETACHED PROCESS GROUP.** `child.kill()` kills
+ *     the `specwitness` process and does not touch the group. On the happy path
+ *     `specwitness clean` reaps it through the manifest, which is what masked this — but
+ *     `clean` deliberately SKIPS a run whose recorded owner is still alive, so a race
+ *     between the child dying and `clean` probing it leaves the group behind.
  *
- * So the child is now registered the moment it is spawned and killed in `afterEach`,
- * unconditionally, before anything else. The suite is structurally unable to leak whichever
- * assertion fails and wherever it fails — which is the property Task 10 actually asks for,
- * rather than "does not leak on the happy path on this machine today".
+ * Measured by PID at ppid=1 with this suite's cleanup selectively disabled: `clean` plus the
+ * group reap → 0 new; the group reap alone → 0 new; **the pid-kill alone → 4**, which is
+ * exactly the signature that was reported. So the group reap below is the fix, and it is
+ * done unconditionally rather than left to `clean`'s judgement of whether the run is
+ * reapable.
+ *
+ * The child is still registered the moment it is spawned and killed first in `afterEach`:
+ * `clean` cannot reap a run whose owner is alive, so killing the child is what makes the
+ * reap able to work at all. It is necessary and, on its own, not sufficient.
  */
 async function interruptMidRun(project: Fixture): Promise<{
   readonly signal: string | undefined;

@@ -322,12 +322,20 @@ async function executeCriterion(
   };
 
   /**
-   * Executes one probe, `retries + 1` times, with the `runAction` its wrapper needs.
+   * Executes ONE attempt of one probe, with the `runAction` its wrapper needs.
+   *
+   * The attempt LOOP lives in the callers, not here, and that is what makes a retried
+   * wrapper work: a retry means "do the whole measured interaction again", so each attempt
+   * is its own cycle with its own single action. See `shareAction`.
    *
    * `runAction` is injected rather than built here, because a probe wrapped by SEVERAL
-   * observations must run exactly once for all of them — see `shareAction`.
+   * observations must run exactly once for all of them.
    */
-  const runProbe = async (probe: ProbeSpec, runAction: ProbeActionRunner): Promise<void> => {
+  const runAttempt = async (
+    probe: ProbeSpec,
+    attempt: number,
+    runAction: ProbeActionRunner,
+  ): Promise<void> => {
     // Substituted ONCE, before the executor sees anything (4.3). A value substituted
     // after a check is a value that was never checked — and `argumentAllowlist` is
     // substituted along with `args`, so a data-bound argument is compared against a
@@ -337,28 +345,27 @@ async function executeCriterion(
       mechanics: resolveMechanics(probe.mechanics, deps.data),
     } as ProbeSpec;
 
-    const extra = deps.retries?.(probe.surface) ?? 0;
+    const dispatch = deps.dispatch({
+      criterionId,
+      probe: resolved,
+      attempt,
+      cwd,
+      runAction,
+      recordEvidence,
+    });
 
-    for (let attempt = 1; attempt <= extra + 1; attempt += 1) {
-      const dispatch = deps.dispatch({
+    record(
+      probe.id,
+      await dispatch.executor.execute({
         criterionId,
-        probe: resolved,
-        attempt,
-        cwd,
-        runAction,
-        recordEvidence,
-      });
-
-      record(
-        probe.id,
-        await dispatch.executor.execute({
-          criterionId,
-          surface: probe.surface,
-          params: dispatch.params,
-        }),
-      );
-    }
+        surface: probe.surface,
+        params: dispatch.params,
+      }),
+    );
   };
+
+  /** How many attempts a probe class takes. Opt-in; 0 extra for every surface today. */
+  const cyclesFor = (probe: ProbeSpec): number => (deps.retries?.(probe.surface) ?? 0) + 1;
 
   /** Resolves an `around` id to the probe it names, or refuses. */
   const targetOf = (wrapperId: string, aroundProbeId: string): ProbeSpec => {
@@ -375,10 +382,16 @@ async function executeCriterion(
     return target;
   };
 
-  /** The ordinary runner: this wrapper is the only one around its action. */
-  const soleAction = (wrapperId: string): ProbeActionRunner => {
+  /**
+   * The ordinary runner: this wrapper is the only one around its action.
+   *
+   * ONE attempt of the action per wrapper cycle. The action is subordinate to the
+   * measurement — its own retry policy does not apply inside somebody else's before/after
+   * window, because a second execution there would be an unmeasured side effect.
+   */
+  const soleAction = (wrapperId: string, attempt: number): ProbeActionRunner => {
     return async (aroundProbeId) => {
-      await runProbe(targetOf(wrapperId, aroundProbeId), rejectNestedAction);
+      await runAttempt(targetOf(wrapperId, aroundProbeId), attempt, rejectNestedAction);
     };
   };
 
@@ -400,16 +413,23 @@ async function executeCriterion(
     const group = wrappersSharing(probes, probe);
     if (group.length <= 1) {
       // The ordinary case: a plain probe, or the only observation around its action.
-      await runProbe(probe, soleAction(probe.id));
+      for (let attempt = 1; attempt <= cyclesFor(probe); attempt += 1) {
+        await runAttempt(probe, attempt, soleAction(probe.id, attempt));
+      }
       continue;
     }
 
     // Several observations share one action, so the group is executed together and the
-    // action runs once for all of them. Marked handled so the loop does not revisit them.
+    // action runs once per CYCLE for all of them. Marked handled so the loop does not
+    // revisit them. Every member is an observation, so they share a retry policy and
+    // therefore a cycle count.
     for (const member of group) {
       handled.add(member.id);
     }
-    await shareAction(group, targetOf(probe.id, aroundOf(probe)), runProbe);
+    const target = targetOf(probe.id, aroundOf(probe));
+    for (let attempt = 1; attempt <= cyclesFor(probe); attempt += 1) {
+      await shareAction(group, target, attempt, runAttempt);
+    }
   }
 
   return attempts;
@@ -471,6 +491,14 @@ const rejectNestedAction: ProbeActionRunner = async (aroundProbeId) => {
  * suspended inside their own `execute` at the moment it runs. Concurrency is confined to
  * this function and bounded by the size of the group.
  *
+ * **ONE CALL IS ONE CYCLE — ONE ATTEMPT OF EVERY WRAPPER AND ONE OF THE ACTION.** A retry
+ * calls this again with a fresh barrier, because a retry means "do the whole measured
+ * interaction again". An earlier version kept one barrier across attempts, so a retried
+ * wrapper's second `runAction` queued a waiter after the barrier had already fired and
+ * nothing ever woke it — the stage hung forever, with no timeout anywhere in the product to
+ * end it. Found by the third Codex review pass on this story. Retries resolve to zero for
+ * every surface today, so it was unreachable from a compiled plan and total when reached.
+ *
  * **THE DEADLOCK THIS AVOIDS IS THE WHOLE DIFFICULTY.** A wrapper whose "before" snapshot
  * fails returns WITHOUT calling `runAction` — 4.5 aborts there deliberately, because
  * performing the action would mutate the system for a comparison that can no longer be
@@ -483,7 +511,8 @@ const rejectNestedAction: ProbeActionRunner = async (aroundProbeId) => {
 async function shareAction(
   wrappers: readonly ProbeSpec[],
   target: ProbeSpec,
-  runProbe: (probe: ProbeSpec, runAction: ProbeActionRunner) => Promise<void>,
+  attempt: number,
+  runAttempt: (probe: ProbeSpec, attempt: number, runAction: ProbeActionRunner) => Promise<void>,
 ): Promise<void> {
   /** Wrappers that can still reach the barrier. */
   let outstanding = wrappers.length;
@@ -499,7 +528,7 @@ async function shareAction(
     }
     actionRan = true;
     try {
-      await runProbe(target, rejectNestedAction);
+      await runAttempt(target, attempt, rejectNestedAction);
     } catch (failure) {
       // Captured rather than thrown: it must reach every waiting wrapper, and letting it
       // escape here would be an unhandled rejection with nobody to observe it.
@@ -536,7 +565,7 @@ async function shareAction(
   await Promise.all(
     wrappers.map(async (wrapper) => {
       try {
-        await runProbe(wrapper, runAction(wrapper.id));
+        await runAttempt(wrapper, attempt, runAction(wrapper.id));
       } finally {
         if (!arrived.has(wrapper.id)) {
           // Finished without reaching the barrier — its "before" failed, so 4.5 aborted it.

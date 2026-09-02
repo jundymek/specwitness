@@ -670,6 +670,84 @@ describe("the probes stage — an observation's `around`", () => {
     expect(order).toEqual(['action:run']);
   }, 5_000);
 
+  it('re-runs the shared action on a RETRY, once per cycle, and never hangs', async () => {
+    // Retries are opt-in per probe class and today resolve to zero everywhere, so this is
+    // unreachable from a compiled plan — but the API exists, and the failure it had was
+    // TOTAL: the second `runAction` of a retried wrapper queued a waiter after the barrier
+    // had already fired, so nothing ever woke it and the probes stage hung forever with no
+    // timeout anywhere in the product to end it. A retry means "do the whole measured
+    // interaction again", so each attempt is its own cycle with its own single action.
+    const context = stageContext();
+    context.run.contractCriteria.push(AUTOMATED);
+
+    const order: string[] = [];
+    const deps: ProbesStageDeps = {
+      criteria: [
+        automated('E7-01', [
+          shellProbe('action'),
+          observationProbe('rows', 'action'),
+          observationProbe('audit', 'action'),
+        ]),
+      ],
+      data: NO_DATA,
+      retries: (surface) => (surface === 'observation' ? 1 : 0),
+      dispatch: ({ probe, attempt, runAction }) => ({
+        params: {},
+        executor: {
+          surface: probe.surface,
+          execute: async (request) => {
+            if (probe.surface === 'observation' && probe.mechanics.around !== undefined) {
+              await runAction(probe.mechanics.around);
+              return attemptFrom(request, attempt, {});
+            }
+            order.push(`action:${attempt}`);
+            return attemptFrom(request, attempt, {});
+          },
+        },
+      }),
+    };
+
+    await createProbesStage(deps).run(context);
+
+    // Two cycles, one action each — not one action, and not four.
+    expect(order).toEqual(['action:1', 'action:2']);
+  }, 5_000);
+
+  it('keeps a shared retry honest: a flake in the wrappers still reads as flaky', async () => {
+    const context = stageContext();
+    context.run.contractCriteria.push(AUTOMATED);
+
+    let cycle = 0;
+    const deps: ProbesStageDeps = {
+      criteria: [
+        automated('E7-01', [shellProbe('action'), observationProbe('rows', 'action'), observationProbe('audit', 'action')]),
+      ],
+      data: NO_DATA,
+      retries: (surface) => (surface === 'observation' ? 1 : 0),
+      dispatch: ({ probe, attempt, runAction }) => ({
+        params: {},
+        executor: {
+          surface: probe.surface,
+          execute: async (request) => {
+            if (probe.surface === 'observation' && probe.mechanics.around !== undefined) {
+              await runAction(probe.mechanics.around);
+              // Both wrappers fail on the first cycle and pass on the second.
+              return attemptFrom(request, attempt, { satisfied: attempt !== 1 });
+            }
+            cycle += 1;
+            return attemptFrom(request, attempt, {});
+          },
+        },
+      }),
+    };
+
+    await createProbesStage(deps).run(context);
+
+    expect(cycle).toBe(2);
+    expect(context.run.criteria[0]?.status).toBe('pass');
+    expect(context.run.criteria[0]?.flaky).toBe(true);
+  }, 5_000);
+
   it('refuses a dangling `around` as infrastructure, never as a product fail', async () => {
     const context = stageContext();
     context.run.contractCriteria.push(AUTOMATED);
