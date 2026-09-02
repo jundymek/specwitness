@@ -27,8 +27,28 @@
  * PROMPT-FREE, always. This is the command a harness runs unattended (Q53–Q55);
  * it makes no TTY assumption and asks nothing.
  *
- * AI-FREE, entirely. Epic 3's verify makes zero provider calls (FR-18, Q66) —
- * there is no provider in this file to call.
+ * ============================================================================
+ * AI-FREE EXECUTION, AND THE ONE PLACE A PROVIDER MAY BE CALLED (story 4.7)
+ * ============================================================================
+ *
+ * FR-18 and Q66's promise is that **executing a plan makes zero provider
+ * calls**. That promise is kept structurally rather than by discipline: the
+ * probes stage, the surface executors and everything they reach have no
+ * provider in scope at all, and the only `compilePlan` call in this file is
+ * guarded and happens BEFORE the pipeline starts.
+ *
+ * There is exactly one path on which `verify` may spend provider quota — no
+ * plan exists yet, so one is compiled first (AC3) — and the run RECORDS it in
+ * `RunResult.providerUsage`. The recording is not decoration: a harness reads
+ * that document to know what a run cost, and a run that quietly spent
+ * subscription quota while `providerUsage` stayed empty would make the whole
+ * FR-18 guarantee unauditable. `--no-ai` refuses that path outright rather than
+ * skipping it silently: a skip would leave a run with zero criteria that
+ * aggregates to PASS, which is the one output this product must never produce
+ * by accident.
+ *
+ * All four cells of `plan present × --no-ai` are exercised in
+ * `tests/integration/verify-no-ai.test.ts`.
  */
 
 import { relative } from 'node:path';
@@ -41,22 +61,46 @@ import {
   type LoadedContract,
 } from '../../authoring/verifiable.js';
 import { readContractFile, resolveContractPath } from '../../authoring/contract-file.js';
-import { loadConfig, type SpecwitnessConfig } from '../../config/index.js';
+import {
+  assertPlansDirectory,
+  planRelativePath,
+  readPlanFile,
+  resolvePlanPath,
+  writePlanFileAtomically,
+} from '../../authoring/plan-file.js';
+import { compilePlan } from '../../authoring/plan.js';
+import { loadConfig, resolveRoleProvider, type SpecwitnessConfig } from '../../config/index.js';
 import { ConfigError, InfraError, UsageError } from '../../domain/errors.js';
 import { normalizeEpicId } from '../../domain/ids.js';
-import type { RunEnvironment, RunResult } from '../../domain/run-result.js';
+import type { Plan } from '../../domain/plan.js';
+import { resolvePlanData } from '../../domain/plan-data.js';
+import type { Clock, Ids } from '../../domain/ports.js';
+import type { ProviderUsage, RunEnvironment, RunResult } from '../../domain/run-result.js';
 import type { RefResolution, RefRole, RepoRoot, RootResolution, Vcs } from '../../domain/vcs.js';
 import { SystemClock } from '../../infra/clock.js';
 import { RandomIds } from '../../infra/ids.js';
-import { createProcessRunner } from '../../infra/process-runner.js';
+import { createProcessRunner, terminateProcessGroup } from '../../infra/process-runner.js';
 import { RunStore } from '../../infra/run-store.js';
 import { createGitVcs } from '../../infra/vcs.js';
 import { runPipeline } from '../../pipeline/run-pipeline.js';
 import { createStages } from '../../pipeline/stages/index.js';
+import { createServiceGroupRegistry } from '../../pipeline/stages/services.js';
+import { providerForRole } from '../../providers/index.js';
 import { renderJson, renderTerminal } from '../../report/index.js';
 import { parseContract } from '../../schemas/contract.js';
+import {
+  assertPlanMatchesContract,
+  isReferenceableId,
+  parsePlan,
+  serializePlan,
+  unreferenceableIds,
+} from '../../schemas/plan.js';
+import type { DeclaredIds } from '../../schemas/plan.js';
+import { readProviderProvenance } from '../contract/provenance.js';
+import { createDoctorEffects } from '../doctor/effects.js';
 import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
+import { createProbeDispatcher } from '../verify/probe-dispatch.js';
 
 /** Injected at build time by tsup, and by vitest for source-level runs. */
 declare const __SW_VERSION__: string;
@@ -66,6 +110,7 @@ interface VerifyOptions {
   readonly base?: string;
   readonly head?: string;
   readonly json?: boolean;
+  readonly ai?: boolean;
 }
 
 export function register(program: Command): void {
@@ -77,6 +122,11 @@ export function register(program: Command): void {
     .option('--base <ref>', 'ref to verify against (default: project.baseBranch from the config)')
     .option('--head <ref>', 'ref under verification (default: HEAD)')
     .option('--json', 'emit the run document on stdout (stable schema, FR-30)')
+    // Commander turns `--no-ai` into `options.ai === false`, defaulting to `true`. The flag
+    // is a REFUSAL switch rather than a mode: with a plan present a run makes zero provider
+    // calls whether or not it is passed, so what `--no-ai` actually guarantees is that the
+    // command will not compile one behind your back.
+    .option('--no-ai', 'refuse to compile a plan; verify only what is already planned (FR-18, Q66)')
     .action(async (epic: string, options: VerifyOptions) => {
       // Recording is the LAST act, per `cli/exit.ts`: anything that throws
       // before this point is classified by main's catch instead.
@@ -127,13 +177,30 @@ async function verify(
 
   // Loaded once, at the edge, and passed down (spine Consistency Conventions).
   const config = loadConfig(projectRoot);
-  assertSomethingToAdjudicate(config);
 
   // Read and PARSED here, verified inside the pipeline. Parsing at the edge is
   // what lets the integrity stage receive a plain closure; a contract file that
   // is not valid YAML, or not a contract, fails here as an IntegrityError from
   // story 2.2's parser rather than as a mystery inside a stage.
   const loaded = await loadContract(projectRoot, epic);
+
+  // THE PLAN IS RESOLVED BEFORE ANYTHING IS CREATED OR SPAWNED, for the same
+  // reason `assertSomethingToAdjudicate` runs before the run: the `--no-ai`
+  // refusal and the auto-compilation both have to happen while there is still
+  // no run directory, no worktree and no process group in existence. A refusal
+  // afterwards would leave a `result.json` on disk describing a run that never
+  // adjudicated anything.
+  const planning = await resolvePlan({
+    projectRoot,
+    epic,
+    loaded,
+    config,
+    clock: new SystemClock(),
+    ids: new RandomIds(),
+    allowCompilation: options.ai !== false,
+  });
+
+  assertSomethingToAdjudicate(config, planning.plan);
 
   // Refs are resolved HERE, not in the pipeline: `Vcs.resolveRef` never fetches
   // and the pipeline spawns no git, so the SHAs a run is about are fixed before
@@ -189,6 +256,19 @@ async function verify(
     runDirectory: relative(projectRoot, created.dir),
   };
 
+  // THE PROCESS-GROUP SEAM, bound once and shared by every spawning stage. A pgid
+  // reaches the manifest before the child's outcome is observed (AD-8), which is what
+  // lets `specwitness clean` reap a run killed mid-gate, mid-service or mid-probe.
+  const recordProcessGroup = (pgid: number): Promise<void> =>
+    store.recordProcessGroup(created.runId, pgid);
+  const writeEvidence = (relativeName: string, contents: string): Promise<string> =>
+    store.writeEvidenceFile(created.runId, relativeName, contents);
+
+  // ONE registry, shared by the services stage and by teardown. Binding services
+  // without a way to reap them is the composition `StageDependencies` makes
+  // unrepresentable; draining it from teardown is the half this file owes.
+  const registry = createServiceGroupRegistry({ terminate: terminateProcessGroup });
+
   const result = await runPipeline({
     runId: created.runId,
     epic,
@@ -196,6 +276,8 @@ async function verify(
     headSha,
     environment,
     clock,
+    // Empty on every AI-free run, which is every run with a plan already committed.
+    providerUsage: planning.providerUsage,
     stages: createStages({
       assertVerifiableContract: () => assertVerifiableContract(loaded),
       worktree: { vcs, recorder: store, root },
@@ -206,16 +288,63 @@ async function verify(
       gates: {
         gates: config.gates,
         runner,
-        writeEvidence: (relativeName, contents) =>
-          store.writeEvidenceFile(created.runId, relativeName, contents),
-        onProcessGroup: (pgid) => store.recordProcessGroup(created.runId, pgid),
+        writeEvidence,
+        onProcessGroup: recordProcessGroup,
       },
+      // The declared services, started in the worktree and reaped from teardown
+      // below. `registry` is the SAME object both sides hold: binding services
+      // without a way to drain them is the composition `StageDependencies` makes
+      // unrepresentable, and a service that outlives its run makes the NEXT run
+      // fail on an occupied port with nothing on screen to explain why.
+      services: {
+        services: config.services,
+        runner,
+        registry,
+        probePort: createDoctorEffects(clock).probePort,
+        onProcessGroup: recordProcessGroup,
+      },
+      // The declared `data.*` commands, in config declaration order. Their output
+      // corroborates a step that produces no verdict, so a missing writer would
+      // cost only the pointer to a full copy — it is bound anyway, because the
+      // seeded-secret proof walks every file a run leaves behind.
+      data: {
+        data: config.data,
+        runner,
+        writeEvidence,
+        onProcessGroup: recordProcessGroup,
+      },
+      // The compiled plan, executed with ZERO provider calls. `dispatch` is where
+      // every resolution AD-1 and `adapters-core-only` forbid the pipeline and the
+      // surfaces lives; `probes.plan` being absent means no plan was compiled, and
+      // the stage then executes nothing and says so.
+      ...(planning.plan === undefined
+        ? {}
+        : {
+            probes: {
+              criteria: planning.plan.plan.criteria,
+              data: resolvePlanData(planning.plan.plan.data),
+              dispatch: createProbeDispatcher({
+                config,
+                runner,
+                clock,
+                writeEvidence,
+                onProcessGroup: recordProcessGroup,
+              }),
+            },
+          }),
       // Write 1 of two: the crash-durable snapshot, at position 10 of 11. It is
       // what survives a kill DURING teardown. `onComplete` below writes the
       // complete document afterwards — one writer, one serializer, two moments.
       persist: { writeResult: (runId, finished) => store.writeResult(runId, finished) },
       teardown: {
         release: async (context) => {
+          // SERVICES FIRST, WORKTREE SECOND, and the order is load-bearing: a live
+          // service holds an open file handle inside the worktree, and on some
+          // platforms removing a tree out from under a running process fails or
+          // leaves it partially deleted. Draining first also means that if the
+          // worktree removal throws, every service is already gone.
+          await registry.releaseAll();
+
           const worktreePath = context.run.environment.worktreePath;
           if (worktreePath !== null) {
             // The path is the only handle that escapes the stage, and
@@ -311,6 +440,202 @@ function reportInfraFailure(result: RunResult): void {
 }
 
 /**
+ * The plan this run will execute, and what compiling it cost.
+ *
+ * `plan` is `undefined` only for a project that declares gates and plans nothing — the
+ * gates-only mode Epic 3 shipped and this story preserves.
+ */
+interface PlanResolution {
+  readonly plan?: Plan;
+  /**
+   * One entry when a plan was compiled during THIS run, empty otherwise.
+   *
+   * Seeded into the run so `RunResult.providerUsage` is the honest answer to "what did this
+   * run spend". FR-18's whole promise is that reruns are AI-free, and a promise a harness
+   * cannot audit from the document it already reads is not a guarantee.
+   */
+  readonly providerUsage: readonly ProviderUsage[];
+}
+
+/**
+ * Loads the compiled plan, compiling one first where AC3 says to.
+ *
+ * The four cells of `plan present × --no-ai`, which are the whole of AC3:
+ *
+ *   present + ai       -> execute it. Zero provider calls.
+ *   present + --no-ai  -> execute it. Zero provider calls. IDENTICAL RESULT — the flag
+ *                         constrains compilation, and there is nothing to compile.
+ *   absent  + ai       -> compile first, RECORD it in `providerUsage`, then execute.
+ *                         (AC3's precondition is "with providers configured"; a project
+ *                         that assigned no `plan-author` falls through to gates-only —
+ *                         see the comment at that branch.)
+ *   absent  + --no-ai  -> REFUSE, hinting `specwitness plan`.
+ *
+ * **The refusal is the cell that must not be got wrong.** Skipping silently would leave a
+ * run with zero criteria, and `aggregate([], [])` is PASS — so `--no-ai` on an unplanned
+ * project would report the branch merge-eligible having observed nothing. That is the same
+ * green-for-nothing `assertSomethingToAdjudicate` exists to prevent, arriving through a
+ * flag instead of through an empty config.
+ *
+ * A plan that exists but does not match its frozen contract is REFUSED by
+ * `assertPlanMatchesContract` rather than recompiled. Recompiling would be a `verify` that
+ * silently rewrites a committed, reviewed artifact — `specwitness plan` is where that
+ * decision is made, and its own four overwrite rules are written for it.
+ */
+async function resolvePlan(input: {
+  readonly projectRoot: string;
+  readonly epic: string;
+  readonly loaded: LoadedContract;
+  readonly config: SpecwitnessConfig;
+  readonly clock: Clock;
+  readonly ids: Ids;
+  readonly allowCompilation: boolean;
+}): Promise<PlanResolution> {
+  const { projectRoot, epic, loaded, config } = input;
+
+  const existing = await readPlanFile(projectRoot, epic);
+  if (existing !== undefined) {
+    const plan = parsePlan(existing, resolvePlanPath(projectRoot, epic));
+    // Only a frozen, untampered contract can be checked against, and the guard's three
+    // refusals are the merged ones. The integrity STAGE reports them in the ordinary case
+    // so they land in the timeline and the persisted run; the guard is called here only
+    // because comparing a plan to a contract requires a verified contract first.
+    assertPlanMatchesContract(plan, assertVerifiableContract(loaded));
+    return { plan, providerUsage: [] };
+  }
+
+  // NO PLAN. A project that declares no criteria to probe is not in trouble — Epic 3's
+  // gates-only mode is still a legitimate configuration — but a contract that declares
+  // criteria with no plan means nothing will adjudicate them.
+  if (!input.allowCompilation) {
+    throw new ConfigError(
+      `no plan has been compiled for ${epic}, and --no-ai forbids compiling one now`,
+      `run specwitness plan ${epic} first, then verify — a plan is committed and reviewed ` +
+        'before it is executed, so compiling one is a deliberate act rather than something ' +
+        'verify does on your behalf under --no-ai',
+    );
+  }
+
+  // NO PROVIDER TO COMPILE WITH. This is NOT a refusal, and the asymmetry with `--no-ai`
+  // above is deliberate rather than an oversight:
+  //
+  //   - `--no-ai` is the operator ASSERTING that a plan exists and must be executed
+  //     without AI. No plan means that assertion is false, so the command says so.
+  //   - No provider assigned is a project that never opted into AI at all. Epic 3's
+  //     gates-only mode is exactly this configuration, it is shipped and documented, and
+  //     AC3's precondition is explicitly "with providers configured". Refusing here would
+  //     retire a working mode on this story's own judgement, in the last story of an epic.
+  //
+  // The green-for-nothing case is still closed, one layer down:
+  // `assertSomethingToAdjudicate` refuses a project with no gates AND no probes, so a
+  // gates-less project cannot reach a PASS through this path. What a gates-ONLY project
+  // gets is what Epic 3 gave it — its gates executed and every criterion reported
+  // `skipped` in the report. The warning below is so that outcome is never silent.
+  const resolvedProvider = resolveRoleProvider(config, 'plan-author');
+  if (resolvedProvider === undefined) {
+    if (config.gates.length > 0) {
+      printWarning(
+        `no plan has been compiled for ${epic} and no provider is assigned to the ` +
+          '"plan-author" role, so this run executes the declared gates only and every ' +
+          `criterion will be reported as skipped. Assign a provider under ` +
+          `'ai.roles.plan-author' and run specwitness plan ${epic} to verify behaviour`,
+      );
+    }
+    return { providerUsage: [] };
+  }
+
+  // The same runner reaches the provenance read below, so the adapters' capability probe
+  // is paid for once and read twice (story 3.8).
+  const processRunner = createProcessRunner(input.clock);
+  const provider = providerForRole(resolvedProvider, {
+    processRunner,
+    clock: input.clock,
+    warn: (message: string) => process.stderr.write(`${message}\n`),
+  });
+
+  if (provider === undefined) {
+    throw new ConfigError(
+      `the "plan-author" role names provider "${resolvedProvider.name}", which could not be built`,
+      "check 'ai.providers' in .specwitness/config.yaml",
+    );
+  }
+
+  const provenance = await readProviderProvenance(resolvedProvider, processRunner);
+  const startedAt = input.clock.now().getTime();
+
+  // `compilePlan` refuses an absent, unfrozen or tampered contract BEFORE invoking the
+  // provider, so a project in that state never spends quota to learn it.
+  const { plan, attempts } = await compilePlan({
+    loadedContract: loaded,
+    declared: declaredPlanIds(config),
+    provider,
+    clock: input.clock,
+    ids: input.ids,
+    providerName: resolvedProvider.name,
+    model: provenance.model,
+    providerCliVersion: provenance.providerCliVersion,
+  });
+
+  // WRITTEN TO DISK, not held in memory. A plan is a committed, reviewed artifact (Q11),
+  // and a run that compiled one and kept it to itself would make the NEXT run compile
+  // another — spending quota every time, and verifying against a plan no human ever saw.
+  // `specwitness plan`'s own atomic writer, so there is one write path rather than two.
+  await assertPlansDirectory(projectRoot);
+  await writePlanFileAtomically(projectRoot, epic, serializePlan(plan), {
+    onDurabilityWarning: printWarning,
+  });
+
+  printWarning(
+    `no plan existed for ${epic}, so one was compiled before verifying — this run was NOT ` +
+      `AI-free, and its provider usage is recorded in the run document. Subsequent runs ` +
+      `will be AI-free; commit ${planRelativePath(epic)} and review it`,
+  );
+
+  return {
+    plan,
+    providerUsage: [
+      {
+        role: 'plan-author',
+        provider: resolvedProvider.name,
+        durationMs: Math.max(0, input.clock.now().getTime() - startedAt),
+        attempts,
+        model: provenance.model,
+        providerCliVersion: provenance.providerCliVersion,
+      },
+    ],
+  };
+}
+
+/**
+ * The ids a plan may reference, read from config at the edge and passed DOWN (AD-1).
+ *
+ * `observations:` is the one declared-command map a plan may name, used by BOTH the
+ * observation surface and the shell surface. Keys a plan cannot legally reference are
+ * withheld and the operator told by name, exactly as `commands/plan.ts` does — the two call
+ * sites must agree, because a plan compiled against one set of ids and executed against
+ * another is a plan whose probes name commands that were never offered.
+ */
+function declaredPlanIds(config: SpecwitnessConfig): DeclaredIds {
+  const all: DeclaredIds = {
+    serviceIds: Object.keys(config.services),
+    commandIds: Object.keys(config.observations),
+  };
+
+  for (const { kind, id } of unreferenceableIds(all)) {
+    printWarning(
+      `${kind} "${id}" cannot be referenced from a plan: a plan names config ids as ` +
+        'letters, digits, underscore, dot or hyphen, starting with a letter or digit. ' +
+        `Criteria needing this ${kind} will be recorded as needing human review.`,
+    );
+  }
+
+  return {
+    serviceIds: all.serviceIds.filter(isReferenceableId),
+    commandIds: all.commandIds.filter(isReferenceableId),
+  };
+}
+
+/**
  * Refuses a run that could not adjudicate anything at all.
  *
  * `specwitness init` scaffolds a config with `gates:` commented out, and `gates`
@@ -336,20 +661,62 @@ function reportInfraFailure(result: RunResult): void {
  * project's declaration is incomplete. And not NEEDS_HUMAN: Q39 fixes exactly
  * two triggers and this is not a third.
  *
- * **Epic 4 must widen this, not delete it.** The rule is "the run could not
- * adjudicate anything", which today reduces to "no gates declared" only because
- * nothing adjudicates criteria mechanically yet. When probes land, a gate-less
- * project with automated criteria becomes legitimately verifiable and the
- * second clause becomes real.
+ * ========================================================================
+ * WIDENED BY STORY 4.7 — NOT DELETED, AND THE DIFFERENCE IS THE WHOLE POINT
+ * ========================================================================
+ *
+ * The rule has always been "the run could not adjudicate anything". Until
+ * probes landed that reduced to "no gates declared", because nothing else
+ * adjudicated a criterion mechanically — the note this comment carried through
+ * Epic 4 said so, and said the second clause would become real. It now is:
+ *
+ *   refuse  <=>  no gates declared  AND  no automated criterion has a probe.
+ *
+ * So a GATE-LESS PROJECT WHOSE PLAN MAPS CRITERIA TO PROBES IS NOW VERIFIABLE
+ * and is no longer refused — that configuration adjudicates plenty, and
+ * refusing it would have made behavioural verification unreachable for exactly
+ * the projects the epic was built for.
+ *
+ * And a project with NEITHER still refuses. That is the clause that matters and
+ * the reason this was widened rather than removed: `aggregate([], [])` is PASS,
+ * so without it the first-contact sequence — or a plan in which every criterion
+ * was carried as needs-human, or one with no criteria at all — would exit 0,
+ * merge-eligible, having executed nothing and observed nothing.
+ *
+ * A plan that plans only `needs-human` criteria counts as NOTHING TO ADJUDICATE
+ * here even though it produces NEEDS_HUMAN rather than PASS at aggregation.
+ * Both halves are deliberate: nothing mechanical runs, so the refusal's own
+ * sentence is true, and the operator is told before a worktree is created
+ * rather than after a run that could only ever have one answer.
+ *
+ * Decision 3.7-D4, amended by 4.7. Owner chose the refusal on 2026-09-01 over
+ * documenting the green as correct.
  */
-function assertSomethingToAdjudicate(config: SpecwitnessConfig): void {
+function assertSomethingToAdjudicate(config: SpecwitnessConfig, plan: Plan | undefined): void {
   if (config.gates.length > 0) {
     return;
   }
 
+  // A probe is what makes a criterion mechanically adjudicable, so the question is
+  // whether ANY automated criterion carries one — not whether a plan exists, and not
+  // how many criteria it has. 4.2's schema already refuses an automated criterion with
+  // an empty probe list, so in practice this is true whenever one automated criterion is
+  // planned; it is written as the property rather than as its consequence, because a
+  // future schema change would otherwise silently reopen the hole.
+  const probes = (plan?.plan.criteria ?? []).some(
+    (criterion) => criterion.disposition === 'automated' && criterion.probes.length > 0,
+  );
+  if (probes) {
+    return;
+  }
+
   throw new ConfigError(
-    'this project declares no deterministic gates, so a verification run could not check anything',
-    "declare at least one gate under 'gates:' in .specwitness/config.yaml — until behavioural probes arrive, gates are the only thing a run can execute, and a PASS that executed nothing would tell your harness the branch is merge-eligible",
+    'this project declares no deterministic gates, and its plan maps no criterion to a ' +
+      'probe, so a verification run could not check anything',
+    "declare at least one gate under 'gates:' in .specwitness/config.yaml, or compile a " +
+      'plan whose criteria carry probes with ' +
+      "'specwitness plan <epic>' — a PASS that executed nothing would tell your harness " +
+      'the branch is merge-eligible',
   );
 }
 

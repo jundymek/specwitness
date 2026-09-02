@@ -51,7 +51,7 @@ import {
 } from '../domain/errors.js';
 import type { Clock } from '../domain/ports.js';
 import type { InfraErrorClassification, RunOutcome } from '../domain/run-outcome.js';
-import type { RunEnvironment, RunResult } from '../domain/run-result.js';
+import type { ProviderUsage, RunEnvironment, RunResult } from '../domain/run-result.js';
 import { STAGE_NAMES } from '../domain/stage.js';
 import type { StageName, StageStatus, StageTimelineEntry } from '../domain/stage.js';
 import type { RunAccumulator, Stage, StageContext } from './stage.js';
@@ -73,6 +73,21 @@ export interface RunPipelineInput {
   readonly headSha: string;
   readonly environment: RunEnvironment;
   readonly clock: Clock;
+  /**
+   * Provider work the CALLER already paid for on this run's behalf, before the pipeline
+   * started (story 4.7: `verify` compiling a missing plan, AC3).
+   *
+   * Seeded rather than accumulated because it happens BEFORE any stage runs and no stage
+   * can see it. It matters that it reaches `RunResult.providerUsage` all the same: FR-18's
+   * promise is that executing a plan is AI-free, and a run that quietly spent subscription
+   * quota while `providerUsage` stayed empty would make that guarantee unauditable from
+   * the one document a harness reads. Defaults to none, which is every other run.
+   *
+   * NOTHING INSIDE THE PIPELINE ADDS TO IT. AD-2: no verdict, no criterion result and no
+   * mutation of a frozen artifact ever comes from a provider, and there is no provider in
+   * any stage to call.
+   */
+  readonly providerUsage?: readonly ProviderUsage[];
   /** Exactly the eleven `STAGE_NAMES`, in order. Anything else is refused. */
   readonly stages: readonly Stage[];
   /**
@@ -172,7 +187,7 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     gates: [],
     criteria: [],
     evidence: [],
-    providerUsage: [],
+    providerUsage: [...(input.providerUsage ?? [])],
     environment: input.environment,
     contractCriteria: [],
   };

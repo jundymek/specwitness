@@ -227,6 +227,28 @@ export interface ObservationExecutorDeps {
   readonly resolveCommand: ObservationCommandResolver;
   /** Required only for a probe whose `mechanics.around` names an action. */
   readonly runAction?: ObservationActionRunner;
+  /**
+   * Passed straight to the runner so this probe's process group is recorded durably BEFORE
+   * the run proceeds (AD-8). The composition root binds `RunStore.recordProcessGroup`.
+   *
+   * NOT OPTIONAL IN SPIRIT, ONLY IN TYPE — 4.6's wording for the identical field, adopted
+   * verbatim here. An observation command spawns a real child, and that child gets its own
+   * process group whether or not anyone writes the pgid down. If nothing records it,
+   * `specwitness clean` cannot find the group after an interrupted or crashed run, and the
+   * command's descendants outlive the run with nothing on disk able to name them.
+   *
+   * ADDED BY STORY 4.7, as a seam fix. This dep was missing from the merged executor while
+   * every other spawning module in the product carried it (`pipeline/stages/gates.ts`,
+   * `pipeline/stages/services.ts`, `pipeline/stages/data.ts`, `surfaces/shell.ts`) — 4.6's
+   * own review pass found and fixed the identical omission on the shell surface. 4.5 and
+   * 4.6 agreed at intent-sync that the two command-spawning surfaces would present ONE
+   * shape to their common caller; on this field they did not, and 4.7 is the first caller
+   * positioned to notice.
+   *
+   * Optional purely so a unit test can omit it; the runner awaits it before the child's
+   * outcome is observed, which is where the durability ordering lives.
+   */
+  readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
 }
 
 /* ── params, hand-validated ──────────────────────────────────────────────────────────── */
@@ -888,6 +910,14 @@ export class ObservationSurfaceExecutor implements SurfaceExecutor {
       // The observation command is the project's own tooling and legitimately needs the
       // environment (a DATABASE_URL, a PATH). Nothing is withheld and nothing is added.
       env: { inherit: true },
+      // AD-8. Forwarded CONDITIONALLY, matching the merged shell surface and both spawning
+      // stages: an absent hook must stay absent rather than become a no-op function, so a
+      // runner can tell "nobody is recording groups" from "somebody is, and recorded
+      // nothing". Every snapshot goes through this method, so a before/after pair records
+      // both of its groups.
+      ...(this.#deps.onProcessGroup === undefined
+        ? {}
+        : { onProcessGroup: this.#deps.onProcessGroup }),
     });
 
     const fail = (message: string, hint: string): SnapshotOutcome => ({
