@@ -327,6 +327,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Reads one field, and ONLY as an own property.
+ *
+ * A plain `raw['probeId']` walks the prototype chain, so a params object whose
+ * fields live on its prototype passes every check below and the probe SPAWNS —
+ * silent acceptance rather than a crash, which is the worse of the two failures.
+ * `params` is derived from YAML a human may have hand-edited, which is the whole
+ * threat model this validator exists for, so it may not trust inherited shape.
+ *
+ * The merged `getObservationCommand` in `src/config/types.ts` guards the same
+ * class for the same reason, in as many words: "Own-property check on purpose: a
+ * prototype walk would resolve `constructor` or `toString` into something that
+ * is not a declared observation at all." This is that rule applied one layer out.
+ *
+ * Found by an adversarial params suite written after story 4.4 reported the
+ * shared "the interior of `params` is `unknown` and we all read it as typed"
+ * defect class — their instance was a two-level dereference, this one is a
+ * prototype read, and both hide in hand-validation because the type system stops
+ * helping at `Readonly<Record<string, unknown>>`.
+ */
+function own(raw: Record<string, unknown>, field: string): unknown {
+  return Object.hasOwn(raw, field) ? raw[field] : undefined;
+}
+
 function stringArray(value: unknown, field: string): readonly string[] {
   if (!Array.isArray(value)) {
     throw wiringDefect(`'${field}' is not an array`);
@@ -343,14 +367,14 @@ function assertionSpec(value: unknown, index: number): ShellAssertionSpec {
   if (!isRecord(value)) {
     throw wiringDefect(`'assertions[${index}]' is not an object`);
   }
-  if (typeof value['description'] !== 'string') {
+  if (typeof own(value, 'description') !== 'string') {
     throw wiringDefect(`'assertions[${index}].description' is not a string`);
   }
-  if (typeof value['expected'] !== 'string') {
+  if (typeof own(value, 'expected') !== 'string') {
     throw wiringDefect(`'assertions[${index}].expected' is not a string`);
   }
 
-  const comparison = value['comparison'];
+  const comparison = own(value, 'comparison');
   if (
     typeof comparison !== 'string' ||
     !(ASSERTION_COMPARISONS as readonly string[]).includes(comparison)
@@ -364,11 +388,11 @@ function assertionSpec(value: unknown, index: number): ShellAssertionSpec {
     );
   }
 
-  const target = value['target'];
+  const target = own(value, 'target');
   if (!isRecord(target)) {
     throw wiringDefect(`'assertions[${index}].target' is not an object`);
   }
-  const source = target['source'];
+  const source = own(target, 'source');
   if (typeof source !== 'string' || !(TARGET_SOURCES as readonly string[]).includes(source)) {
     throw wiringDefect(
       `'assertions[${index}].target.source' is ${JSON.stringify(source)}, which is not one of ` +
@@ -377,10 +401,10 @@ function assertionSpec(value: unknown, index: number): ShellAssertionSpec {
   }
 
   return {
-    description: value['description'],
+    description: own(value, 'description') as string,
     target: { source: source as ShellTargetSource },
     comparison: comparison as AssertionComparison,
-    expected: value['expected'],
+    expected: own(value, 'expected') as string,
   };
 }
 
@@ -398,17 +422,18 @@ function readParams(raw: Readonly<Record<string, unknown>>): ShellProbeParams {
     throw wiringDefect('they are not an object');
   }
   for (const field of ['probeId', 'commandId'] as const) {
-    if (typeof raw[field] !== 'string' || raw[field] === '') {
+    if (typeof own(raw, field) !== 'string' || own(raw, field) === '') {
       throw wiringDefect(`'${field}' is not a non-empty string`);
     }
   }
-  if (!Array.isArray(raw['args'])) {
+  if (!Array.isArray(own(raw, 'args'))) {
     throw wiringDefect("'args' is not an array");
   }
-  if (!Array.isArray(raw['argumentAllowlist'])) {
+  if (!Array.isArray(own(raw, 'argumentAllowlist'))) {
     throw wiringDefect("'argumentAllowlist' is not an array");
   }
-  if (!Array.isArray(raw['assertions']) || raw['assertions'].length === 0) {
+  const declaredAssertions = own(raw, 'assertions');
+  if (!Array.isArray(declaredAssertions) || declaredAssertions.length === 0) {
     // A probe that adjudicates nothing reaches `outcomeOf`'s "nothing was
     // adjudicated mechanically" branch, which returns `needs_human` rather than
     // minting a PASS out of nothing. The merged schema's `.min(1)` makes that
@@ -416,17 +441,17 @@ function readParams(raw: Readonly<Record<string, unknown>>): ShellProbeParams {
     throw wiringDefect("'assertions' is not a non-empty array");
   }
 
-  const attempt = raw['attempt'];
+  const attempt = own(raw, 'attempt');
   if (attempt !== undefined && (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1)) {
     throw wiringDefect("'attempt' is not a positive integer");
   }
 
   return {
-    probeId: raw['probeId'] as string,
-    commandId: raw['commandId'] as string,
-    args: stringArray(raw['args'], 'args'),
-    argumentAllowlist: stringArray(raw['argumentAllowlist'], 'argumentAllowlist'),
-    assertions: raw['assertions'].map((entry, index) => assertionSpec(entry, index)),
+    probeId: own(raw, 'probeId') as string,
+    commandId: own(raw, 'commandId') as string,
+    args: stringArray(own(raw, 'args'), 'args'),
+    argumentAllowlist: stringArray(own(raw, 'argumentAllowlist'), 'argumentAllowlist'),
+    assertions: declaredAssertions.map((entry, index) => assertionSpec(entry, index)),
     ...(attempt === undefined ? {} : { attempt: attempt as number }),
   };
 }
