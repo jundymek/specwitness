@@ -1059,9 +1059,22 @@ function validateParams(
       );
       return;
     }
-    if (source === 'header' && typeof (target as { name?: unknown }).name !== 'string') {
-      fail(`${at} is a header assertion with no header name`, "add 'name' to the assertion's target");
-      return;
+    if (source === 'header') {
+      const name = (target as { name?: unknown }).name;
+      // The SAME `HEADER_NAME` rule as a request header, and for a sharper reason: a string
+      // that is not a valid field name — `''`, `'bad name'`, one carrying a newline — passes a
+      // typeof check, then reaches `Headers.get()` during evaluation, which throws a raw
+      // `TypeError` AFTER the request has already been issued. That is the worst version of
+      // this defect class: not merely an unclassified crash, but one that happens past the
+      // point where this validator promised to have caught it, leaving no attempt and no
+      // evidence for a run that really did touch the network.
+      if (typeof name !== 'string' || !HEADER_NAME.test(name)) {
+        fail(
+          `${at} names header '${redact(String(name))}', which is not a valid HTTP field name`,
+          'RFC 7230 field names are letters, digits and !#$%&\'*+.^_`|~- — the same rule request headers follow',
+        );
+        return;
+      }
     }
     if (source === 'jsonPath') {
       const path = (target as { path?: unknown }).path;

@@ -327,6 +327,24 @@ describe('malformed params (a wiring defect, never an execError)', () => {
       ],
     },
     {
+      why: 'a header assertion whose name is an empty string',
+      assertions: [
+        { description: 'd', comparison: 'equals', expected: 'x', target: { source: 'header', name: '' } },
+      ],
+    },
+    {
+      why: 'a header assertion whose name contains a space',
+      assertions: [
+        { description: 'd', comparison: 'equals', expected: 'x', target: { source: 'header', name: 'bad name' } },
+      ],
+    },
+    {
+      why: 'a header assertion whose name contains a newline',
+      assertions: [
+        { description: 'd', comparison: 'equals', expected: 'x', target: { source: 'header', name: 'a\nb' } },
+      ],
+    },
+    {
       why: 'a jsonPath assertion with no path',
       assertions: [
         { description: 'd', comparison: 'equals', expected: 'x', target: { source: 'jsonPath' } },
