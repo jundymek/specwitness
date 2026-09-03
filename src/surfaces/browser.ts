@@ -273,6 +273,35 @@
  * titles, error messages, and the `expected` / `actual` the derivation builds from them.
  * The image and archive channels are out of reach, and that is a property of the medium.
  *
+ * ⚠️ AND THE TRACE IS THE STRONGER EXPOSURE OF THE TWO, WHICH IS WORTH SEPARATING OUT
+ * RATHER THAN LEAVING BUNDLED WITH THE SCREENSHOT. Raised by the codex re-review of this
+ * branch, and it is right about the facts:
+ *
+ *   A screenshot is PIXELS. Reading a secret out of it takes a human eye or an OCR pass.
+ *   A trace is a ZIP OF STRUCTURED DATA — DOM snapshots, network requests and responses,
+ *   console output, and every URL visited. A secret in it is MACHINE-READABLE and greppable,
+ *   which makes it a materially larger exposure than the screenshot beside it.
+ *
+ * WHY IT IS STORED ANYWAY, stated as a decision rather than an oversight. AC1 requires "a
+ * Playwright trace + failure screenshot are stored as evidence" (Q32), and the product exists
+ * to produce REPRODUCIBLE EVIDENCE — a verification gate whose passing runs carry no record
+ * of what was exercised is the thing this product was built to replace. The two ways to close
+ * the hole both cost more than they buy:
+ *
+ *   - DROP OR CONDITION THE TRACE. Contradicts AC1, and removes the artifact 5.6 needs most
+ *     when it proposes a new locator for a probe that failed.
+ *   - SANITISE THE ARCHIVE. Rewriting a zip of DOM snapshots and network resources with a
+ *     text redactor is a large, error-prone piece of work whose PARTIAL success is worse than
+ *     nothing — by this module's own rule, three paragraphs up.
+ *
+ * SO THE EXPOSURE IS REPORTED TO THE OWNER RATHER THAN SILENTLY ACCEPTED OR SILENTLY CLOSED.
+ * It is a genuine tension between AC1 (store a trace), AD-10/Q49 (sanitise at capture) and
+ * 5.6's needs, and choosing between those three is a product decision, not a story branch's.
+ * What is done here meanwhile: `sources: false` keeps the project's own source files out of
+ * the archive, the limitation is stated in the evidence member's own `explanation` where a
+ * reader meets the artifact, and 5.3 renders it to the reviewer. A project that knows the
+ * shape of its own secrets should keep them off the pages a browser probe drives.
+ *
  * A SECOND, SMALLER LIMIT, named for the same reason: a secret sitting in page text with no
  * assignment shape around it (`sw-secret-...` on its own, rather than `api_key=sw-secret-...`)
  * is not something `redactText` can recognise. `http.ts` closes the equivalent hole for
@@ -966,8 +995,20 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     // was adjudicated, so ZERO assertion evaluations are emitted: `outcomeOf` makes the exec
     // error outrank them anyway, so emitting them would be recorded evidence no verdict is
     // derived from, manufactured out of an infrastructure failure.
+    //
+    // ⚠️ THE RUNNER'S OWN OUTCOME IS PART OF THIS CONDITION, and leaving it out was a defect
+    // found by the codex re-review of this branch. The driver writes its result file inside a
+    // `finally`, so `ok: true` can be on disk while the PROCESS is subsequently timed out,
+    // killed during teardown, or exits non-zero for a reason the driver never saw. Reading
+    // only the file would then adjudicate assertions from a terminated run and could report
+    // PASS for a browser that was killed — minting a verdict out of a process that did not
+    // finish, which is the same sin as passing a probe that adjudicated nothing.
+    //
+    // So a verdict requires BOTH: the driver said it observed the page, AND the process that
+    // ran it completed with exit 0. Anything else is `execError`.
+    const runnerFailed = result.outcome !== 'completed' || result.exitCode !== 0;
     const execError =
-      outcome === undefined || !outcome.ok
+      outcome === undefined || !outcome.ok || runnerFailed
         ? classifyFailure(result, outcome, url, timeoutMs, redaction)
         : undefined;
 
@@ -1769,6 +1810,23 @@ function classifyFailure(
       hint: 'the browser did not launch, or the runner exited before the page was opened — ' +
         'check that a browser is downloaded (`specwitness doctor`) and that the machine has ' +
         'the shared libraries a headless chromium needs',
+    };
+  }
+
+  // THE DRIVER SAID IT OBSERVED THE PAGE, BUT THE PROCESS DID NOT FINISH CLEANLY. The result
+  // file was written in a `finally`, so it can predate a kill, a teardown failure or a
+  // non-zero exit. Nothing may be adjudicated from it: the run did not complete, and a
+  // verdict drawn from a terminated process is a verdict drawn from an unknown state.
+  if (outcome.ok) {
+    return {
+      message: redact(
+        `the browser probe against ${safeUrl} reported success, but the Playwright runner ` +
+          `exited ${result.outcome} with code ${result.exitCode ?? 'none'}: ` +
+          `${echo(result.stderr) || echo(result.stdout) || 'no output'}`,
+      ),
+      hint: 'the driver wrote its result before the process ended, so the observation cannot ' +
+        'be trusted and no assertion was adjudicated from it — check whether the run was ' +
+        'killed, or whether the Playwright runner failed after the page was read',
     };
   }
 

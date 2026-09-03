@@ -21,6 +21,7 @@ import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
 
 import { deriveCriterionResult } from '../../../src/domain/criterion-result.js';
 import type { ContractCriterionRef, ProbeAttempt } from '../../../src/domain/criterion-result.js';
+import type { ProcessOutcome } from '../../../src/domain/process-runner.js';
 import type { BrowserEvidence } from '../../../src/domain/evidence.js';
 import { BrowserSurfaceExecutor } from '../../../src/surfaces/browser.js';
 import {
@@ -105,6 +106,21 @@ interface RunInput {
   readonly stepTimeoutMs?: number;
   readonly timeoutMs?: number;
   readonly attempt?: number;
+  /**
+   * Forces ONLY the process-outcome fields of an otherwise completely real run.
+   *
+   * Used by exactly one test, and the reason it exists is worth stating rather than hiding:
+   * the state under test is "the driver wrote its result file, and THEN the process died" —
+   * a race whose window is the few milliseconds between the `finally` block's last write and
+   * the process exiting. Producing that deterministically would mean timing a kill into that
+   * window, which is precisely the kind of flaky test this suite must not contain.
+   *
+   * Everything else stays real: a real browser launches, a real page is read, real artifacts
+   * are written, and the driver really does report `ok: true`. Only the runner's verdict on
+   * its own child is overridden — which IS the state, not a simulation of the outcome the
+   * assertion checks.
+   */
+  readonly forceProcessOutcome?: { outcome: ProcessOutcome; exitCode: number | null };
 }
 
 interface Executed {
@@ -121,7 +137,17 @@ async function execute(input: RunInput): Promise<Executed> {
 
   const sink = await createEvidenceSink();
   sinks.push(sink);
-  const runner = createRecordingRunner();
+  const recording = createRecordingRunner();
+  const forced = input.forceProcessOutcome;
+  const runner =
+    forced === undefined
+      ? recording
+      : {
+          run: async (options: Parameters<typeof recording.run>[0]) => ({
+            ...(await recording.run(options)),
+            ...forced,
+          }),
+        };
 
   const executor = new BrowserSurfaceExecutor({
     clock,
@@ -158,7 +184,7 @@ async function execute(input: RunInput): Promise<Executed> {
     },
   });
 
-  return { attempt, sink, spawns: runner.spawns };
+  return { attempt, sink, spawns: recording.spawns };
 }
 
 const HEADING_IS_ORDERS = {
@@ -422,6 +448,32 @@ describeWithBrowser('AD-6/AD-7: could not look is ERROR, and never FAIL', () => 
       const derived = deriveCriterionResult(CRITERION, [attempt]);
       expect(derived.status).toBe('error');
       expect(derived.status).not.toBe('fail');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it.each([
+    ['a run killed after writing its result', 'timed-out' as ProcessOutcome, null],
+    ['a runner that exited non-zero', 'completed' as ProcessOutcome, 1],
+  ])(
+    'refuses to adjudicate %s, even though the driver reported success (codex P1)',
+    async (_label, outcome, exitCode) => {
+      // ⚠️ A VERDICT REQUIRES BOTH HALVES: the driver said it observed the page, AND the
+      // process that ran it finished cleanly. The driver writes its result inside a
+      // `finally`, so `ok: true` can be on disk while the process is subsequently killed,
+      // torn down, or exits non-zero for a reason the driver never saw. Reading only the file
+      // would adjudicate assertions from a terminated run and could report PASS for a browser
+      // that was killed. Found by the codex re-review of this branch.
+      const { attempt } = await execute({
+        assertions: [HEADING_IS_ORDERS],
+        forceProcessOutcome: { outcome, exitCode },
+      });
+
+      // The page really WAS read — the assertion would have been satisfied — and it is still
+      // refused, because the run did not complete.
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
     },
     TEST_TIMEOUT_MS,
   );
