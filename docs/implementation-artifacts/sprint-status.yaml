@@ -80,7 +80,7 @@ development_status:
   epic-4-retrospective: done
 
   epic-5: in-progress
-  5-1-playwright-integration-environment-resolution: ready-for-dev
+  5-1-playwright-integration-environment-resolution: done
   5-2-browser-probe-executor-with-trace-evidence: ready-for-dev
   5-3-human-judgment-criteria-flow: ready-for-dev
   5-4-flakiness-retry-semantics: ready-for-dev

@@ -345,21 +345,44 @@ describe('commands-resolvable (required)', () => {
   });
 });
 
+/**
+ * The behaviour story 5.1 added — source, version, browsers-present, and the
+ * provisioning `HINT:` — has its own file,
+ * `tests/unit/doctor/playwright-capability.test.ts`, because it needs the
+ * resolved-environment fixtures. What stays here is what this file has always
+ * asserted about the check: it is optional, and it warns rather than failing.
+ *
+ * The check no longer asks `resolvesFrom` a boolean question. Story 5.1 routed
+ * it through `effects.playwrightEnvironment`, which additionally requires the
+ * resolved package to live inside the project tree — a boolean could not tell
+ * a project's own installation from SpecWitness's, hoisted and found by Node's
+ * upward walk, and story 5.1 is the change that made that distinction matter.
+ */
 describe('playwright-capability (optional)', () => {
   it('is optional, so a missing browser stack never fails doctor', () => {
     expect(playwrightCapabilityCheck.required).toBe(false);
   });
 
-  it('passes when @playwright/test resolves from the project root', async () => {
+  it('passes when the project has a Playwright with its browsers downloaded', async () => {
     const { ctx } = await testContext({
       config: MINIMAL_CONFIG,
-      resolvableModules: ['@playwright/test'],
+      playwright: {
+        source: 'project',
+        packageDir: '/work/app/node_modules/@playwright/test',
+        cliPath: '/work/app/node_modules/@playwright/test/cli.js',
+        version: '1.44.0',
+        browsersPath: '/home/test/.cache/ms-playwright',
+        browsersPathFromEnv: false,
+        browsersPresent: true,
+        ready: true,
+        cacheDir: '/home/test/.cache/specwitness/playwright',
+      },
     });
 
     expect((await playwrightCapabilityCheck.run(ctx)).status).toBe('pass');
   });
 
-  it('warns — never fails — when it does not, pointing at Epic 5 provisioning', async () => {
+  it('warns — never fails — when it does not, pointing at provisioning', async () => {
     const { ctx } = await testContext({ config: MINIMAL_CONFIG });
 
     const result = await playwrightCapabilityCheck.run(ctx);

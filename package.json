@@ -36,6 +36,14 @@
     "yaml": "^2.9.0",
     "zod": "^4.5.4"
   },
+  "peerDependencies": {
+    "@playwright/test": "1.62.1"
+  },
+  "peerDependenciesMeta": {
+    "@playwright/test": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.18.0",
     "dependency-cruiser": "^18.2.0",
