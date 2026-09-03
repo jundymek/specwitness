@@ -95,12 +95,36 @@ async function installFakePlaywright(
   return packageDir;
 }
 
-/** A browser registry directory holding one downloaded chromium bundle. */
+/**
+ * A browser registry holding a COMPLETE chromium install at one revision.
+ *
+ * Complete means both bundles a chromium launch needs — `chromium-<rev>` and
+ * the separate `chromium_headless_shell-<rev>` used for default headless
+ * launches — each carrying Playwright's own `INSTALLATION_COMPLETE` marker. A
+ * fixture that only made directories would have proved that the code reads
+ * directory names, which is precisely the bug the codex reviews found twice.
+ */
 async function installFakeChromium(
   browsersPath: string,
   revision: string = FIXTURE_REVISION,
 ): Promise<void> {
+  for (const bundle of [`chromium-${revision}`, `chromium_headless_shell-${revision}`]) {
+    await installFakeBundle(join(browsersPath, bundle));
+  }
+}
+
+async function installFakeBundle(bundleDir: string): Promise<void> {
+  await mkdir(bundleDir, { recursive: true });
+  await writeFile(join(bundleDir, 'INSTALLATION_COMPLETE'), '', 'utf8');
+}
+
+/** An interrupted download: the directory is there, the marker is not. */
+async function installPartialChromium(
+  browsersPath: string,
+  revision: string = FIXTURE_REVISION,
+): Promise<void> {
   await mkdir(join(browsersPath, `chromium-${revision}`), { recursive: true });
+  await installFakeBundle(join(browsersPath, `chromium_headless_shell-${revision}`));
 }
 
 const LINUX: Pick<PlaywrightEnvironmentInputs, 'platform' | 'homeDir'> = {
@@ -363,17 +387,17 @@ describe('resolvePlaywrightEnvironment', () => {
     }
   });
 
-  it('reports browsers as absent — never present — when it cannot tell', async () => {
+  it('reports browsers as absent — never present — when the revision table is unreadable', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
     try {
       await installFakePlaywright(project, '1.44.0');
-      // `0` asks Playwright to keep browsers inside its own package. We do not
-      // guess; fail-closed means "not present", which costs one extra hint and
-      // can never make doctor green over a machine that cannot open a browser.
-      const env = await resolvePlaywrightEnvironment(
-        inputs(project, { env: { PLAYWRIGHT_BROWSERS_PATH: '0' }, homeDir: home }),
-      );
+      // A registry populated at a revision this Playwright does not require.
+      // Fail-closed means "not present", which costs one extra hint and can
+      // never make doctor green over a machine that cannot open a browser.
+      await installFakeChromium(join(home, '.cache', 'ms-playwright'), '1');
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
 
       expect(env.browsersPresent).toBe(false);
     } finally {
@@ -401,9 +425,9 @@ describe('resolvePlaywrightEnvironment', () => {
       // Three neighbours, none of them the one this Playwright needs.
       await installFakeChromium(join(home, '.cache', 'ms-playwright'), '1208');
       await installFakeChromium(join(home, '.cache', 'ms-playwright'), '1217');
-      await mkdir(join(home, '.cache', 'ms-playwright', 'chromium_headless_shell-1234'), {
-        recursive: true,
-      });
+      await installFakeBundle(
+        join(home, '.cache', 'ms-playwright', 'chromium_headless_shell-1234'),
+      );
 
       const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
 
@@ -471,6 +495,104 @@ describe('resolvePlaywrightEnvironment', () => {
    * readiness is checked in another. It is absolutised once, at the parent's
    * cwd, and the absolute value is what every child is given.
    */
+  /**
+   * REGRESSION — codex re-review of this branch, P1(b).
+   *
+   * An interrupted download leaves the revision directory behind with nothing
+   * usable in it. Matching the directory NAME would call that ready,
+   * provisioning would skip the download it needed, and the probe would fail
+   * against a machine doctor had already reported green.
+   */
+  it('does not accept a chromium directory left behind by an interrupted download', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.62.1');
+      await installPartialChromium(join(home, '.cache', 'ms-playwright'));
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      expect(env.source).toBe('project');
+      expect(env.browsersPresent).toBe(false);
+      expect(env.ready).toBe(false);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * REGRESSION — codex re-review of this branch, P1(b), second half.
+   *
+   * Current Playwright launches headless through a SEPARATE
+   * `chromium_headless_shell-<revision>` bundle, which every browser probe
+   * uses by default. A registry with only `chromium-<revision>` cannot serve
+   * that launch.
+   */
+  it('requires the headless-shell bundle, not only chromium', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.62.1');
+      await installFakeBundle(join(home, '.cache', 'ms-playwright', 'chromium-1234'));
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      expect(env.browsersPresent).toBe(false);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * REGRESSION — codex re-review of this branch, P1(a).
+   *
+   * `PLAYWRIGHT_BROWSERS_PATH=0` is a SUPPORTED Playwright configuration that
+   * keeps browsers under `playwright-core/.local-browsers`. Reporting it
+   * unusable meant a project deliberately using package-local browsers could
+   * never run a browser probe despite having a complete installation.
+   */
+  it('honours a COMPLETE package-local installation when PLAYWRIGHT_BROWSERS_PATH is 0', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.62.1');
+      const local = join(project, 'node_modules', 'playwright-core', '.local-browsers');
+      await installFakeChromium(local);
+
+      const env = await resolvePlaywrightEnvironment(
+        inputs(project, { env: { PLAYWRIGHT_BROWSERS_PATH: '0' }, homeDir: home }),
+      );
+
+      // Realpath-compared: the path is derived from the RESOLVED package
+      // directory, and Node's resolution answers `/private/var/...` on macOS.
+      expect(env.browsersPath).toBe(await realpath(local));
+      expect(env.browsersPresent).toBe(true);
+      expect(env.ready).toBe(true);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('still reports not-ready for an EMPTY package-local registry', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.62.1');
+
+      const env = await resolvePlaywrightEnvironment(
+        inputs(project, { env: { PLAYWRIGHT_BROWSERS_PATH: '0' }, homeDir: home }),
+      );
+
+      expect(env.browsersPresent).toBe(false);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it('absolutises a relative PLAYWRIGHT_BROWSERS_PATH so parent and child cannot disagree', async () => {
     const dir = specwitnessPlaywrightCacheDir({
       env: { PLAYWRIGHT_BROWSERS_PATH: 'tmp/browsers' },
@@ -793,7 +915,35 @@ describe('provisionPlaywright', () => {
     }
   });
 
-  it('refuses to provision when PLAYWRIGHT_BROWSERS_PATH is 0, explaining why', async () => {
+  it('does not refuse a COMPLETE package-local installation, and spawns nothing for it', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      const { runner, runs } = fakeRunner([ok()]);
+      await installFakePlaywright(project, '1.62.1');
+      await installFakeChromium(
+        join(project, 'node_modules', 'playwright-core', '.local-browsers'),
+      );
+
+      const env = await provisionPlaywright({
+        projectRoot: project,
+        runner,
+        env: { PLAYWRIGHT_BROWSERS_PATH: '0' },
+        platform: 'linux',
+        homeDir: home,
+        timeoutMs: 1_000,
+      });
+
+      expect(env.source).toBe('project');
+      expect(env.ready).toBe(true);
+      expect(runs).toHaveLength(0);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to provision INTO a package-local registry, explaining why', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
     try {

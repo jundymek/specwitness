@@ -73,7 +73,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -109,12 +109,34 @@ export const PROVISIONED_BROWSER = 'chromium';
 
 /**
  * Playwright's own value for "keep browsers inside the package directory".
- * SpecWitness honours it by refusing to guess — see `browsersPresent`.
+ * HONOURED: a complete package-local installation is reported ready and used.
+ * What SpecWitness will not do is WRITE one, because for a project's own
+ * Playwright that directory is inside the project tree (AC1).
  */
 const BROWSERS_PATH_PACKAGE_LOCAL = '0';
 
-/** The entry in Playwright's `browsers.json` that names the chromium build. */
-const CHROMIUM_BROWSER_NAME = 'chromium';
+/**
+ * The `browsers.json` entries a `playwright install chromium` provides, and the
+ * ones a chromium launch needs.
+ *
+ * BOTH, not just the first. Current Playwright launches headless through a
+ * SEPARATE `chromium_headless_shell-<revision>` bundle, so a registry holding
+ * only `chromium-<revision>` cannot serve the default headless launch that
+ * every browser probe will make. Reported by the codex re-review of this
+ * branch. `ffmpeg` is deliberately not required: it records video, and its
+ * absence cannot stop a page from opening.
+ */
+const REQUIRED_CHROMIUM_BROWSERS = ['chromium', 'chromium-headless-shell'] as const;
+
+/**
+ * The marker Playwright writes into a bundle directory when — and only when —
+ * the download finished. Reading Playwright's own signal is what makes
+ * "browsers present" a fact rather than an inference from a directory name.
+ */
+const INSTALLATION_COMPLETE = 'INSTALLATION_COMPLETE';
+
+/** Where Playwright keeps browsers when `PLAYWRIGHT_BROWSERS_PATH=0`. */
+const PACKAGE_LOCAL_BROWSERS_DIR = '.local-browsers';
 
 /** Bound on any subprocess text echoed into an error message. */
 const MAX_ECHOED_OUTPUT = 400;
@@ -440,16 +462,29 @@ async function describe(
   context: CachePathInputs & { readonly browsersPath: string },
 ): Promise<PlaywrightResolved> {
   const version = await readVersion(packageDir);
-  const browsersPresent = paths.browsersPackageLocal
-    ? false
-    : await hasRequiredChromium(packageDir, context.browsersPath);
+  const coreDir = findPackageNear(packageDir, 'playwright-core');
+
+  // `PLAYWRIGHT_BROWSERS_PATH=0` is a SUPPORTED Playwright configuration, not
+  // an unusable one: it keeps browsers under `playwright-core/.local-browsers`.
+  // An earlier version of this module reported `browsersPresent: false` for it
+  // unconditionally, which meant a project deliberately using package-local
+  // browsers could never run a browser probe despite having a complete
+  // installation. Reported by the codex re-review of this branch. The path is
+  // resolved here rather than in `specwitnessPlaywrightCacheDir` because it
+  // depends on WHICH package resolved, which that pure function cannot know.
+  const browsersPath =
+    paths.browsersPackageLocal && coreDir !== null
+      ? join(coreDir, PACKAGE_LOCAL_BROWSERS_DIR)
+      : context.browsersPath;
+
+  const browsersPresent = await hasRequiredChromium(packageDir, browsersPath);
 
   return {
     source,
     packageDir,
     cliPath: join(packageDir, 'cli.js'),
     version,
-    browsersPath: context.browsersPath,
+    browsersPath,
     browsersPathFromEnv: paths.browsersPathFromEnv,
     browsersPresent,
     ready: browsersPresent,
@@ -474,67 +509,73 @@ async function readVersion(packageDir: string): Promise<string | null> {
 }
 
 /**
- * True when the registry holds the chromium build THIS Playwright requires.
+ * True when the registry holds a COMPLETE copy of every chromium bundle THIS
+ * Playwright requires.
  *
- * ⚠️ A PREFIX MATCH IS NOT ENOUGH, and this is the correction that matters most
- * in the file. Playwright's registry accumulates one directory per revision, so
- * a developer machine routinely carries several — the machine this was written
- * on carried `chromium-1208`, `-1217`, `-1228` and `-1234` side by side while
- * the pinned 1.62.1 required exactly `1234`. Accepting any `chromium-*` would
- * therefore report `ready` for a registry that cannot launch this Playwright at
- * all: provisioning would skip the download it needed, and the failure would
- * surface later as Playwright's own missing-executable error, from a machine
- * `doctor` had already called green. That is the green-for-nothing shape this
- * story exists to keep out of Epic 5, arriving through the third fact rather
- * than the first. Reported by the codex review of this branch.
+ * Three things had to be got right here, and the first two were got wrong first:
  *
- * The required revision comes from `playwright-core`'s `browsers.json` — the
- * same table `playwright install` itself reads.
+ * ONE — A PREFIX MATCH IS NOT ENOUGH. Playwright's registry accumulates one
+ * directory per revision, so a developer machine routinely carries several: the
+ * machine this was written on carried `chromium-1208`, `-1217`, `-1228` and
+ * `-1234` side by side while the pinned 1.62.1 required exactly `1234`.
+ * Accepting any `chromium-*` reported `ready` for a registry that could not
+ * launch this Playwright at all.
  *
- * FAIL-CLOSED when the revision cannot be determined: `false`, never a fallback
- * to the prefix match. An installation whose `playwright-core` cannot be found
- * is one `playwright install` could not drive either, so the honest answer is
- * "not ready" plus the provisioning path's real diagnosis, rather than a guess
- * that happens to look green.
+ * TWO — A DIRECTORY IS NOT AN INSTALLATION. An interrupted download leaves the
+ * revision directory behind with nothing usable in it, so the name matching is
+ * necessary and not sufficient. Playwright writes `INSTALLATION_COMPLETE` into
+ * a bundle when the download finished, and reading its own marker is what makes
+ * this a fact rather than an inference.
+ *
+ * THREE — CHROMIUM IS TWO BUNDLES. Current Playwright launches headless through
+ * a separate `chromium_headless_shell-<revision>`, which every browser probe
+ * will use by default.
+ *
+ * All three failures share one shape: provisioning skips a download it needed,
+ * `doctor` reports success, and the failure surfaces later as Playwright's own
+ * missing-executable error from a machine already called green. That is the
+ * green-for-nothing hazard of this story arriving through the third fact rather
+ * than the first. Both corrections came from the codex reviews of this branch.
+ *
+ * FAIL-CLOSED throughout: anything that cannot be determined is `false`, never
+ * a guess that happens to look green.
  */
 async function hasRequiredChromium(packageDir: string, browsersPath: string): Promise<boolean> {
-  const revision = await requiredChromiumRevision(packageDir);
-  if (revision === null) {
+  const bundles = await requiredChromiumBundles(packageDir);
+  if (bundles === null || bundles.length === 0) {
     return false;
   }
 
+  for (const bundle of bundles) {
+    if (!(await isCompleteBundle(join(browsersPath, bundle)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** True when Playwright's own completeness marker is in the bundle directory. */
+async function isCompleteBundle(bundleDir: string): Promise<boolean> {
   try {
-    const entries = await readdir(browsersPath);
-    return entries.includes(`${CHROMIUM_BROWSER_NAME}-${revision}`);
+    const marker = await stat(join(bundleDir, INSTALLATION_COMPLETE));
+    return marker.isFile();
   } catch {
     return false;
   }
 }
 
 /**
- * The chromium revision this Playwright requires, from its own `playwright-core`.
+ * The bundle DIRECTORY NAMES this Playwright needs, e.g.
+ * `['chromium-1234', 'chromium_headless_shell-1234']`, or `null` when the
+ * revision table could not be read.
  *
- * ⚠️ `require.resolve` IS NOT USED HERE, and the reason is a hazard worth
- * recording: **Node's CommonJS resolution consults `NODE_PATH` (and the legacy
- * global folders) as a fallback after the `node_modules` walk, and the `paths`
- * option does NOT suppress it** — both measured on the installed Node before
- * this was written. Vitest sets `NODE_PATH` to SpecWitness's own pnpm
- * directories, so `require.resolve('playwright-core')` from an unrelated
- * directory answered with SPECWITNESS's core, and a fixture Playwright with no
- * core of its own was handed this repository's revision table. That is the
- * hoisting hazard again wearing a different hat: a fact about SpecWitness's
- * installation reported as a fact about someone else's.
- *
- * The `node_modules` chain above the resolved package is therefore walked
- * directly, with no global fallback. It finds a project-local
- * `node_modules/playwright-core`, and it finds pnpm's hoisted
- * `node_modules/.pnpm/node_modules/playwright-core` — both of which really are
- * part of the same installation — and nothing else.
- *
- * `browsers.json` is read from disk rather than imported: `playwright-core`'s
- * `exports` map does not expose it (`ERR_PACKAGE_PATH_NOT_EXPORTED`).
+ * Playwright's directory convention is the browser name with `-` replaced by
+ * `_`, then the revision — `chromium-headless-shell` becomes
+ * `chromium_headless_shell-1234`. Taken from `playwright-core`'s
+ * `browsers.json`, the same table `playwright install` itself reads, so the two
+ * cannot disagree about what a complete install looks like.
  */
-async function requiredChromiumRevision(packageDir: string): Promise<string | null> {
+async function requiredChromiumBundles(packageDir: string): Promise<string[] | null> {
   const coreDir = findPackageNear(packageDir, 'playwright-core');
   if (coreDir === null) {
     return null;
@@ -546,21 +587,32 @@ async function requiredChromiumRevision(packageDir: string): Promise<string | nu
     if (!Array.isArray(browsers)) {
       return null;
     }
-    for (const browser of browsers as { name?: unknown; revision?: unknown }[]) {
-      if (browser.name === CHROMIUM_BROWSER_NAME) {
-        const revision = browser.revision;
-        if (typeof revision === 'string' && revision !== '') {
-          return revision;
-        }
-        if (typeof revision === 'number') {
-          return String(revision);
-        }
+
+    const bundles: string[] = [];
+    for (const name of REQUIRED_CHROMIUM_BROWSERS) {
+      const entry = (browsers as { name?: unknown; revision?: unknown }[]).find(
+        (candidate) => candidate.name === name,
+      );
+      if (entry === undefined) {
+        // A table that does not describe a browser we need is a table we cannot
+        // check against. Fail closed rather than check a subset.
+        return null;
       }
+      const revision =
+        typeof entry.revision === 'string'
+          ? entry.revision
+          : typeof entry.revision === 'number'
+            ? String(entry.revision)
+            : '';
+      if (revision === '') {
+        return null;
+      }
+      bundles.push(`${name.replaceAll('-', '_')}-${revision}`);
     }
+    return bundles;
   } catch {
-    // Unreadable, or an unexpected shape. Fail closed above.
+    return null;
   }
-  return null;
 }
 
 /**
@@ -702,18 +754,30 @@ export async function provisionPlaywright(options: ProvisionOptions): Promise<Pl
   const context = withDefaults(options);
   const paths = specwitnessPlaywrightCacheDir(context);
 
-  if (paths.browsersPackageLocal) {
-    throw new InfraError(
-      `PLAYWRIGHT_BROWSERS_PATH=${BROWSERS_PATH_PACKAGE_LOCAL} asks Playwright to keep browsers ` +
-        `inside its own package directory, which SpecWitness's cache layout cannot provision into`,
-      'unset PLAYWRIGHT_BROWSERS_PATH, or point it at a directory SpecWitness may write to, ' +
-        'then run the command again',
-    );
-  }
-
+  // READINESS IS CHECKED FIRST, before any refusal. An earlier version rejected
+  // `PLAYWRIGHT_BROWSERS_PATH=0` outright, which turned a supported and
+  // COMPLETE package-local installation into an unusable one — a refusal aimed
+  // at a configuration SpecWitness cannot write into, fired at one it did not
+  // need to write into at all. Reported by the codex re-review of this branch.
   const existing = await resolvePlaywrightEnvironment(options);
   if (existing.ready) {
     return existing;
+  }
+
+  if (paths.browsersPackageLocal) {
+    // Still a refusal, and still exit 3 — but now only when something actually
+    // has to be downloaded. `=0` puts the bundle inside the Playwright package,
+    // which for a project's installation means inside the project's own
+    // `node_modules`: a target repository that gained a browser bundle because
+    // it was verified would have been damaged by its verifier (AC1, FR-24).
+    throw new InfraError(
+      `PLAYWRIGHT_BROWSERS_PATH=${BROWSERS_PATH_PACKAGE_LOCAL} asks Playwright to keep browsers ` +
+        `inside its own package directory, and SpecWitness will not write a browser bundle into ` +
+        `a project's tree`,
+      `run \`npx playwright install ${PROVISIONED_BROWSER}\` yourself to populate it, or unset ` +
+        'PLAYWRIGHT_BROWSERS_PATH (or point it at a directory SpecWitness may write to) and run ' +
+        'the command again',
+    );
   }
 
   if (existing.source === 'project') {
