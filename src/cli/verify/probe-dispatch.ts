@@ -67,6 +67,8 @@ import {
 } from '../../pipeline/stages/gate-command.js';
 import { resolveServiceBaseUrl } from '../../pipeline/stages/services.js';
 import type { ProbeDispatch, ProbeDispatcher, RetryPolicy } from '../../pipeline/stages/probes.js';
+import { BrowserSurfaceExecutor } from '../../surfaces/browser.js';
+import type { BrowserRuntimeEnvironment } from '../../surfaces/browser.js';
 import { HttpSurfaceExecutor } from '../../surfaces/http.js';
 import { ObservationSurfaceExecutor } from '../../surfaces/observation.js';
 import { ShellSurfaceExecutor } from '../../surfaces/shell.js';
@@ -77,6 +79,35 @@ export interface ProbeDispatchDeps {
   readonly clock: Clock;
   /** `RunStore.writeEvidenceFile` with the run id already applied. */
   readonly writeEvidence: (relativeName: string, contents: string) => Promise<string>;
+  /**
+   * `RunStore.writeEvidenceBytes` with the run id already applied (story 5.2).
+   *
+   * The browser surface is the only one with BINARY evidence - a trace archive and a
+   * screenshot - and the text writer encodes as UTF-8, which corrupts both. AD-8 keeps
+   * `RunStore` the sole writer beneath `.specwitness/runs/`, so this is a second injected
+   * callback rather than a licence for the Playwright subprocess to write there itself.
+   */
+  readonly writeEvidenceBytes: (relativeName: string, contents: Uint8Array) => Promise<string>;
+  /**
+   * Turns a run-relative evidence path into an absolute one (story 5.2).
+   *
+   * Needed for exactly one thing: Playwright's own CLI is a separate process and has to
+   * OPEN the generated spec and config, while Q30/Q31 require those files to live in the
+   * run directory. The executor still constructs no path beneath `.specwitness/runs/`; it
+   * asks the only layer that knows where the run directory is to resolve one it was
+   * already handed.
+   */
+  readonly resolveRunPath: (runRelativePath: string) => string;
+  /**
+   * The Playwright environment story 5.1 resolved, or its `absent` answer.
+   *
+   * Resolved ONCE at the composition root rather than per probe: resolution is read-only,
+   * performs no network I/O and never spawns, but it does touch the filesystem, and a run
+   * with fifty browser probes has no reason to ask fifty times. The executor branches on
+   * `ready` and refuses with `InfraError` - never a skip - so passing an `absent` answer
+   * through is correct and is what makes that refusal testable.
+   */
+  readonly playwright: BrowserRuntimeEnvironment;
   /** `RunStore.recordProcessGroup` — AD-8, so `specwitness clean` can reap a probe. */
   readonly onProcessGroup: (pgid: number) => void | Promise<void>;
   /** Config-declared extra redaction patterns (AD-10). */
@@ -186,15 +217,44 @@ export function createProbeDispatcher(deps: ProbeDispatchDeps): ProbeDispatcher 
         };
 
       case 'browser':
-        // `browser` is in `PROBE_SURFACES` and has no executor: EPIC 5 owns it, and nothing
-        // in Epic 4 adds `@playwright/test`. Refused as infrastructure (exit 3) rather than
-        // skipped, because a browser probe silently contributing nothing would let a plan
-        // that mapped a criterion to a browser check report PASS having checked nothing.
-        throw new InfraError(
-          `probe '${probe.id}' uses the browser surface, which this build cannot execute`,
-          'browser probes arrive in Epic 5 — recompile the plan without them, or carry the ' +
-            "criterion as needs-human with reason 'not-safely-automatable' until then",
-        );
+        // ⚠️ WHAT USED TO BE HERE, AND WHY IT IS GONE.
+        //
+        // Throughout Epic 4 this arm threw an `InfraError` reading "probe '<id>' uses the
+        // browser surface, which this build cannot execute / browser probes arrive in
+        // Epic 5". That refusal was DELIBERATE and it was correct at the time: `browser`
+        // was already in `PROBE_SURFACES`, so a plan could map a criterion to a browser
+        // check, and a probe silently contributing nothing would have let that criterion
+        // report PASS having checked nothing - the standing green-for-nothing hazard.
+        //
+        // Story 5.2 replaces the refusal with an executor. The obligation the refusal
+        // carried transfers with it and is NOT discharged: `src/surfaces/browser.ts` has
+        // no skip path anywhere, every route by which its probe could produce no attempts
+        // is an `InfraError` or an `execError`, and an unprovisioned Playwright refuses
+        // here in 5.1's own words rather than quietly contributing nothing.
+        //
+        // The `switch` is exhaustive, so this arm could not have been left behind.
+        return {
+          executor: new BrowserSurfaceExecutor({
+            clock: deps.clock,
+            runner: deps.runner,
+            cwd,
+            environment: deps.playwright,
+            writeEvidenceBytes: deps.writeEvidenceBytes,
+            resolveRunPath: deps.resolveRunPath,
+            onProcessGroup: deps.onProcessGroup,
+            ...evidence,
+          }),
+          // HTTP's params shape, and for HTTP's reason: this surface needs an ORIGIN the
+          // caller must resolve, and `adapters-core-only` forbids the executor from
+          // reaching `src/config/**`. The flat shape the other two surfaces use has
+          // nowhere to put one. Epic 4 retro §5 item 5 records the divergence; e4-E and
+          // e4-F own the cleanup, and conforming beats becoming a fifth dialect.
+          params: {
+            probe,
+            baseUrl: resolveServiceBaseUrl(deps.config, probe.mechanics.serviceId),
+            attempt,
+          },
+        };
 
       default: {
         // Compile-time exhaustiveness: a fifth surface must be routed here rather than

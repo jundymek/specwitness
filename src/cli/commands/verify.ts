@@ -51,7 +51,7 @@
  * `tests/integration/verify-no-ai.test.ts`.
  */
 
-import { relative } from 'node:path';
+import { join, relative } from 'node:path';
 
 import type { Command } from 'commander';
 
@@ -80,6 +80,7 @@ import type { RefResolution, RefRole, RepoRoot, RootResolution, Vcs } from '../.
 import { SystemClock } from '../../infra/clock.js';
 import { RandomIds } from '../../infra/ids.js';
 import { createProcessRunner, terminateProcessGroup } from '../../infra/process-runner.js';
+import { resolvePlaywrightEnvironment } from '../../infra/playwright-env.js';
 import { RunStore } from '../../infra/run-store.js';
 import { createGitVcs } from '../../infra/vcs.js';
 import { runPipeline } from '../../pipeline/run-pipeline.js';
@@ -276,6 +277,11 @@ async function verify(
   // `specwitness clean` can reap.
   const created = await store.createRun({ epic });
 
+  // Which Playwright a browser probe would drive, if this plan has one (story 5.1).
+  // Resolution performs no network I/O and never spawns; it answers `absent` rather than
+  // throwing, which is what lets a run with no browser probes proceed untouched.
+  const playwright = await resolvePlaywrightEnvironment({ projectRoot });
+
   const environment: RunEnvironment = {
     nodeVersion: process.version,
     platform: process.platform,
@@ -293,6 +299,17 @@ async function verify(
     store.recordProcessGroup(created.runId, pgid);
   const writeEvidence = (relativeName: string, contents: string): Promise<string> =>
     store.writeEvidenceFile(created.runId, relativeName, contents);
+  // The BINARY twin (story 5.2). A Playwright trace is a `.zip` and a screenshot is a
+  // `.png`; the text writer encodes as UTF-8 and would corrupt both. AD-8 keeps `RunStore`
+  // the sole writer beneath `.specwitness/runs/`, so the browser executor copies bytes in
+  // through here rather than letting the Playwright subprocess write into the run.
+  const writeEvidenceBytes = (relativeName: string, contents: Uint8Array): Promise<string> =>
+    store.writeEvidenceBytes(created.runId, relativeName, contents);
+  // Playwright's own CLI is a separate process and has to OPEN the generated spec and
+  // config, which Q30/Q31 require to live in the run directory. Resolving the absolute
+  // path is this layer's job precisely so the executor never constructs one.
+  const resolveRunPath = (runRelativePath: string): string =>
+    join(created.dir, runRelativePath);
 
   // ONE registry, shared by the services stage and by teardown. Binding services
   // without a way to reap them is the composition `StageDependencies` makes
@@ -376,6 +393,16 @@ async function verify(
                 runner,
                 clock,
                 writeEvidence,
+                writeEvidenceBytes,
+                resolveRunPath,
+                // Story 5.1's answer, resolved ONCE. Read-only, offline, no spawn - so it
+                // costs a run with no browser probes almost nothing, and it is `verify`
+                // that resolves rather than `doctor` because `doctor` REPORTS and hints
+                // while never downloading. An `absent` answer is passed through rather
+                // than thrown here: only a run that actually reaches a browser probe
+                // should fail on it, and the executor refuses in 5.1's own words - never
+                // a skip, because a criterion that checked nothing must not report PASS.
+                playwright,
                 onProcessGroup: recordProcessGroup,
               }),
               // Story 5.4. Zero for every surface unless the project declared otherwise,

@@ -81,7 +81,7 @@ development_status:
 
   epic-5: in-progress
   5-1-playwright-integration-environment-resolution: done
-  5-2-browser-probe-executor-with-trace-evidence: ready-for-dev
+  5-2-browser-probe-executor-with-trace-evidence: done
   5-3-human-judgment-criteria-flow: done
   5-4-flakiness-retry-semantics: done
   5-5-failure-explanation-explainer-role: ready-for-dev
