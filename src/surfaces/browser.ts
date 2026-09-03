@@ -562,14 +562,41 @@ function describe(error) {
   return error && typeof error.message === 'string' ? error.message : String(error);
 }
 
+// ⚠️ AD-3, AT THE ONE PLACE A PATH RULE CANNOT REACH. 'goto' is held to a service-relative
+// path before any I/O, but a CLICK is not a path: it follows whatever the page put in an
+// href, and the page is written by the system under verification. A step like
+// click "a[href='https://production.example']" - or a plain server-side redirect to another
+// host - would otherwise drive the verifier at an undeclared origin and then read the
+// resulting page as evidence. Found by the codex review of this branch.
+//
+// So the origin is re-checked after EVERY navigation and before ANY value is read. Leaving
+// the declared service is an infrastructure failure, not a product observation: nothing was
+// adjudicated, and nothing from an undeclared host may become evidence.
+function assertOrigin(page, payload) {
+  let current;
+  try {
+    current = new URL(page.url()).origin;
+  } catch (error) {
+    current = page.url();
+  }
+  if (current !== payload.origin) {
+    throw new Error(
+      'the page left the declared service origin: now at ' + current +
+        ', expected ' + payload.origin +
+        '. A browser probe may only ever be driven at the service the project declared',
+    );
+  }
+}
+
 test('specwitness browser probe', async ({ page, context }) => {
   const outcome = { ok: false, phase: 'start', message: 'the driver did not run', reads: {} };
 
-  try {
-    await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
-  } catch (error) {
-    outcome.tracing = 'unavailable: ' + describe(error);
-  }
+  // NOT WRAPPED, and that is the fix for a defect the codex review found: the failure used
+  // to be stored in a field nothing read, so a probe whose tracing never started could still
+  // report PASS - with none of the trace evidence AC1 requires (Q32). Required evidence that
+  // cannot be produced is an infrastructure failure, exactly as a persistence failure is.
+  // Throwing here leaves 'ok: false', which the executor classifies as an execError.
+  await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
 
   try {
     page.setDefaultTimeout(payload.stepTimeoutMs);
@@ -577,6 +604,7 @@ test('specwitness browser probe', async ({ page, context }) => {
 
     outcome.phase = 'navigate';
     await page.goto(payload.url, { waitUntil: 'load' });
+    assertOrigin(page, payload);
 
     for (let index = 0; index < payload.steps.length; index += 1) {
       const step = payload.steps[index];
@@ -593,9 +621,14 @@ test('specwitness browser probe', async ({ page, context }) => {
       } else {
         throw new Error('the payload carried a verb this driver does not implement');
       }
+      // After EVERY step, not only after a goto: a click is the one that can leave.
+      assertOrigin(page, payload);
     }
 
     outcome.phase = 'read';
+    // And once more immediately before anything is read, so no value from an undeclared
+    // host can ever become an observation.
+    assertOrigin(page, payload);
     for (const read of payload.reads) {
       outcome.reads[read.key] = await readOne(page, read);
     }
@@ -778,6 +811,14 @@ interface ScenarioRead {
 
 interface ScenarioPayload {
   readonly url: string;
+  /**
+   * The declared service's origin, which the page may never leave (AD-3).
+   *
+   * `goto` is held to a service-relative path, but a CLICK is not a path — it follows
+   * whatever the page put in an `href`, and the page is written by the system under
+   * verification. So the origin is carried as data and re-checked after every navigation.
+   */
+  readonly origin: string;
   readonly steps: readonly ScenarioStep[];
   readonly reads: readonly ScenarioRead[];
   readonly stepTimeoutMs: number;
@@ -817,7 +858,13 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     const url = buildUrl(baseUrl, probe.mechanics.path);
     const steps = parseScenario(probe.mechanics.scenario, request.criterionId, baseUrl, redaction);
     const reads = probe.assertions.map((assertion, index) => readFor(assertion.target, index));
-    const payload: ScenarioPayload = { url, steps, reads, stepTimeoutMs };
+    const payload: ScenarioPayload = {
+      url,
+      origin: new URL(baseUrl).origin,
+      steps,
+      reads,
+      stepTimeoutMs,
+    };
 
     const stem = evidenceStem(request.criterionId, probe.id, attempt);
     const startedAt = this.#deps.clock.now();
@@ -945,7 +992,12 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     const tracePath = join(workspace, 'trace.zip');
     const screenshotPath = join(workspace, 'screenshot.png');
 
-    const { timeoutMs, testTimeoutMs } = this.#bounds(stepTimeoutMs);
+    // The aggregate bound has to know HOW MANY independently-bounded operations there are:
+    // one initial navigation, one per scenario step, and one per assertion read.
+    const { timeoutMs, testTimeoutMs } = this.#bounds(
+      stepTimeoutMs,
+      1 + payload.steps.length + payload.reads.length,
+    );
 
     // AD-3: ARGV, never a command line. `process.execPath` running Playwright's own CLI is
     // SpecWitness's own hard-coded invocation, on the same footing as 5.1's `npm` spawn and
@@ -1007,9 +1059,15 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     // So a verdict requires BOTH: the driver said it observed the page, AND the process that
     // ran it completed with exit 0. Anything else is `execError`.
     const runnerFailed = result.outcome !== 'completed' || result.exitCode !== 0;
+    // ⚠️ AND THE TRACE MUST ACTUALLY HAVE LANDED. AC1 requires a trace stored as evidence
+    // (Q32), so an attempt that observed the page but produced no trace has not met the
+    // story's own evidence bar. Tracing that cannot START now throws inside the driver; this
+    // covers the other half - tracing that started and could not be WRITTEN. Reporting PASS
+    // there would be the evidence-less green the persistence fix one method below refuses.
+    const traceMissing = outcome !== undefined && outcome.ok && outcome.trace !== true;
     const execError =
-      outcome === undefined || !outcome.ok || runnerFailed
-        ? classifyFailure(result, outcome, url, timeoutMs, redaction)
+      outcome === undefined || !outcome.ok || runnerFailed || traceMissing
+        ? classifyFailure(result, outcome, url, timeoutMs, redaction, traceMissing)
         : undefined;
 
     const evaluations =
@@ -1195,11 +1253,27 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
    * exceeds the test bound, because a spawn killed before its own runner could time out
    * would report every slow machine as an unclassifiable hang.
    */
-  #bounds(stepTimeoutMs: number): { timeoutMs: number; testTimeoutMs: number } {
-    // The runner has to boot, resolve a config, start a worker and launch a browser before
-    // the first navigation, and write a trace archive afterwards. None of that is covered by
-    // the per-action timeout, so the head-room is added rather than assumed away.
-    const testTimeoutMs = stepTimeoutMs + BROWSER_RUNNER_OVERHEAD_MS;
+  #bounds(
+    stepTimeoutMs: number,
+    operations: number,
+  ): { timeoutMs: number; testTimeoutMs: number } {
+    // ⚠️ THE AGGREGATE MUST BE AT LEAST THE SUM OF THE PARTS, and the first version was not.
+    // It fixed the test bound at `stepTimeoutMs + overhead`, so a scenario whose every
+    // operation finished well inside its own documented 30-second bound could still be killed
+    // by the aggregate — a 20-second navigation and two 25-second actions add to 70 against a
+    // 60-second ceiling. That converts honest work into a spurious exit 3, which is the exact
+    // misclassification this module exists to prevent, arriving from the timeout arithmetic
+    // rather than from the classification code. Found by the codex review of this branch.
+    //
+    // So the bound scales with the number of independently-bounded operations. It can get
+    // large for a long scenario, and that is correct: it is a BOUND, not a wait. Nothing is
+    // slower because the ceiling is higher — only a genuinely hung probe ever reaches it, and
+    // capping it lower would reintroduce the false timeout.
+    //
+    // The runner also has to boot, resolve a config, start a worker and launch a browser
+    // before the first navigation, and write a trace archive afterwards; none of that is
+    // covered by a per-action timeout, so the head-room is added rather than assumed away.
+    const testTimeoutMs = Math.max(1, operations) * stepTimeoutMs + BROWSER_RUNNER_OVERHEAD_MS;
     const requested = this.#deps.timeoutMs ?? BROWSER_PROBE_TIMEOUT_MS;
 
     return {
@@ -1806,9 +1880,21 @@ function classifyFailure(
   url: string,
   timeoutMs: number,
   redaction: RedactionOptions | undefined,
+  traceMissing = false,
 ): ProbeExecError {
   const redact = (text: string): string => redactText(text, redaction);
   const safeUrl = redact(url);
+
+  if (traceMissing) {
+    return {
+      message: redact(
+        `the browser probe against ${safeUrl} observed the page, but no Playwright trace was ` +
+          'captured, so the evidence this story requires does not exist',
+      ),
+      hint: 'a trace is required evidence (AC1/Q32), not a convenience — check that the ' +
+        'run directory is writable and that this Playwright build supports tracing',
+    };
+  }
 
   if (result.outcome === 'not-found') {
     return {

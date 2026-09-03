@@ -127,12 +127,23 @@ interface RunInput {
    * permissions change, or a containment refusal. Everything else stays real.
    */
   readonly failEvidenceBytes?: boolean;
+  /**
+   * Rewrites the driver's result file after a fully real run, to reach the one state that
+   * cannot be produced deterministically from outside: the page WAS observed and the trace
+   * was not written. Everything else stays real — a real browser, a real page, a real
+   * result file — and only the `trace` flag the driver itself wrote is flipped.
+   */
+  readonly dropTraceFromResult?: boolean;
 }
 
 interface Executed {
   readonly attempt: ProbeAttempt;
   readonly sink: EvidenceSink;
-  readonly spawns: readonly { binary: string; args: readonly string[] }[];
+  readonly spawns: readonly {
+    binary: string;
+    args: readonly string[];
+    env: { set?: Record<string, string> };
+  }[];
 }
 
 async function execute(input: RunInput): Promise<Executed> {
@@ -145,14 +156,30 @@ async function execute(input: RunInput): Promise<Executed> {
   sinks.push(sink);
   const recording = createRecordingRunner();
   const forced = input.forceProcessOutcome;
+  const dropTrace = input.dropTraceFromResult === true;
   const runner =
-    forced === undefined
+    forced === undefined && !dropTrace
       ? recording
       : {
-          run: async (options: Parameters<typeof recording.run>[0]) => ({
-            ...(await recording.run(options)),
-            ...forced,
-          }),
+          run: async (options: Parameters<typeof recording.run>[0]) => {
+            const result = await recording.run(options);
+            if (dropTrace) {
+              // The driver wrote this file itself, moments ago. Flip only its trace flag.
+              const resultPath = options.env.set?.['SPECWITNESS_BROWSER_RESULT'];
+              if (resultPath !== undefined) {
+                const { readFile, writeFile } = await import('node:fs/promises');
+                const written = JSON.parse(await readFile(resultPath, 'utf8')) as {
+                  trace?: boolean;
+                };
+                await writeFile(
+                  resultPath,
+                  JSON.stringify({ ...written, trace: false }),
+                  'utf8',
+                );
+              }
+            }
+            return { ...result, ...(forced ?? {}) };
+          },
         };
 
   const executor = new BrowserSurfaceExecutor({
@@ -513,6 +540,120 @@ describeWithBrowser('AD-6/AD-7: could not look is ERROR, and never FAIL', () => 
   );
 });
 
+describeWithBrowser('AD-3: the page may not leave the declared service origin', () => {
+  it(
+    'a click that navigates off-origin is execError, and reads nothing from that host',
+    async () => {
+      // ⚠️ THE HOLE A PATH RULE CANNOT REACH, and it is a real one: `goto` is validated as
+      // service-relative before any I/O, but a CLICK follows whatever the page put in an
+      // href — and the page is written by the system under verification. A provider-authored
+      // step like click "a[href='https://production.example']" would otherwise drive the
+      // verifier at an undeclared host and then read that page as evidence. Found by the
+      // codex review of this branch.
+      //
+      // PRODUCED, not mocked: a SECOND fixture server on its own ephemeral port is a
+      // genuinely different origin, and the first server serves a real link to it.
+      const other = await startFixtureApp((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end(ordersPage('<h1 id="heading">Undeclared host</h1>'));
+      });
+
+      try {
+        const linking = await startFixtureApp((_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(
+            ordersPage(`<a id="away" href="${other.baseUrl}/elsewhere">go</a>`),
+          );
+        });
+
+        try {
+          const { attempt } = await execute({
+            baseUrl: linking.baseUrl,
+            path: '/orders',
+            scenario: 'click "#away"',
+            assertions: [
+              {
+                description: 'the heading of whatever page we end up on',
+                target: { source: 'text', selector: '#heading' },
+                comparison: 'equals',
+                expected: 'Undeclared host',
+              },
+            ],
+          });
+
+          // It is an INFRASTRUCTURE failure, not a product observation: the probe could not
+          // be completed safely, so nothing was adjudicated.
+          expect(attempt.execError).toBeDefined();
+          expect(attempt.execError?.message).toContain('left the declared service origin');
+          expect(attempt.assertionEvaluations).toHaveLength(0);
+          expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+
+          // And nothing from the undeclared host became evidence — the assertion that would
+          // have been SATISFIED there was never evaluated at all.
+          expect(JSON.stringify(attempt.assertionEvaluations)).not.toContain('Undeclared host');
+        } finally {
+          await linking.close();
+        }
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'STOPS INTERACTING the moment it leaves the origin — the beacon is never reached',
+    async () => {
+      // ⚠️ THIS TEST EXISTS BECAUSE THE FIRST VERSION OF THE ONE ABOVE WAS VACUOUS. Removing
+      // the per-STEP origin check left that test green, because the check before the READS
+      // caught the same violation — so the suite proved the probe would not REPORT on an
+      // undeclared host, and proved nothing about whether it would keep DRIVING one. Those
+      // are different hazards: a scenario that clicks away and then fills a field is typing
+      // into a host the project never declared.
+      //
+      // So this drives two steps and asserts the second never happened, observed from the
+      // undeclared server's own request log rather than from anything the executor reports.
+      const beaconHits: string[] = [];
+      const other = await startFixtureApp((request, response) => {
+        beaconHits.push(request.url ?? '');
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end(ordersPage('<a id="beacon" href="/beacon">deeper</a>'));
+      });
+
+      try {
+        const linking = await startFixtureApp((_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(ordersPage(`<a id="away" href="${other.baseUrl}/first">go</a>`));
+        });
+
+        try {
+          const { attempt } = await execute({
+            baseUrl: linking.baseUrl,
+            path: '/orders',
+            scenario: ['click "#away"', 'click "#beacon"'].join('\n'),
+            assertions: [HEADING_IS_ORDERS],
+          });
+
+          expect(attempt.execError).toBeDefined();
+          expect(attempt.execError?.message).toContain('left the declared service origin');
+          // Step 1 reached the undeclared host — that is the navigation we could not prevent,
+          // only detect. Step 2 must never have run.
+          expect(beaconHits).toContain('/first');
+          expect(beaconHits, 'the scenario kept driving an undeclared host').not.toContain(
+            '/beacon',
+          );
+          expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+        } finally {
+          await linking.close();
+        }
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
 describeWithBrowser('evidence: two channels, both artifacts, and one honest limitation', () => {
   it(
     'stores a real trace and a real screenshot, refs them, and records the typed member',
@@ -626,6 +767,62 @@ describeWithBrowser('evidence: two channels, both artifacts, and one honest limi
       expect(member.trace).toBeUndefined();
       expect(member.screenshot).toBeUndefined();
       expect(member.explanation).toContain('no trace was captured');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'REFUSES a pass when the page was observed but no trace landed (codex P1)',
+    async () => {
+      // AC1 requires a trace stored as evidence (Q32). An attempt that observed the page and
+      // produced no trace has not met the story's own evidence bar, and reporting PASS there
+      // is the evidence-less green that the persistence fix beside it also refuses.
+      const { attempt } = await execute({
+        assertions: [HEADING_IS_ORDERS],
+        dropTraceFromResult: true,
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.execError?.message).toContain('no Playwright trace was captured');
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'scales the aggregate test bound with the number of bounded operations (codex P2)',
+    async () => {
+      // ⚠️ A FIXED AGGREGATE KILLS VALID WORK. With the bound fixed at `stepTimeoutMs +
+      // overhead`, a scenario whose every operation finished inside its own documented 30s
+      // bound could still be terminated by the aggregate — converting honest work into a
+      // spurious exit 3, which is this module's own headline misclassification arriving
+      // through the timeout arithmetic. Found by the codex review of this branch.
+      const step = 5_000;
+      const overhead = 30_000;
+
+      const one = await execute({
+        stepTimeoutMs: step,
+        assertions: [HEADING_IS_ORDERS],
+      });
+      const many = await execute({
+        stepTimeoutMs: step,
+        scenario: ['click "#apply"', 'click "#apply"', 'click "#apply"'].join('\n'),
+        assertions: [
+          HEADING_IS_ORDERS,
+          { description: 'title', target: { source: 'title' }, comparison: 'equals', expected: 'Orders' },
+        ],
+      });
+
+      const boundOf = (spawns: readonly { env: { set?: Record<string, string> } }[]): number =>
+        Number(spawns[0]?.env.set?.['SPECWITNESS_BROWSER_TIMEOUT'] ?? '0');
+
+      // 1 navigation + 0 steps + 1 read = 2 operations.
+      expect(boundOf(one.spawns as never)).toBe(2 * step + overhead);
+      // 1 navigation + 3 steps + 2 reads = 6 operations.
+      expect(boundOf(many.spawns as never)).toBe(6 * step + overhead);
+      // The aggregate is at least the sum of the parts, which is the property that matters.
+      expect(boundOf(many.spawns as never)).toBeGreaterThan(boundOf(one.spawns as never));
     },
     TEST_TIMEOUT_MS,
   );
