@@ -153,7 +153,15 @@ export function createStages(deps: StageDependencies): Stage[] {
     createServicesStage(deps.services),
     createDataStage(deps.data),
     createProbesStage(deps.probes),
-    createAggregateStage(),
+    // Handed the SAME plan the probes stage receives, so a criterion this stage has to
+    // materialise carries the reviewer guidance the probes stage would have given it.
+    // ADR-003 makes that necessary rather than tidy: a gate failure skips `probes`
+    // entirely, and without this a human criterion in a gate-failed run reaches its
+    // reviewer with no guidance at all (story 5.3).
+    createAggregateStage({
+      criteria: deps.probes?.criteria,
+      redaction: deps.probes?.redaction,
+    }),
     createPersistStage(deps.persist ?? {}),
     createTeardownStage(deps.teardown ?? {}),
   ];

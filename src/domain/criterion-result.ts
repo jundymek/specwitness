@@ -25,9 +25,9 @@
  */
 
 import type { Severity, Verifiability } from './contract.js';
-import { redactText } from './evidence.js';
-import type { EvidenceRef, RedactionOptions } from './evidence.js';
-import type { CriterionResult, CriterionStatus } from './result.js';
+import { boundedText, redactText } from './evidence.js';
+import type { BoundedText, EvidenceRef, RedactionOptions } from './evidence.js';
+import type { CriterionResult, CriterionStatus, NeedsHumanReason } from './result.js';
 
 /** The four probe surfaces (AD-13). All implement the same executor interface. */
 export const PROBE_SURFACES = ['http', 'browser', 'observation', 'shell'] as const;
@@ -164,6 +164,43 @@ export interface DerivedCriterionResult extends CriterionResult {
    * later than expected.
    */
   readonly attempts?: readonly CriterionAttemptRecord[];
+  /**
+   * WHY this criterion is `needs_human` — Q39's two compile-time triggers, told apart.
+   *
+   * Present only on `needs_human` results, and only when a caller recorded it. They are
+   * different kinds of fact with different remedies (`domain/plan.ts:102-119`), and the
+   * difference is actionable rather than decorative: `not-safely-automatable` means the
+   * plan-author could not map an AUTOMATED criterion to a probe it would stand behind, and
+   * sharpening such a criterion often makes it automatable. `human-verifiability` means
+   * the contract's author wrote that no machine may answer it, and no amount of sharpening
+   * will change that. A report that collapses the two tells a reviewer to attempt the
+   * impossible or to give up on the tractable.
+   *
+   * CARRIED, NEVER INFERRED. In the `verifiability: human` branch this value is derivable
+   * from the contract — and deriving it is still refused, because it would put a fact in
+   * the result whose source is this function rather than a recorded input. The plan gate
+   * (`schemas/plan.ts:1103-1124`) already refuses any plan whose reason disagrees with its
+   * contract, with its own message; duplicating that judgement here would create a second
+   * place for the two to disagree.
+   */
+  readonly needsHumanReason?: NeedsHumanReason;
+  /**
+   * The plan's reviewer guidance: what a person must actually check.
+   *
+   * Present only on `needs_human` results. Story 5.3 exists because this was missing: the
+   * plan schema requires guidance on every `needs-human` arm, the plan-author is instructed
+   * to write it, and it was dropped at `pipeline/stages/probes.ts` — so a NEEDS_HUMAN
+   * criterion reached a human with the contract's statement and nothing else. NEEDS_HUMAN
+   * is exit 2, and exit 2 is a STOP; a stop that does not say what to look at is a stop
+   * people learn to override.
+   *
+   * `BoundedText` rather than a bare string because this is UNTRUSTED PROVIDER TEXT that
+   * gets both treatments. It is redacted for the same reason `expected`/`actual` are — it
+   * is persisted to result.json and printed to a terminal exactly like evidence is — and it
+   * is bounded because, unlike those two, it is model-written prose with no length
+   * discipline, printed into a report an agent may be reading (FR-29).
+   */
+  readonly reviewerGuidance?: BoundedText;
 }
 
 /**
@@ -248,9 +285,66 @@ export interface DerivationOptions extends RedactionOptions {
    * this interface exists at all — one options bag reaching the single producer.
    */
   readonly probeId?: string;
+  /**
+   * The plan's recorded reason for carrying this criterion as needs-human.
+   *
+   * Threaded here rather than beside `RedactionOptions` for the reason the type's own
+   * header gives: one options bag reaching the single producer. `plannedNeedsHuman` above
+   * is the worked precedent — story 4.7 added it the same way, and every existing call
+   * site kept compiling unchanged.
+   *
+   * Note this is INDEPENDENT of `plannedNeedsHuman`. A `verifiability: human` criterion
+   * takes the first branch below and never sets that flag, but still has a reason worth
+   * reporting; a `not-safely-automatable` deferral sets both.
+   */
+  readonly needsHumanReason?: NeedsHumanReason;
+  /**
+   * The plan's reviewer guidance, RAW.
+   *
+   * Redaction and bounding are this function's job, not the caller's, and that placement
+   * is the point rather than a convenience: AD-10 says redaction happens at capture, and
+   * `deriveCriterionResult` is where `expected`/`actual` are already redacted. A caller
+   * that had to remember to redact is a caller that eventually forgets, and the field it
+   * forgets on is the one carrying arbitrary text from a provider CLI.
+   */
+  readonly reviewerGuidance?: string;
 }
 
 /** How one attempt came out, before retry orchestration is considered. */
+/**
+ * The reviewer-facing half of a `needs_human` result: why, and what to check.
+ *
+ * Story 5.3. Split out rather than inlined because BOTH `needs_human` returns must carry
+ * it identically — the contract's `verifiability: human` and the plan's own refusal are
+ * different triggers reaching the same reader, and a reviewer should not be able to tell
+ * from the shape of the report which door the criterion came through.
+ *
+ * REDACTED AND BOUNDED HERE, at derivation, which is where `expected`/`actual` are already
+ * redacted and for the same stated reason: this text is persisted to result.json and
+ * printed to a terminal exactly like evidence is, so it is otherwise a path by which a
+ * captured credential reaches a stored run unredacted. `boundedText` does both in one call
+ * — it redacts first, then caps — so there is no second redaction entry point for this
+ * field and no way to get one without the other.
+ *
+ * Empty guidance is OMITTED rather than carried as an empty `BoundedText`. `Prose` has a
+ * minimum length so a parsed plan cannot produce it, but an empty guidance line rendered
+ * beneath a criterion reads as a missing value rather than an absent one, and a reviewer
+ * cannot tell those apart.
+ */
+function humanGuidance(
+  options: DerivationOptions | undefined,
+): Pick<DerivedCriterionResult, 'needsHumanReason' | 'reviewerGuidance'> {
+  const guidance =
+    options?.reviewerGuidance === undefined || options.reviewerGuidance === ''
+      ? undefined
+      : boundedText(options.reviewerGuidance, options);
+
+  return {
+    ...(options?.needsHumanReason === undefined ? {} : { needsHumanReason: options.needsHumanReason }),
+    ...(guidance === undefined ? {} : { reviewerGuidance: guidance }),
+  };
+}
+
 export type AttemptOutcome = Exclude<CriterionStatus, 'skipped'>;
 
 /**
@@ -327,14 +421,14 @@ export function deriveCriterionResult(
   // redesign of a recorded decision, and review caught it: if Epic 4/5 wants a probe to
   // adjudicate a human criterion, the way to get that is an ADR, not a branch here.
   if (criterion.verifiability === 'human') {
-    return { ...base, status: 'needs_human' };
+    return { ...base, status: 'needs_human', ...humanGuidance(options) };
   }
 
   // THE PLAN'S OWN REFUSAL DECIDES SECOND, and also before attempts. See
   // `DerivationOptions.plannedNeedsHuman`: this is Q39's other trigger, and without it a
   // criterion the plan-author declined to automate reported PASS at exit 0.
   if (options?.plannedNeedsHuman === true) {
-    return { ...base, status: 'needs_human' };
+    return { ...base, status: 'needs_human', ...humanGuidance(options) };
   }
 
   const final = attempts.at(-1);

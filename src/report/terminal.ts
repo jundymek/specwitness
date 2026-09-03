@@ -40,7 +40,11 @@ import type {
   CriterionAttemptRecord,
   DerivedCriterionResult,
 } from '../domain/criterion-result.js';
-import { CRITERION_STATUSES, GATE_STATUSES } from '../domain/result.js';
+import {
+  CRITERION_STATUSES,
+  GATE_STATUSES,
+  type NeedsHumanReason,
+} from '../domain/result.js';
 import type { RunResult } from '../domain/run-result.js';
 import type { StageTimelineEntry } from '../domain/stage.js';
 import { MARK_WIDTH, criterionMark, gateMark, stageMark, verdictLine } from './format.js';
@@ -267,7 +271,7 @@ function evidenceLines(evidence: Evidence): string[] {
  * whole point is that a retry-pass is never silently converted into a clean
  * one, and a renderer is the last place that visibility can be lost.
  */
-function criterionLines(criterion: DerivedCriterionResult): string[] {
+function criterionLines(criterion: DerivedCriterionResult, runDirectory: string): string[] {
   const flaky = criterion.flaky === true ? ' (flaky)' : '';
   const head =
     `  ${criterionMark(criterion.status).padEnd(MARK_WIDTH)} ${criterion.criterionId} ` +
@@ -285,7 +289,129 @@ function criterionLines(criterion: DerivedCriterionResult): string[] {
   }
   detail.push(...attemptLines(criterion.attempts));
 
-  return [head, ...detail];
+  return [head, ...detail, ...reviewerLines(criterion, runDirectory)];
+}
+
+/**
+ * Why each NEEDS_HUMAN reason is a human's question, in the vocabulary the `plan` command
+ * already uses (`src/cli/commands/plan.ts:357-364`).
+ *
+ * BORROWED, NOT INVENTED. `plan` already tells an operator that a `not-safely-automatable`
+ * criterion "could not be mapped to a safe probe" and that "sharpening the criterion often
+ * makes it automatable". A second vocabulary here would have the product saying two things
+ * about one fact, to the same person, hours apart.
+ *
+ * The two lines differ because the FACTS differ and their remedies differ
+ * (`domain/plan.ts:102-119`). `human-verifiability` is a property of the contract: its
+ * author wrote that no machine may answer it, and no amount of sharpening will change that.
+ * `not-safely-automatable` is a property of compilation, and it IS actionable. A report
+ * that collapsed them would tell a reader either to attempt the impossible or to give up on
+ * the tractable.
+ */
+const REVIEWER_REASON: Record<NeedsHumanReason, string> = {
+  'human-verifiability':
+    'the frozen contract declares this criterion verifiability: human — no machine may decide it',
+  'not-safely-automatable':
+    'the contract declares this criterion automated, but it could not be mapped to a safe probe; ' +
+    'sharpening the criterion often makes it automatable',
+};
+
+/**
+ * The reviewer's block: what to check, why it is theirs, and where to look (AC2, FR-16).
+ *
+ * Story 5.3 exists because this block did not. A NEEDS_HUMAN criterion reached a person
+ * carrying the contract's statement and nothing else, even though the plan-author had been
+ * instructed to write reviewer guidance and the plan schema required it. NEEDS_HUMAN is
+ * exit 2, and exit 2 is a STOP; a stop that does not say what to look at is a stop people
+ * learn to override.
+ *
+ * NOTHING HERE IS SYNTHESISED. The guidance is the plan-author's own text, already redacted
+ * and bounded at derivation, printed as-is with the one merged truncation marker (Q49). The
+ * reason is a lookup on a closed enum. Where a value is absent the line is absent — a
+ * renderer that filled the gap with a placeholder would report a fact the JSON view does not
+ * carry (AD-11), and a reader could not tell the invented sentence from the plan-author's.
+ *
+ * THE EVIDENCE POINTER IS THE RUN'S, NOT THE CRITERION'S, and it says so. A `needs-human`
+ * plan arm is a strict object with no `probes` key at all (`schemas/plan.ts:474-478`), so
+ * nothing probed this criterion and it has no evidence by construction. Naming that plainly
+ * is the honest option; fabricating per-criterion refs to fill the block would be the mirror
+ * of the defect this product exists to prevent.
+ */
+function reviewerLines(criterion: DerivedCriterionResult, runDirectory: string): string[] {
+  if (criterion.status !== 'needs_human') {
+    return [];
+  }
+
+  const lines: string[] = [];
+
+  if (criterion.needsHumanReason !== undefined) {
+    lines.push(`      why:      ${REVIEWER_REASON[criterion.needsHumanReason]}`);
+  }
+
+  const guidance = criterion.reviewerGuidance;
+  if (guidance !== undefined) {
+    const marker = truncationMarker(guidance);
+    lines.push(`      check:    ${guidance.text}${marker === '' ? '' : ` ${marker}`}`);
+    if (guidance.truncated) {
+      // FR-29 wants the bound AND a route to the rest. `truncationMarker` supplies the
+      // first half on its own — how much was withheld — but it can only print a `fullPath`
+      // when there is a file in the RUN to point at, and guidance has none.
+      //
+      // IT IS NOT LOST, WHICH IS WHY THIS IS A POINTER AND NOT A REPAIR. The full text is
+      // in the compiled plan on disk, where the plan-author wrote it; the derivation
+      // dropped the tail from the RESULT, not from the artifact. The named remedy in
+      // review was to persist the guidance as run evidence and pass its path here, and
+      // that is deliberately not done: `BoundedText.fullPath` is validated run-relative so
+      // it cannot address the plan, `src/report/**` may not import `src/authoring/**` where
+      // `planRelativePath` lives, and `deriveCriterionResult` is pure and may not write a
+      // file — so the only way to obtain such a path is for two pipeline stages to start
+      // writing a second, redacted copy of a document that already exists. Two artifacts
+      // holding one fact, differing by redaction, is a drift generator; one line naming the
+      // artifact that already holds it is not.
+      //
+      // The epic is printed in this report's header, so the reader has both halves of the
+      // location without this renderer composing a path it cannot legally import.
+      lines.push('                the full guidance is in the compiled plan for this epic');
+    }
+  }
+
+  // Printed for every needs_human criterion, including one carrying neither field: a person
+  // who has been stopped must always be told where to look, and this is the one line here
+  // that is a fact about the run rather than about the plan.
+  lines.push(
+    `      evidence: this criterion has no evidence of its own (nothing probed it); ` +
+      `the run's evidence is under ${runDirectory}`,
+  );
+  // The one sentence in Epic 5 where 5.3 and 5.2 genuinely meet, agreed verbatim with 5.2
+  // rather than invented here — and kept verbatim on purpose: 5.2 quotes it in its module
+  // header and in the browser evidence member's own `explanation`, so rewording it here
+  // would desynchronise the two places the product says this.
+  //
+  // Every TEXT channel a browser probe captures IS redacted at capture — URLs, page text,
+  // titles, error messages. Overstating that would train a reviewer to distrust fields that
+  // are in fact protected.
+  lines.push(
+    '      caution:  screenshots and traces are NOT redacted — ' +
+      'image content cannot be scrubbed by a text redactor',
+  );
+  // THE SECOND LINE EXISTS BECAUSE THE FIRST ONE'S REASON ONLY COVERS THE SCREENSHOT, and
+  // a reviewer acting on the first line alone would draw the wrong conclusion about the
+  // bigger risk. A screenshot is pixels; a trace is a zip of DOM snapshots, network
+  // payloads and console output — so a credential inside one is GREPPABLE, not merely
+  // visible, and the trace is the larger exposure of the two. Told to a reviewer at the
+  // moment they are pointed at the evidence, because that is when they decide what to open
+  // and who to show it to.
+  //
+  // 5.2 raised the distinction after its own review sharpened it, and deliberately did NOT
+  // close the exposure: AC1 requires the trace and 5.6 needs it for the probes it adapts.
+  // That AC1-vs-AD-10 tension is reported to the owner in 5.2's PR body and is not settled
+  // here — this line makes the reviewer aware of it, which is the part 5.3 owns.
+  lines.push(
+    '                a trace is the larger exposure: it carries DOM snapshots, ' +
+      'network payloads and console output',
+  );
+
+  return lines;
 }
 
 /**
@@ -427,7 +553,13 @@ export function renderTerminal(result: RunResult): string {
       'Criteria',
       result.criteria.length === 0
         ? ['  (none — this run verified deterministic gates only)']
-        : result.criteria.flatMap(criterionLines),
+        : // An explicit arrow, NOT point-free `flatMap(criterionLines)`. `flatMap` passes
+          // the array INDEX as its second argument, so widening this function's signature
+          // point-free would have silently bound a number to `runDirectory` — a defect that
+          // typechecks and renders a criterion's position where its evidence path belongs.
+          result.criteria.flatMap((entry) =>
+            criterionLines(entry, result.environment.runDirectory),
+          ),
     ),
 
     ...section('Counts', [
