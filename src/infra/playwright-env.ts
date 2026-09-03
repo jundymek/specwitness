@@ -116,17 +116,30 @@ export const PROVISIONED_BROWSER = 'chromium';
 const BROWSERS_PATH_PACKAGE_LOCAL = '0';
 
 /**
- * The `browsers.json` entries a `playwright install chromium` provides, and the
- * ones a chromium launch needs.
+ * The `browsers.json` entries that make up the chromium family — CANDIDATES,
+ * not a requirement list.
  *
- * BOTH, not just the first. Current Playwright launches headless through a
- * SEPARATE `chromium_headless_shell-<revision>` bundle, so a registry holding
- * only `chromium-<revision>` cannot serve the default headless launch that
- * every browser probe will make. Reported by the codex re-review of this
- * branch. `ffmpeg` is deliberately not required: it records video, and its
- * absence cannot stop a page from opening.
+ * WHICH OF THESE ARE ACTUALLY REQUIRED IS READ FROM THE PROJECT'S OWN MANIFEST,
+ * and that distinction is the whole point. Current Playwright launches headless
+ * through a SEPARATE `chromium_headless_shell-<revision>` bundle, so a modern
+ * registry holding only `chromium-<revision>` cannot serve the default headless
+ * launch every browser probe makes — but releases before that bundle existed
+ * declare `chromium` alone, and demanding a headless shell of them would report
+ * a correctly provisioned older project as permanently unusable. Both halves
+ * were codex findings on this branch, in that order.
+ *
+ * A project's pinned version winning is the story's second load-bearing
+ * property (FR-24), and it is only really honoured if readiness is judged
+ * against THAT version's manifest rather than against the one SpecWitness
+ * happens to ship.
+ *
+ * `ffmpeg` is deliberately absent: it records video, and its absence cannot
+ * stop a page from opening.
  */
-const REQUIRED_CHROMIUM_BROWSERS = ['chromium', 'chromium-headless-shell'] as const;
+const CHROMIUM_FAMILY = ['chromium', 'chromium-headless-shell'] as const;
+
+/** The manifest entry without which there is nothing to check against. */
+const CHROMIUM_BROWSER_NAME = 'chromium';
 
 /**
  * The marker Playwright writes into a bundle directory when — and only when —
@@ -527,15 +540,22 @@ async function readVersion(packageDir: string): Promise<string | null> {
  * a bundle when the download finished, and reading its own marker is what makes
  * this a fact rather than an inference.
  *
- * THREE — CHROMIUM IS TWO BUNDLES. Current Playwright launches headless through
- * a separate `chromium_headless_shell-<revision>`, which every browser probe
- * will use by default.
+ * THREE — CHROMIUM IS TWO BUNDLES, OR ONE, AND ONLY THE PROJECT'S MANIFEST
+ * KNOWS WHICH. Current Playwright launches headless through a separate
+ * `chromium_headless_shell-<revision>` that every browser probe uses by
+ * default; releases predating it declare `chromium` alone. Requiring both of
+ * everyone reported a correctly provisioned older project as permanently
+ * unusable, which contradicts the project's-version-wins property. The
+ * requirement list is read from the installed version's own `browsers.json`.
  *
- * All three failures share one shape: provisioning skips a download it needed,
- * `doctor` reports success, and the failure surfaces later as Playwright's own
- * missing-executable error from a machine already called green. That is the
- * green-for-nothing hazard of this story arriving through the third fact rather
- * than the first. Both corrections came from the codex reviews of this branch.
+ * The first three failures share one shape: provisioning skips a download it
+ * needed, `doctor` reports success, and the failure surfaces later as
+ * Playwright's own missing-executable error from a machine already called
+ * green — the green-for-nothing hazard of this story arriving through the third
+ * fact rather than the first. The fourth is its mirror image: a working
+ * environment refused. All four came from successive codex reviews of this
+ * branch, and all four were the same underlying mistake — judging readiness
+ * from plausible heuristics instead of from Playwright's own data.
  *
  * FAIL-CLOSED throughout: anything that cannot be determined is `false`, never
  * a guess that happens to look green.
@@ -566,8 +586,21 @@ async function isCompleteBundle(bundleDir: string): Promise<boolean> {
 
 /**
  * The bundle DIRECTORY NAMES this Playwright needs, e.g.
- * `['chromium-1234', 'chromium_headless_shell-1234']`, or `null` when the
- * revision table could not be read.
+ * `['chromium-1234', 'chromium_headless_shell-1234']` for a current release and
+ * `['chromium-1045']` for one predating the headless shell. `null` when the
+ * manifest could not be read or does not describe chromium at all.
+ *
+ * DERIVED FROM THE INSTALLED VERSION'S OWN MANIFEST, never from a hard-coded
+ * list. A hard-coded pair made `requiredChromiumBundles` return `null` for any
+ * release whose `browsers.json` legitimately declares `chromium` alone — so a
+ * project pinning such a version could have its own `playwright install
+ * chromium` succeed and still be told the environment was unusable, which
+ * contradicts the project's-version-wins property outright. Reported by the
+ * third codex review of this branch.
+ *
+ * `installByDefault` is honoured, which is also what keeps
+ * `chromium-tip-of-tree` out: `playwright install chromium` does not fetch it,
+ * so requiring it would refuse every ordinary machine.
  *
  * Playwright's directory convention is the browser name with `-` replaced by
  * `_`, then the revision — `chromium-headless-shell` becomes
@@ -581,38 +614,53 @@ async function requiredChromiumBundles(packageDir: string): Promise<string[] | n
     return null;
   }
 
+  let browsers: { name?: unknown; revision?: unknown; installByDefault?: unknown }[];
   try {
     const parsed: unknown = JSON.parse(await readFile(join(coreDir, 'browsers.json'), 'utf8'));
-    const browsers = (parsed as { browsers?: unknown }).browsers;
-    if (!Array.isArray(browsers)) {
+    const declared = (parsed as { browsers?: unknown }).browsers;
+    if (!Array.isArray(declared)) {
       return null;
     }
-
-    const bundles: string[] = [];
-    for (const name of REQUIRED_CHROMIUM_BROWSERS) {
-      const entry = (browsers as { name?: unknown; revision?: unknown }[]).find(
-        (candidate) => candidate.name === name,
-      );
-      if (entry === undefined) {
-        // A table that does not describe a browser we need is a table we cannot
-        // check against. Fail closed rather than check a subset.
-        return null;
-      }
-      const revision =
-        typeof entry.revision === 'string'
-          ? entry.revision
-          : typeof entry.revision === 'number'
-            ? String(entry.revision)
-            : '';
-      if (revision === '') {
-        return null;
-      }
-      bundles.push(`${name.replaceAll('-', '_')}-${revision}`);
-    }
-    return bundles;
+    browsers = declared as typeof browsers;
   } catch {
     return null;
   }
+
+  const bundles: string[] = [];
+  for (const name of CHROMIUM_FAMILY) {
+    const entry = browsers.find(
+      (candidate) => candidate.name === name && candidate.installByDefault === true,
+    );
+    if (entry === undefined) {
+      // Not declared by THIS version, or not installed by default. Absent from
+      // the requirement list rather than fatal — that is the difference between
+      // reading a manifest and asserting one.
+      continue;
+    }
+    const revision = revisionOf(entry.revision);
+    if (revision === null) {
+      // Declared but unusable: a manifest we cannot check against is one we
+      // must not pretend to have checked. Fail closed.
+      return null;
+    }
+    bundles.push(`${name.replaceAll('-', '_')}-${revision}`);
+  }
+
+  // No chromium entry at all means the manifest does not describe the browser
+  // this product provisions, so there is nothing to verify and nothing to trust.
+  return bundles.some((bundle) => bundle.startsWith(`${CHROMIUM_BROWSER_NAME}-`))
+    ? bundles
+    : null;
+}
+
+function revisionOf(raw: unknown): string | null {
+  if (typeof raw === 'string' && raw !== '') {
+    return raw;
+  }
+  if (typeof raw === 'number') {
+    return String(raw);
+  }
+  return null;
 }
 
 /**

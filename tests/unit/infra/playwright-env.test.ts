@@ -62,6 +62,13 @@ async function installFakePlaywright(
   dir: string,
   version: string,
   revision: string = FIXTURE_REVISION,
+  /**
+   * `'modern'` declares `chromium` + `chromium-headless-shell`, as current
+   * releases do. `'legacy'` declares `chromium` alone, as releases predating
+   * the headless-shell bundle legitimately do — the shape that made a
+   * hard-coded requirement list reject a correctly provisioned project.
+   */
+  manifest: 'modern' | 'legacy' = 'modern',
 ): Promise<string> {
   const modules = join(dir, 'node_modules');
   const packageDir = join(modules, PLAYWRIGHT_PACKAGE);
@@ -86,7 +93,12 @@ async function installFakePlaywright(
     JSON.stringify({
       browsers: [
         { name: 'chromium', revision, installByDefault: true },
-        { name: 'chromium-headless-shell', revision, installByDefault: true },
+        ...(manifest === 'modern'
+          ? [{ name: 'chromium-headless-shell', revision, installByDefault: true }]
+          : []),
+        // Never installed by `playwright install chromium`, so requiring it
+        // would refuse every ordinary machine.
+        { name: 'chromium-tip-of-tree', revision: '9998', installByDefault: false },
         { name: 'firefox', revision: '9999', installByDefault: true },
       ],
     }),
@@ -116,6 +128,14 @@ async function installFakeChromium(
 async function installFakeBundle(bundleDir: string): Promise<void> {
   await mkdir(bundleDir, { recursive: true });
   await writeFile(join(bundleDir, 'INSTALLATION_COMPLETE'), '', 'utf8');
+}
+
+/** A complete install for a Playwright that has no headless-shell bundle. */
+async function installFakeLegacyChromium(
+  browsersPath: string,
+  revision: string = FIXTURE_REVISION,
+): Promise<void> {
+  await installFakeBundle(join(browsersPath, `chromium-${revision}`));
 }
 
 /** An interrupted download: the directory is there, the marker is not. */
@@ -539,6 +559,72 @@ describe('resolvePlaywrightEnvironment', () => {
       const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
 
       expect(env.browsersPresent).toBe(false);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * REGRESSION — codex review of this branch, round 3.
+   *
+   * A project pinning a Playwright that predates the separate headless-shell
+   * bundle declares `chromium` alone in its `browsers.json`. A hard-coded
+   * requirement list made that manifest unreadable, so the project could run
+   * its own `playwright install chromium` successfully and still be told the
+   * environment was unusable — which contradicts the story's second
+   * load-bearing property, that the project's pinned version wins.
+   */
+  it('honours an older Playwright whose manifest declares chromium alone', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.30.0', '1045', 'legacy');
+      await installFakeLegacyChromium(join(home, '.cache', 'ms-playwright'), '1045');
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      expect(env.source).toBe('project');
+      expect(env.version).toBe('1.30.0');
+      expect(env.browsersPresent).toBe(true);
+      expect(env.ready).toBe(true);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('still demands the headless shell from a version that declares one', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.62.1', '1234', 'modern');
+      // Exactly what satisfies the legacy manifest above, and must not satisfy
+      // this one: the requirement follows the manifest, not the code.
+      await installFakeLegacyChromium(join(home, '.cache', 'ms-playwright'), '1234');
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      expect(env.browsersPresent).toBe(false);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('never requires a bundle the manifest marks installByDefault false', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      // The fixture manifest declares `chromium-tip-of-tree` at revision 9998,
+      // which `playwright install chromium` never fetches. A registry with the
+      // default bundles only must still be ready.
+      await installFakePlaywright(project, '1.62.1');
+      await installFakeChromium(join(home, '.cache', 'ms-playwright'));
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      expect(env.ready).toBe(true);
     } finally {
       await rm(project, { recursive: true, force: true });
       await rm(home, { recursive: true, force: true });
