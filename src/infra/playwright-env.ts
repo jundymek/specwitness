@@ -108,6 +108,12 @@ export const PLAYWRIGHT_PACKAGE = '@playwright/test';
  * contract-freeze rule exists to forbid. It bounds only SpecWitness's own
  * fallback — a project's own installation is used at whatever version the
  * project pinned, which is the whole point of preferring it.
+ *
+ * `@playwright/test` is declared an OPTIONAL PEER, which the spine's Stack
+ * table has recorded since 2026-08-30 and which this module is what makes
+ * viable: a consumer who never opens a browser installs nothing, one who does
+ * either brings their own (FR-24, in packaging form) or has one provisioned
+ * here. See `playwright-pin.test.ts` for the asserted shape.
  */
 export const PROVISIONED_PLAYWRIGHT_VERSION = '1.62.1';
 
@@ -335,7 +341,7 @@ function playwrightDefaultBrowsersPath(inputs: CachePathInputs): string {
  *
  * `src/cli/doctor/effects.ts#resolvesFrom` states the rule this must not break:
  * *a `@playwright/test` hoisted into SpecWitness's own dependencies must not
- * make a target project look provisioned.* Story 5.1 adds that dependency to
+ * make a target project look provisioned.* Story 5.1 declares that package in
  * this repository, which is exactly the change that could break it: Node's
  * resolution walks UPWARD through `node_modules`, so a target project nested
  * under a directory that carries SpecWitness's own dependencies resolves the
