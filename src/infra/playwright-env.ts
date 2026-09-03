@@ -20,15 +20,18 @@
  * This is the only work in five epics that deliberately writes outside the
  * repository, so the location is stated here rather than left to be derived:
  *
- *   PLAYWRIGHT_BROWSERS_PATH set  →  that directory, verbatim (operator wins)
  *   linux / anything else         →  $XDG_CACHE_HOME/specwitness/playwright
  *                                    else ~/.cache/specwitness/playwright
  *   darwin                        →  ~/Library/Caches/specwitness/playwright
  *   win32                         →  %LOCALAPPDATA%\specwitness\playwright
  *                                    else ~/AppData/Local/specwitness/playwright
  *
- * and browser bundles go in `<cacheDir>/browsers` unless the operator's
- * `PLAYWRIGHT_BROWSERS_PATH` says otherwise.
+ * Browser bundles go in `<cacheDir>/browsers`, unless the operator set
+ * `PLAYWRIGHT_BROWSERS_PATH` — which wins, is made absolute at this process's
+ * cwd so no child can read it differently, and is honoured for the BROWSERS
+ * only: the package itself always lands in the cache above, because that
+ * variable is Playwright's browser-registry override and says nothing about
+ * where a node package installs. `=0` is its own case, below.
  *
  * IT IS NEVER UNDER THE TARGET PROJECT, never under the verification worktree,
  * and never under `.specwitness/`. The last one is worth stating rather than
@@ -109,9 +112,13 @@ export const PROVISIONED_BROWSER = 'chromium';
 
 /**
  * Playwright's own value for "keep browsers inside the package directory".
- * HONOURED: a complete package-local installation is reported ready and used.
- * What SpecWitness will not do is WRITE one, because for a project's own
- * Playwright that directory is inside the project tree (AC1).
+ *
+ * HONOURED, and the scope of that is exact. A complete package-local
+ * installation is resolved, reported ready and used, wherever it lives. Writing
+ * one is allowed only into SpecWitness's OWN cache: for a project's own
+ * Playwright the same setting would put a browser bundle inside the project's
+ * `node_modules`, and AC1 forbids that outright. So the project route refuses
+ * (exit 3, with a hint) and the owned-cache route passes `0` straight through.
  */
 const BROWSERS_PATH_PACKAGE_LOCAL = '0';
 
@@ -352,7 +359,7 @@ export async function resolvePlaywrightEnvironment(
 
   const fromProject = await resolveContained(context.projectRoot, context.projectRoot);
   if (fromProject.kind === 'found') {
-    return await describe('project', fromProject.packageDir, paths, {
+    return await describe('project', fromProject, paths, {
       ...context,
       browsersPath: paths.browsersPathFromEnv
         ? paths.browsersPath
@@ -362,7 +369,7 @@ export async function resolvePlaywrightEnvironment(
 
   const fromCache = await resolveContained(paths.cacheDir, paths.cacheDir);
   if (fromCache.kind === 'found') {
-    return await describe('specwitness-cache', fromCache.packageDir, paths, {
+    return await describe('specwitness-cache', fromCache, paths, {
       ...context,
       browsersPath: paths.browsersPath,
     });
@@ -383,6 +390,14 @@ export async function resolvePlaywrightEnvironment(
 interface ResolvedInside {
   readonly kind: 'found';
   readonly packageDir: string;
+  /**
+   * The realpath'd container the package was accepted from — the project root
+   * or SpecWitness's cache.
+   *
+   * Carried forward because every SUBSEQUENT lookup has to stay inside the same
+   * installation. See `findPackageNear`.
+   */
+  readonly containerDir: string;
 }
 
 interface ResolvedOutside {
@@ -414,8 +429,9 @@ async function resolveContained(
   }
 
   const packageDir = dirname(packageJson);
-  if (await isInside(containerDir, packageDir)) {
-    return { kind: 'found', packageDir };
+  const containerReal = await realpathOrResolve(containerDir);
+  if (isWithin(containerReal, packageDir)) {
+    return { kind: 'found', packageDir, containerDir: containerReal };
   }
   return { kind: 'outside', packageDir };
 }
@@ -483,12 +499,13 @@ function readFileSyncSafe(path: string): string | null {
 
 async function describe(
   source: 'project' | 'specwitness-cache',
-  packageDir: string,
+  resolved: ResolvedInside,
   paths: PlaywrightCachePaths,
   context: CachePathInputs & { readonly browsersPath: string },
 ): Promise<PlaywrightResolved> {
+  const { packageDir } = resolved;
   const manifest = await readManifest(packageDir);
-  const coreDir = findPackageNear(packageDir, 'playwright-core');
+  const coreDir = findPackageNear(packageDir, 'playwright-core', resolved.containerDir);
 
   // `PLAYWRIGHT_BROWSERS_PATH=0` is a SUPPORTED Playwright configuration, not
   // an unusable one: it keeps browsers under `playwright-core/.local-browsers`.
@@ -503,7 +520,7 @@ async function describe(
       ? join(coreDir, PACKAGE_LOCAL_BROWSERS_DIR)
       : context.browsersPath;
 
-  const browsersPresent = await hasRequiredChromium(packageDir, browsersPath);
+  const browsersPresent = await hasRequiredChromium(coreDir, browsersPath);
 
   return {
     source,
@@ -609,8 +626,11 @@ function playwrightBinEntry(bin: unknown): string | null {
  * FAIL-CLOSED throughout: anything that cannot be determined is `false`, never
  * a guess that happens to look green.
  */
-async function hasRequiredChromium(packageDir: string, browsersPath: string): Promise<boolean> {
-  const bundles = await requiredChromiumBundles(packageDir);
+async function hasRequiredChromium(
+  coreDir: string | null,
+  browsersPath: string,
+): Promise<boolean> {
+  const bundles = await requiredChromiumBundles(coreDir);
   if (bundles === null || bundles.length === 0) {
     return false;
   }
@@ -657,8 +677,7 @@ async function isCompleteBundle(bundleDir: string): Promise<boolean> {
  * `browsers.json`, the same table `playwright install` itself reads, so the two
  * cannot disagree about what a complete install looks like.
  */
-async function requiredChromiumBundles(packageDir: string): Promise<string[] | null> {
-  const coreDir = findPackageNear(packageDir, 'playwright-core');
+async function requiredChromiumBundles(coreDir: string | null): Promise<string[] | null> {
   if (coreDir === null) {
     return null;
   }
@@ -713,16 +732,37 @@ function revisionOf(raw: unknown): string | null {
 }
 
 /**
- * Walk the `node_modules` chain above `fromDir` for a package, with NO global
- * fallback of any kind. Returns its directory, or `null`.
+ * Walk the `node_modules` chain above `fromDir` for a package, WITHOUT leaving
+ * `containerDir` and with no global fallback of any kind. Returns its
+ * directory, or `null`.
  *
- * Bounded, so a symlink cycle or a malformed tree terminates rather than
- * climbing forever.
+ * ⚠️ THE CONTAINER BOUND IS THE POINT, and it is the third time this module got
+ * the same scope wrong. The primary `@playwright/test` resolution has always
+ * required the package to live inside the project tree; this secondary lookup
+ * did not, so a project-local `@playwright/test` with a missing or malformed
+ * `playwright-core` let the walk climb out of the project and pick up an
+ * ancestor's — including **SpecWitness's own**. The revision table and the
+ * package-local browser path would then describe a DIFFERENT Playwright than
+ * the one about to be driven, and readiness would be reported against the wrong
+ * installation. Reported by the fifth codex review of this branch.
+ *
+ * It is also the second half of the `NODE_PATH` fix: Node's own resolution
+ * consults `NODE_PATH` and the legacy global folders as a fallback and the
+ * `paths` option does not suppress it (both measured), so `require.resolve` is
+ * not used here at all. A bounded manual walk is the only lookup that answers
+ * "inside THIS installation" and nothing wider.
+ *
+ * Iteration is bounded as well, so a symlink cycle or a malformed tree
+ * terminates rather than climbing forever.
  */
-function findPackageNear(fromDir: string, name: string): string | null {
+function findPackageNear(fromDir: string, name: string, containerDir: string): string | null {
   let current = fromDir;
 
   for (let depth = 0; depth < 24; depth += 1) {
+    if (!isWithin(containerDir, current)) {
+      // Left the installation. Fail closed rather than borrow a neighbour's.
+      break;
+    }
     if (readFileSyncSafe(join(current, 'node_modules', name, 'package.json')) !== null) {
       return join(current, 'node_modules', name);
     }
@@ -759,16 +799,16 @@ function absentReason(
 }
 
 /**
- * `child` is `parent` or beneath it, compared on realpaths.
+ * `child` is `parent`, or beneath it. Both sides must ALREADY be realpath'd.
  *
- * A path that does not exist yet cannot be realpath'd; it falls back to
- * `resolve`, which is correct for the "cache not created yet" case and is the
- * conservative answer for every other.
+ * `parent === child` counts, which is what lets `findPackageNear` start its
+ * walk at the container itself.
  */
-async function isInside(parent: string, child: string): Promise<boolean> {
-  const realParent = await realpathOrResolve(parent);
-  const realChild = await realpathOrResolve(child);
-  const rel = relative(realParent, realChild);
+function isWithin(parent: string, child: string): boolean {
+  if (parent === child) {
+    return true;
+  }
+  const rel = relative(parent, child);
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 

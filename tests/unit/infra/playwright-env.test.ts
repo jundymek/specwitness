@@ -610,6 +610,51 @@ describe('resolvePlaywrightEnvironment', () => {
   });
 
   /**
+   * REGRESSION — codex review of this branch, round 5.
+   *
+   * The primary `@playwright/test` lookup has always been bounded to the
+   * project tree; the secondary `playwright-core` lookup was not. So a
+   * project-local `@playwright/test` with a missing or malformed
+   * `playwright-core` let the walk climb OUT of the project and pick up an
+   * ancestor's — including SpecWitness's own. The revision table and the
+   * package-local browser path would then describe a different Playwright than
+   * the one about to be driven, and readiness would be reported against the
+   * wrong installation. Same scope error as the `=0` refusal: a rule written
+   * for one path and not applied to the next one over.
+   */
+  it('never borrows a playwright-core from ABOVE the project it resolved in', async () => {
+    const outer = await tempRoot();
+    const home = await tempRoot();
+    try {
+      // The ancestor carries a complete, consistent Playwright at revision 7777.
+      await installFakePlaywright(outer, '9.9.9', '7777');
+      await installFakeChromium(join(home, '.cache', 'ms-playwright'), '7777');
+
+      // The project has its own `@playwright/test` and NO `playwright-core`.
+      const project = join(outer, 'packages', 'app');
+      const packageDir = join(project, 'node_modules', PLAYWRIGHT_PACKAGE);
+      await mkdir(packageDir, { recursive: true });
+      await writeFile(
+        join(packageDir, 'package.json'),
+        JSON.stringify({ name: PLAYWRIGHT_PACKAGE, version: '1.62.1', main: 'index.js' }),
+        'utf8',
+      );
+      await writeFile(join(packageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      // The project's own installation is what resolved…
+      expect(env.source).toBe('project');
+      expect(env.version).toBe('1.62.1');
+      // …and its readiness is NOT decided by the ancestor's revision table.
+      expect(env.browsersPresent).toBe(false);
+    } finally {
+      await rm(outer, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
    * REGRESSION — codex review of this branch, round 3.
    *
    * A project pinning a Playwright that predates the separate headless-shell
