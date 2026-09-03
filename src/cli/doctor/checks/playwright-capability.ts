@@ -1,33 +1,98 @@
 /**
- * Browser-probe capability (FR-3, optional).
+ * Browser-probe capability (FR-3, optional; extended by story 5.1 for AC2).
  *
- * OPTIONAL BY DESIGN. Only browser probes need Playwright, those arrive in Epic
- * 5, and most verification runs never open a browser at all. Making this
- * required would fail doctor on projects that will never need it — the same
- * reasoning that keeps a missing agent CLI non-fatal in story 2.7 (UJ-4's edge
- * case: generation unavailable, execution still fine).
+ * OPTIONAL BY DESIGN. Only browser probes need Playwright, and most
+ * verification runs never open a browser at all. Making this required would
+ * fail doctor on projects that will never need it — the same reasoning that
+ * keeps a missing agent CLI non-fatal in story 2.7 (UJ-4's edge case:
+ * generation unavailable, execution still fine) — and would train people to
+ * ignore the tool. `required: false` here means a `warn` never touches the exit
+ * code (`render.ts#hasRequiredFailure`).
  *
  * Resolution is PROJECT-local: a `@playwright/test` hoisted into SpecWitness's
- * own dependencies must not make a target project look provisioned. Nothing is
- * downloaded — provisioning browsers is story 5.1's job, and a diagnostic
- * command that silently pulls hundreds of megabytes would be a bad citizen.
+ * own dependencies must not make a target project look provisioned. Story 5.1
+ * added that dependency to this repository, which is exactly the change that
+ * could have broken this rule — Node's resolution walks upward through
+ * `node_modules`, so a boolean "does it resolve?" would report a directory
+ * nested under SpecWitness's own tree as provisioned. The rule is now enforced
+ * rather than intended: `src/infra/playwright-env.ts` requires the resolved
+ * package to live inside the project tree before it will call it the project's,
+ * and `tests/unit/infra/playwright-env.test.ts` exercises the hazard against
+ * this repository itself.
+ *
+ * Nothing is downloaded. Provisioning is `provisionPlaywright`'s job, this
+ * command never calls it, and a diagnostic command that silently pulled
+ * hundreds of megabytes would be a bad citizen.
+ *
+ * THREE DISTINCT FACTS, all reported (AC2):
+ *
+ *   SOURCE   — project · SpecWitness cache · absent
+ *   VERSION  — what the resolved package declares, or `unknown`
+ *   BROWSERS — whether the bundle is ACTUALLY DOWNLOADED
+ *
+ * The third is the one that matters most and the one a shorter check would
+ * drop. A resolvable `@playwright/test` with no chromium is a real and common
+ * state; calling it "present" would make doctor green immediately before a run
+ * fails, which is the same green-for-nothing shape as a criterion nobody
+ * adjudicated (Epic 4 retro §2 observation 2).
+ *
+ * `HINT:` travels ON THE DETAIL rather than through a second output channel, so
+ * it reaches stderr wherever the detail does — in `--json` mode the command
+ * writes the human rendering to stderr, and `ERROR:` stays reserved for errors.
  */
 
-import type { DoctorCheck } from '../registry.js';
+import type { PlaywrightEnvironment } from '../effects.js';
+import type { CheckResult, DoctorCheck } from '../registry.js';
 
 const PACKAGE = '@playwright/test';
 
 export const playwrightCapabilityCheck: DoctorCheck = {
   id: 'playwright-capability',
   required: false,
-  async run(ctx) {
-    if (ctx.effects.resolvesFrom(PACKAGE, ctx.projectRoot)) {
-      return { status: 'pass', detail: `${PACKAGE} resolves from the project` };
+  async run(ctx): Promise<CheckResult> {
+    let environment: PlaywrightEnvironment;
+    try {
+      environment = await ctx.effects.playwrightEnvironment(ctx.projectRoot);
+    } catch (error) {
+      // A probe that cannot answer is a WARN, not a fail: doctor's job is to
+      // describe the environment, and an unreadable cache directory is a
+      // description, not a required capability that went missing.
+      return {
+        status: 'warn',
+        detail: `could not determine ${PACKAGE} capability: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+
+    if (environment.source === 'absent') {
+      return {
+        status: 'warn',
+        detail:
+          `${PACKAGE} is absent — ${environment.reason}. ` +
+          `HINT: install ${PACKAGE} in the project to use your own pinned version, or let ` +
+          `SpecWitness provision one into ${environment.cacheDir} on the first browser probe ` +
+          '(not required for gate, HTTP, observation or shell verification)',
+      };
+    }
+
+    const where = environment.source === 'project' ? 'the project' : 'the SpecWitness cache';
+    const version = environment.version ?? 'unknown';
+    const preamble = `${PACKAGE} ${version} from ${where} (${environment.packageDir})`;
+
+    if (!environment.browsersPresent) {
+      return {
+        status: 'warn',
+        detail:
+          `${preamble}; no browser bundle downloaded in ${environment.browsersPath}. ` +
+          'HINT: run `npx playwright install chromium`, or let SpecWitness download it on the ' +
+          'first browser probe',
+      };
     }
 
     return {
-      status: 'warn',
-      detail: `${PACKAGE} does not resolve from this project; browser probes will need it provisioned (not required for gate or HTTP verification)`,
+      status: 'pass',
+      detail: `${preamble}; browsers present in ${environment.browsersPath}`,
     };
   },
 };

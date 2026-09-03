@@ -31,6 +31,7 @@
     "lint": "pnpm run depcruise"
   },
   "dependencies": {
+    "@playwright/test": "1.62.1",
     "commander": "^15.0.0",
     "execa": "^10.0.1",
     "yaml": "^2.9.0",

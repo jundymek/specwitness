@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createDoctorContext, type DoctorContext } from '../../../src/cli/doctor/context.js';
 import type {
   DoctorEffects,
+  PlaywrightEnvironment,
   PortProbe,
   ProviderProbe,
   RunOutcome,
@@ -67,7 +68,33 @@ export interface FakeEffectOptions {
    * exercised on machines that happen to have one.
    */
   readonly providerProbes?: Readonly<Record<string, ProviderProbe>>;
+  /**
+   * The resolved Playwright environment (story 5.1).
+   *
+   * Injected rather than resolved for real, for two reasons that matter here
+   * more than elsewhere: doctor's unit tests must not depend on whether the
+   * machine running them happens to have a browser downloaded, and THIS
+   * repository now depends on `@playwright/test` itself — so a test that let
+   * the real resolver run would be exercising SpecWitness's own installation
+   * rather than a target project's. The real resolver is exercised directly, on
+   * fixture directories, in `tests/unit/infra/playwright-env.test.ts`.
+   */
+  readonly playwright?: PlaywrightEnvironment;
+  /** Makes the Playwright probe throw, so the check's own catch is exercised. */
+  readonly playwrightError?: Error;
 }
+
+/** The default: a project with no Playwright anywhere. */
+const PLAYWRIGHT_ABSENT: PlaywrightEnvironment = {
+  source: 'absent',
+  version: null,
+  browsersPresent: false,
+  ready: false,
+  cacheDir: '/home/test/.cache/specwitness/playwright',
+  browsersPath: '/home/test/.cache/specwitness/playwright/browsers',
+  browsersPathFromEnv: false,
+  reason: '@playwright/test does not resolve from the project and is not in the SpecWitness cache',
+};
 
 /** A provider that is simply not installed — the UJ-4 edge case. */
 export const PROVIDER_ABSENT: ProviderProbe = {
@@ -100,6 +127,12 @@ export function fakeEffects(options: FakeEffectOptions = {}): DoctorEffects {
     async probePort(port): Promise<PortProbe> {
       const reason = options.occupiedPorts?.[port];
       return reason === undefined ? { free: true } : { free: false, reason };
+    },
+    async playwrightEnvironment(): Promise<PlaywrightEnvironment> {
+      if (options.playwrightError !== undefined) {
+        throw options.playwrightError;
+      }
+      return options.playwright ?? PLAYWRIGHT_ABSENT;
     },
     async probeProvider(descriptor) {
       const probe = options.providerProbes?.[descriptor.name];
