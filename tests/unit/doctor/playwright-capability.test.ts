@@ -114,6 +114,38 @@ describe('playwright-capability (optional)', () => {
     expect(result.detail).toMatch(/1\.44\.0/);
     expect(result.detail).toMatch(/no .*browser|not downloaded|browsers: no/i);
     expect(result.detail).toContain('HINT:');
+    // The PROJECT's own binary and its own default registry: `npx` is right here.
+    expect(result.detail).toContain('npx playwright install chromium');
+  });
+
+  /**
+   * REGRESSION — codex review of this branch.
+   *
+   * `npx playwright install chromium` is ACTIVELY WRONG ADVICE for the cache
+   * source: `npx` in the target project resolves some other Playwright (or
+   * none) and downloads into the default `ms-playwright` registry rather than
+   * the cache's own `browsersPath`, leaving this check warning with the
+   * operator convinced they had just fixed it. A hint that does not work costs
+   * a round trip before it is disbelieved.
+   */
+  it('hints at the CACHED binary and its own registry when that is the source', async () => {
+    const cachedCli = `${CACHE}/node_modules/@playwright/test/cli.js`;
+    const result = await run(
+      projectReady({
+        source: 'specwitness-cache',
+        packageDir: `${CACHE}/node_modules/@playwright/test`,
+        cliPath: cachedCli,
+        browsersPath: `${CACHE}/browsers`,
+        browsersPresent: false,
+        ready: false,
+      }),
+    );
+
+    expect(result.status).toBe('warn');
+    expect(result.detail).toContain('HINT:');
+    expect(result.detail).not.toContain('npx playwright install');
+    expect(result.detail).toContain(`PLAYWRIGHT_BROWSERS_PATH=${CACHE}/browsers`);
+    expect(result.detail).toContain(cachedCli);
   });
 
   it('warns and hints at provisioning when Playwright is absent', async () => {

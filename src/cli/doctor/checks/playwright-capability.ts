@@ -46,6 +46,35 @@ import type { CheckResult, DoctorCheck } from '../registry.js';
 
 const PACKAGE = '@playwright/test';
 
+/**
+ * The command that would actually populate THIS installation's registry.
+ *
+ * BRANCHED BY SOURCE, because one command does not fit both. For a project's
+ * own Playwright, `npx playwright install chromium` is exactly right — it is
+ * their binary and their default registry. For SpecWitness's cache it is
+ * ACTIVELY WRONG ADVICE: `npx` in the target project resolves some other
+ * Playwright (or none), and it would download into the default `ms-playwright`
+ * registry rather than the cache's `browsersPath` — leaving this check warning
+ * with the operator convinced they had just fixed it. A hint that does not work
+ * is worse than no hint, because it costs a round trip before it is disbelieved.
+ * Reported by the codex review of this branch.
+ */
+function manualInstallCommand(environment: {
+  readonly source: 'project' | 'specwitness-cache';
+  readonly cliPath: string;
+  readonly browsersPath: string;
+}): string {
+  if (environment.source === 'project') {
+    return 'run `npx playwright install chromium`';
+  }
+  // The cached CLI, driven at the cache's own registry — the same invocation
+  // SpecWitness makes when it provisions, so the two cannot disagree.
+  return (
+    'run `PLAYWRIGHT_BROWSERS_PATH=' +
+    `${environment.browsersPath} node ${environment.cliPath} install chromium\``
+  );
+}
+
 export const playwrightCapabilityCheck: DoctorCheck = {
   id: 'playwright-capability',
   required: false,
@@ -90,7 +119,7 @@ export const playwrightCapabilityCheck: DoctorCheck = {
         status: 'warn',
         detail:
           `${preamble}; no browser bundle downloaded in ${environment.browsersPath}. ` +
-          'HINT: run `npx playwright install chromium`, or let SpecWitness download it on the ' +
+          `HINT: ${manualInstallCommand(environment)}, or let SpecWitness download it on the ` +
           'first browser probe',
       };
     }
