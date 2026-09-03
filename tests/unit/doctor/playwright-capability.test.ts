@@ -148,6 +148,29 @@ describe('playwright-capability (optional)', () => {
     expect(result.detail).toContain(cachedCli);
   });
 
+  /**
+   * The hint is a command a human PASTES, so a path with a space in it must not
+   * break at the first word boundary — `/Users/me/My Projects/...` is an
+   * ordinary macOS home. Same class as the wrong-binary hint: advice that does
+   * not work costs a round trip before it is disbelieved.
+   */
+  it('quotes paths in the hint so a home directory with a space still pastes', async () => {
+    const spaced = '/Users/me/My Projects/.cache/specwitness/playwright';
+    const result = await run(
+      projectReady({
+        source: 'specwitness-cache',
+        packageDir: `${spaced}/node_modules/@playwright/test`,
+        cliPath: `${spaced}/node_modules/@playwright/test/cli.js`,
+        browsersPath: `${spaced}/browsers`,
+        browsersPresent: false,
+        ready: false,
+      }),
+    );
+
+    expect(result.detail).toContain(`PLAYWRIGHT_BROWSERS_PATH='${spaced}/browsers'`);
+    expect(result.detail).toContain(`'${spaced}/node_modules/@playwright/test/cli.js'`);
+  });
+
   it('warns and hints at provisioning when Playwright is absent', async () => {
     const result = await run(ABSENT);
 

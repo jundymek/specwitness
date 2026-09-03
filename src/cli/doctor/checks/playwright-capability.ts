@@ -69,10 +69,33 @@ function manualInstallCommand(environment: {
   }
   // The cached CLI, driven at the cache's own registry — the same invocation
   // SpecWitness makes when it provisions, so the two cannot disagree.
+  //
+  // SHELL-QUOTED because this is a command a human will PASTE. A macOS home
+  // directory containing a space (`/Users/me/My Projects/...`) would otherwise
+  // produce a line that breaks at the first word boundary — the same class of
+  // defect as the hint that named the wrong binary: advice that does not work
+  // costs a round trip before it is disbelieved.
   return (
     'run `PLAYWRIGHT_BROWSERS_PATH=' +
-    `${environment.browsersPath} node ${environment.cliPath} install chromium\``
+    `${shellQuote(environment.browsersPath)} node ` +
+    `${shellQuote(environment.cliPath)} install chromium\``
   );
+}
+
+/**
+ * POSIX single-quoting for a path that goes into DISPLAYED text.
+ *
+ * NOT A SECURITY CONTROL, and worth saying so plainly because it looks like
+ * one: nothing built here reaches a shell. This check spawns nothing at all,
+ * and AD-3 lives in `ProcessRunner`, which takes `binary` + `args[]` and never
+ * a command line. The quoting exists so the operator can copy the hint and
+ * have it run.
+ */
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 export const playwrightCapabilityCheck: DoctorCheck = {
