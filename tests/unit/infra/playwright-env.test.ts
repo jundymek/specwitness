@@ -1323,6 +1323,104 @@ describe('provisionPlaywright', () => {
     }
   });
 
+  /**
+   * REGRESSION — codex review of this branch, round 6. THE MOST DAMAGING BUG
+   * FOUND ON THIS BRANCH, and the only one that would have modified somebody
+   * else's repository.
+   *
+   * `PLAYWRIGHT_BROWSERS_PATH` is operator input, not authority. A value under
+   * `projectRoot` — `<project>/.browsers` — was accepted and handed to
+   * `playwright install`, which would have written hundreds of megabytes into
+   * the repository under verification. AC1 and FR-24 forbid that outright: a
+   * target repository that gained a browser bundle because it was verified has
+   * been damaged by its verifier.
+   */
+  it('refuses to write a browser bundle inside the target project, even when asked to', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      const { runner, runs } = fakeRunner([ok(), ok()]);
+      await installFakePlaywright(project, '1.62.1');
+
+      const error = await expectInfraError(
+        provisionPlaywright({
+          projectRoot: project,
+          runner,
+          env: { PLAYWRIGHT_BROWSERS_PATH: join(project, '.browsers') },
+          platform: 'linux',
+          homeDir: home,
+          timeoutMs: 1_000,
+        }),
+      );
+
+      expect(error.message).toContain('inside the target project');
+      expect(error.hint).toContain('PLAYWRIGHT_BROWSERS_PATH');
+      // NOTHING was spawned: the refusal lands before any byte is written.
+      expect(runs).toHaveLength(0);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an env-derived CACHE root inside the target project too', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      const { runner, runs } = fakeRunner([ok(), ok()]);
+      // No project Playwright, so the owned-cache route runs — into a cache the
+      // operator pointed at the project via XDG_CACHE_HOME.
+      const error = await expectInfraError(
+        provisionPlaywright({
+          projectRoot: project,
+          runner,
+          env: { XDG_CACHE_HOME: join(project, 'cache') },
+          platform: 'linux',
+          homeDir: home,
+          timeoutMs: 1_000,
+        }),
+      );
+
+      expect(error.message).toContain('inside the target project');
+      expect(runs).toHaveLength(0);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The refusal lands after the readiness check, deliberately. Resolution is
+   * read-only and an already-ready environment writes nothing, so refusing it
+   * would break a working setup for no benefit — which is exactly the mistake
+   * the `=0` refusal made before it was narrowed (finding 9).
+   */
+  it('does not refuse an in-project browsers path that is already populated', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      const browsers = join(project, '.browsers');
+      await installFakePlaywright(project, '1.62.1');
+      await installFakeChromium(browsers);
+      const { runner, runs } = fakeRunner([ok()]);
+
+      const env = await provisionPlaywright({
+        projectRoot: project,
+        runner,
+        env: { PLAYWRIGHT_BROWSERS_PATH: browsers },
+        platform: 'linux',
+        homeDir: home,
+        timeoutMs: 1_000,
+      });
+
+      expect(env.ready).toBe(true);
+      expect(runs).toHaveLength(0);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it('does not reinstall when the project already has a ready installation', async () => {
     const project = await tempRoot();
     const home = await tempRoot();

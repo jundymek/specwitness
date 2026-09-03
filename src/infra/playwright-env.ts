@@ -34,7 +34,11 @@
  * where a node package installs. `=0` is its own case, below.
  *
  * IT IS NEVER UNDER THE TARGET PROJECT, never under the verification worktree,
- * and never under `.specwitness/`. The last one is worth stating rather than
+ * and never under `.specwitness/` — and that holds for OPERATOR-CHOSEN paths
+ * too. `PLAYWRIGHT_BROWSERS_PATH` and `XDG_CACHE_HOME` are input, not
+ * authority: a value under the project root is refused with exit 3 before
+ * anything is written, because AC1's guarantee is about the project's bytes
+ * rather than about SpecWitness's preferences. The last one is worth stating rather than
  * leaving a reader to wonder: AD-8 makes `RunStore` the sole writer beneath
  * `.specwitness/runs/`, and because this cache is not under `.specwitness/` at
  * all, this module is clear of that rule entirely. A target repository that
@@ -79,7 +83,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { redactText } from '../domain/evidence.js';
@@ -812,12 +816,43 @@ function isWithin(parent: string, child: string): boolean {
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
+/**
+ * Canonicalise a path that MAY NOT EXIST YET.
+ *
+ * ⚠️ THE NAIVE VERSION SILENTLY DEFEATS EVERY CONTAINMENT CHECK IN THIS FILE,
+ * and it did. `realpath` throws on a path that does not exist, and falling back
+ * to `resolve` returns the uncanonicalised string — so on macOS, where
+ * `os.tmpdir()` is `/var/folders/...` and its realpath is
+ * `/private/var/folders/...`, comparing a not-yet-created destination against a
+ * realpath'd project root compared two spellings of the same directory and
+ * answered "outside". That is how the AC1 destination guard passed its own unit
+ * test while doing nothing, until the test was written and watched.
+ *
+ * So the nearest EXISTING ancestor is canonicalised and the missing tail is
+ * re-appended: `<realpath of project>/.browsers` rather than
+ * `<project as spelled>/.browsers`. Bounded, and it falls back to `resolve` for
+ * a path with no existing ancestor at all.
+ */
 async function realpathOrResolve(path: string): Promise<string> {
-  try {
-    return await realpath(path);
-  } catch {
-    return resolve(path);
+  const absolute = resolve(path);
+  const missing: string[] = [];
+  let current = absolute;
+
+  for (let depth = 0; depth < 64; depth += 1) {
+    try {
+      const real = await realpath(current);
+      return missing.length === 0 ? real : join(real, ...missing.slice().reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) {
+        return absolute;
+      }
+      missing.push(basename(current));
+      current = parent;
+    }
   }
+
+  return absolute;
 }
 
 function withDefaults(inputs: PlaywrightEnvironmentInputs): CachePathInputs & {
@@ -901,6 +936,24 @@ export async function provisionPlaywright(options: ProvisionOptions): Promise<Pl
     return existing;
   }
 
+  // ⚠️ NOTHING IS WRITTEN INTO THE TARGET PROJECT, INCLUDING WHEN THE OPERATOR
+  // ASKS FOR IT. `PLAYWRIGHT_BROWSERS_PATH` and `XDG_CACHE_HOME` are operator
+  // input, and a value under `projectRoot` — `<project>/.browsers`, say —
+  // pointed hundreds of megabytes straight into the repository under
+  // verification. AC1 and FR-24 forbid that outright: a target repository that
+  // gained a browser bundle because it was verified has been damaged by its
+  // verifier. Reported by the sixth codex review of this branch.
+  //
+  // The default paths were asserted against this from the start; the
+  // ENV-DERIVED ones were not, which is the same shape as this module's other
+  // scope errors — a rule proven for one input and not applied to the next.
+  //
+  // Placed HERE, after the readiness check, on purpose: resolution is read-only
+  // and an already-ready environment writes nothing, so refusing it would break
+  // a working setup for no benefit — exactly the mistake the `=0` refusal made
+  // before it was narrowed.
+  const projectReal = await realpathOrResolve(context.projectRoot);
+
   if (existing.source === 'project') {
     if (paths.browsersPackageLocal) {
       // A refusal, exit 3, and now narrowly scoped: only the PROJECT route.
@@ -917,9 +970,13 @@ export async function provisionPlaywright(options: ProvisionOptions): Promise<Pl
           'the command again',
       );
     }
+    await refuseWriteInsideProject(projectReal, existing.browsersPath, paths);
     await installBrowsers(options, context.projectRoot, existing, existing.browsersPath);
     return await requireReady(options, 'project');
   }
+
+  await refuseWriteInsideProject(projectReal, paths.browsersPath, paths);
+  await refuseWriteInsideProject(projectReal, paths.cacheDir, paths);
 
   // The owned-cache route. `=0` is honoured here rather than refused: the
   // fallback package AND its `.local-browsers` both live inside SpecWitness's
@@ -947,6 +1004,37 @@ export async function provisionPlaywright(options: ProvisionOptions): Promise<Pl
     paths.browsersPackageLocal ? BROWSERS_PATH_PACKAGE_LOCAL : paths.browsersPath,
   );
   return await requireReady(options, 'specwitness-cache');
+}
+
+/**
+ * Refuse, before any byte is written, a provisioning destination that lies
+ * inside the target project.
+ *
+ * Exit 3 with a hint naming the variable that chose it, because this is an
+ * environment problem the operator can fix in one command — never a product
+ * FAIL, and never a silent redirect to somewhere SpecWitness prefers: writing
+ * hundreds of megabytes to a path the operator did not ask for would be its own
+ * surprise.
+ */
+async function refuseWriteInsideProject(
+  projectReal: string,
+  destination: string,
+  paths: PlaywrightCachePaths,
+): Promise<void> {
+  if (!isWithin(projectReal, await realpathOrResolve(destination))) {
+    return;
+  }
+
+  const culprit = paths.browsersPathFromEnv && destination === paths.browsersPath
+    ? 'PLAYWRIGHT_BROWSERS_PATH'
+    : 'the resolved SpecWitness cache directory (XDG_CACHE_HOME, LOCALAPPDATA or the home directory)';
+
+  throw new InfraError(
+    `provisioning would write to ${destination}, which is inside the target project ` +
+      `${projectReal}; SpecWitness never writes into the project it is verifying`,
+    `${culprit} points inside the project — point it somewhere outside the project tree, or ` +
+      `unset it to use SpecWitness's own cache, then run the command again`,
+  );
 }
 
 /**
