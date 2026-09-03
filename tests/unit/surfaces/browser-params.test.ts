@@ -309,6 +309,73 @@ describe('an unprovisioned Playwright is InfraError — NEVER a skip', () => {
     expect((error as InfraError).hint).toContain('never skipped');
   });
 
+  it.each([
+    ['1.40.0', true],
+    ['1.47.9', true],
+    ['1.48.0', false],
+    ['1.62.1', false],
+    ['2.0.0', false],
+  ])(
+    'refuses Playwright %s before any I/O when it cannot enforce the origin boundary',
+    async (version, refused) => {
+      // ⚠️ A SECURITY FLOOR, NOT A COMPATIBILITY PREFERENCE. `routeWebSocket` arrived in
+      // 1.48 and is what closes the WebSocket half of the origin boundary. FR-24 makes 5.1
+      // prefer the PROJECT's installation at whatever version the project pinned, and 5.1
+      // applies no minimum — so a project below 1.48 would otherwise hand this executor a
+      // Playwright whose context cannot be given a socket boundary, and every probe would
+      // die deep in the generated driver with `routeWebSocket is not a function`. Found by
+      // the codex review of this branch. Refusing beats running without the boundary.
+      const executor = new BrowserSurfaceExecutor(deps({ environment: { ...READY, version } }));
+      const error = await executor
+        .execute({ criterionId: 'E5-01', surface: 'browser', params: OK })
+        .then(
+          () => undefined,
+          (thrown: unknown) => thrown,
+        );
+
+      if (!refused) {
+        // It got past the version gate and failed later, on the spawn this suite forbids —
+        // which is exactly what "not refused for its version" looks like here.
+        expect((error as Error).message).not.toContain('SpecWitness needs at least');
+        return;
+      }
+
+      expect(error).toBeInstanceOf(InfraError);
+      expect((error as InfraError).message).toContain('SpecWitness needs at least 1.48.0');
+      expect((error as InfraError).hint).toContain('provisions its own pinned copy');
+    },
+  );
+
+  it('does NOT refuse a version it cannot parse — the driver feature-detects instead', async () => {
+    // 5.1 reports `version: null` when the manifest is unreadable, and an unrecognised
+    // shape must not be treated as "too old": the refusal would then fire on a Playwright
+    // that is perfectly capable. The generated driver's own feature detection is the
+    // backstop for exactly this case.
+    for (const version of [null, undefined, 'next', '']) {
+      const executor = new BrowserSurfaceExecutor(
+        deps({ environment: { ...READY, ...(version === undefined ? {} : { version }) } }),
+      );
+      const error = await executor
+        .execute({ criterionId: 'E5-01', surface: 'browser', params: OK })
+        .then(
+          () => undefined,
+          (thrown: unknown) => thrown,
+        );
+
+      expect((error as Error).message).not.toContain('SpecWitness needs at least');
+    }
+  });
+
+  it('the generated driver feature-detects routeWebSocket as the backstop', async () => {
+    // Asserted on the shipped constant, because producing a pre-1.48 Playwright would mean
+    // installing one. The executor's version gate covers what can be READ; this covers what
+    // cannot.
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile('src/surfaces/browser.ts', 'utf8');
+
+    expect(source).toContain("typeof context.routeWebSocket !== 'function'");
+  });
+
   it('refuses a "ready" environment that carries no CLI path — checked, not trusted', async () => {
     const executor = new BrowserSurfaceExecutor(
       deps({ environment: { ready: true, packageDir: '/opt/pw', browsersPath: '/x' } }),

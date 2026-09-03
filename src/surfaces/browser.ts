@@ -440,6 +440,30 @@ export const BROWSER_STEP_TIMEOUT_MS = 30_000;
  */
 export const BROWSER_RUNNER_OVERHEAD_MS = 30_000;
 
+/**
+ * The oldest Playwright this executor can drive, and the reason is a SECURITY one.
+ *
+ * `BrowserContext.routeWebSocket` arrived in Playwright 1.48. It is what closes the
+ * WebSocket half of the origin boundary, and without it a page could open a socket to an
+ * undeclared host past every other guard — so an older Playwright cannot enforce the
+ * property this executor promises.
+ *
+ * THIS INTERACTS WITH FR-24, WHICH IS WHY IT IS STATED RATHER THAN ASSUMED. Story 5.1
+ * deliberately prefers the PROJECT's own installation at whatever version the project
+ * pinned, and applies no minimum: that is the whole point of preferring it. A project
+ * pinned below 1.48 would therefore hand this executor a Playwright whose context cannot
+ * be given a socket boundary, and every browser probe would fail deep inside the generated
+ * driver with `routeWebSocket is not a function` — an unclassified crash for what is really
+ * a version mismatch. Found by the codex review of this branch.
+ *
+ * So it is refused BEFORE any I/O, with a hint an operator can act on. Fail-closed is the
+ * right direction: the alternative is running with a boundary that silently does not cover
+ * one transport. The generated driver ALSO feature-detects, so a version this check could
+ * not read (5.1 reports `version: null` when the manifest is unreadable) still cannot end
+ * up running without the guard.
+ */
+export const MINIMUM_PLAYWRIGHT_VERSION = '1.48.0';
+
 /** Bound on any subprocess text echoed into an error message, following 5.1's. */
 const MAX_ECHOED_OUTPUT = 400;
 
@@ -667,6 +691,17 @@ test('specwitness browser probe', async ({ page, context }) => {
   // could open a socket to an undeclared host straight past the guard below. Also a codex
   // finding on this branch. A ws:// origin and an http:// origin are spelled differently for
   // the same host, so the scheme is normalised before they are compared.
+  // FEATURE DETECTION AS THE BACKSTOP. The executor refuses a version it could READ and
+  // found too old; this covers the case where 5.1 reported no version at all. Failing here
+  // is deliberate - running without a socket boundary is not an option this surface offers.
+  if (typeof context.routeWebSocket !== 'function') {
+    throw new Error(
+      'this Playwright build has no BrowserContext.routeWebSocket, so a browser probe ' +
+        'cannot be confined to its declared service origin. SpecWitness needs at least ' +
+        'Playwright 1.48',
+    );
+  }
+
   await context.routeWebSocket('**/*', (ws) => {
     if (websocketOrigin(ws.url()) === payload.origin) {
       ws.connectToServer();
@@ -848,6 +883,13 @@ export interface BrowserRuntimeEnvironment {
   readonly cliPath?: string;
   /** The directory browser bundles are looked for in. */
   readonly browsersPath: string;
+  /**
+   * The resolved package's version, or `null` when 5.1 could not read the manifest.
+   *
+   * Read for exactly one thing: refusing a Playwright too old to enforce the origin
+   * boundary. See `MINIMUM_PLAYWRIGHT_VERSION`.
+   */
+  readonly version?: string | null;
   /** 5.1's operator-facing explanation when `ready` is false. Quoted, never paraphrased. */
   readonly reason?: string;
 }
@@ -1036,6 +1078,23 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     }
     if (typeof environment.cliPath !== 'string' || environment.cliPath === '') {
       return refuse('the resolved Playwright environment carries no CLI entry point');
+    }
+
+    // A version too old to enforce the origin boundary is refused rather than driven. See
+    // `MINIMUM_PLAYWRIGHT_VERSION`: this is a security floor, not a compatibility
+    // preference, and `null` falls through to the driver's own feature detection.
+    const version = environment.version;
+    if (typeof version === 'string' && isOlderThan(version, MINIMUM_PLAYWRIGHT_VERSION)) {
+      throw new InfraError(
+        `browser probe for ${criterionId} cannot run: the resolved Playwright is ` +
+          `${redactText(version, redaction)}, and SpecWitness needs at least ` +
+          `${MINIMUM_PLAYWRIGHT_VERSION} to confine a browser probe to its declared service`,
+        `Playwright gained the WebSocket routing this boundary depends on in ` +
+          `${MINIMUM_PLAYWRIGHT_VERSION}. Upgrade the project's @playwright/test, or remove ` +
+          "it so SpecWitness provisions its own pinned copy — running without the boundary " +
+          'is not offered, because a probe that can reach an undeclared host is the one ' +
+          'thing this surface must never do',
+      );
     }
 
     return {
@@ -1603,6 +1662,34 @@ function validateParams(
   }
 
   return { probe: probe as BrowserProbe, baseUrl, attempt };
+}
+
+/**
+ * True when `version` is strictly older than `minimum`. Numeric-prefix comparison only.
+ *
+ * Deliberately tiny and deliberately LENIENT about what it cannot parse: a version it does
+ * not understand returns `false`, so the refusal never fires on a shape it merely failed to
+ * read — the generated driver's feature detection is the backstop for those. A semver
+ * dependency for one comparison would be a new dependency in a story that adds none.
+ */
+function isOlderThan(version: string, minimum: string): boolean {
+  const parse = (value: string): readonly number[] =>
+    (/^\D*(\d+)\.(\d+)(?:\.(\d+))?/.exec(value) ?? []).slice(1).map((part) => Number(part ?? 0));
+
+  const left = parse(version);
+  const right = parse(minimum);
+  if (left.length === 0) {
+    return false;
+  }
+
+  for (let index = 0; index < right.length; index += 1) {
+    const a = left[index] ?? 0;
+    const b = right[index] ?? 0;
+    if (a !== b) {
+      return a < b;
+    }
+  }
+  return false;
 }
 
 /**
