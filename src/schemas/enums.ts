@@ -17,6 +17,7 @@
 import { z } from 'zod';
 
 import { KINDS, SEVERITIES, VERIFIABILITIES } from '../domain/contract.js';
+import { NEEDS_HUMAN_REASONS } from '../domain/plan.js';
 import { CRITERION_STATUSES, GATE_STATUSES } from '../domain/result.js';
 import { INFRA_ERROR_CLASSIFICATIONS, VERDICTS } from '../domain/run-outcome.js';
 
@@ -48,3 +49,14 @@ export const SeveritySchema = z.enum(SEVERITIES);
 
 /** `automated | human` */
 export const VerifiabilitySchema = z.enum(VERIFIABILITIES);
+
+/**
+ * `human-verifiability | not-safely-automatable` — Q39's two, and only two, NEEDS_HUMAN
+ * triggers, both compile-time (`domain/plan.ts:102-127`).
+ *
+ * Added by story 5.3, which carries the reason into the persisted result so a reviewer is
+ * told WHY a criterion is theirs to answer. Closed for the reason the taxonomy is closed:
+ * a third value arriving through a stored document would be a third trigger entering by
+ * the back door, and execution-time uncertainty is `error`, never `needs_human`.
+ */
+export const NeedsHumanReasonSchema = z.enum(NEEDS_HUMAN_REASONS);

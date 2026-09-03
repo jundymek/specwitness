@@ -273,10 +273,20 @@ async function executePlan(
       // Q38/Q39's second trigger. NOT `skipped`: the plan-author explicitly refused to
       // automate this, and `skipped` is inert, so reporting it that way would turn a
       // recorded refusal into a silent PASS. See `DerivationOptions.plannedNeedsHuman`.
+      //
+      // `reason` and `guidance` are passed on as well (story 5.3), and the reason they had
+      // to be is this exact line: the plan schema REQUIRES both on every needs-human arm
+      // and the plan-author is instructed to write them, but this stage held them and sent
+      // only the flag. So a criterion arrived at a human carrying the contract's statement
+      // and nothing else — no guidance, no reason, no pointer to evidence — even though
+      // NEEDS_HUMAN is exit 2 and exit 2 is a STOP. Redaction and bounding happen inside
+      // the derivation, beside `expected`/`actual`, not here.
       context.run.criteria.push(
         deriveCriterionResult(criterion, [], {
           ...deps.redaction,
           plannedNeedsHuman: true,
+          needsHumanReason: entry.reason,
+          reviewerGuidance: entry.guidance,
         }),
       );
       continue;

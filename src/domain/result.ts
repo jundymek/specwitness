@@ -35,6 +35,33 @@ export type CriterionStatus = (typeof CRITERION_STATUSES)[number];
  * `needs_human` (there is nothing to adjudicate) nor `error` (a gate that
  * cannot run is an InfraError raised by the stage, not a gate result).
  */
+/**
+ * Why a criterion is carried as needs-human rather than compiled into probes.
+ *
+ * These are Q39's TWO — and only two — NEEDS_HUMAN triggers, seen from compile time. They
+ * are kept distinct because they are different kinds of fact with different remedies:
+ *
+ * - `human-verifiability` — a fact about the CONTRACT. Its author wrote
+ *   `verifiability: human`, meaning no machine may answer it. `domain/contract.ts` is
+ *   unconditional about this and `deriveCriterionResult` enforces it before it even looks
+ *   at attempts. Compilation must never emit a probe for such a criterion; the plan carries
+ *   reviewer guidance instead.
+ * - `not-safely-automatable` — a fact about COMPILATION (Q38). The criterion is
+ *   `verifiability: automated`, but the plan-author could not map it to a probe it was
+ *   willing to stand behind. It is recorded, surfaced in the report, and **never silently
+ *   dropped and never guessed into a probe**. A criterion missing from a plan altogether is
+ *   the failure mode this value exists to prevent: it would simply disappear from
+ *   verification, and nothing would report its absence.
+ *
+ * Execution-time uncertainty is NEITHER of these — it is criterion `error` (Q39).
+ */
+export const NEEDS_HUMAN_REASONS = Object.freeze([
+  'human-verifiability',
+  'not-safely-automatable',
+] as const);
+
+export type NeedsHumanReason = (typeof NEEDS_HUMAN_REASONS)[number];
+
 export const GATE_STATUSES = ['pass', 'fail', 'skipped'] as const;
 
 export type GateStatus = (typeof GATE_STATUSES)[number];

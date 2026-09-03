@@ -149,7 +149,13 @@ exports[`the persisted result.json shape (AC3, NFR-7) > matches the recorded sna
       "criterionId": "E7-04",
       "status": "needs_human",
       "statement": "The error message reads clearly to a first-time user.",
-      "severity": "normal"
+      "severity": "normal",
+      "needsHumanReason": "human-verifiability",
+      "reviewerGuidance": {
+        "text": "read the message aloud to somebody who has never seen this tool",
+        "truncated": false,
+        "totalBytes": 63
+      }
     },
     {
       "criterionId": "E7-05",

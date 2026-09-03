@@ -35,6 +35,7 @@ import {
   httpEvidence,
   observationEvidence,
   providerEvidence,
+  boundedText,
   type Evidence,
 } from '../../src/domain/evidence.js';
 import type { RunResult } from '../../src/domain/run-result.js';
@@ -220,6 +221,19 @@ export function fullyPopulatedRunResult(): RunResult {
         status: 'needs_human',
         statement: 'The error message reads clearly to a first-time user.',
         severity: 'normal',
+        // Story 5.3. Pinned here DELIBERATELY, so the snapshot guards the reviewer-guidance
+        // shape the way it already guards every other field: a rename, a reorder or a
+        // silent drop of either key changes what every harness consumer parses, and the
+        // snapshot is the thing that refuses to let that merge unnoticed.
+        //
+        // Built through the real `boundedText` constructor rather than written out as an
+        // object literal, for the same reason the seeded credential below goes through the
+        // real evidence constructors: the fixture must exercise the path production uses,
+        // or it pins a shape nothing actually produces.
+        needsHumanReason: 'human-verifiability',
+        reviewerGuidance: boundedText(
+          'read the message aloud to somebody who has never seen this tool',
+        ),
       },
       {
         criterionId: 'E7-05',

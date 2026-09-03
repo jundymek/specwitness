@@ -68,6 +68,7 @@ import {
   CriterionStatusSchema,
   GateStatusSchema,
   InfraErrorClassificationSchema,
+  NeedsHumanReasonSchema,
   SeveritySchema,
   VerdictSchema,
 } from './enums.js';
@@ -349,6 +350,24 @@ const CriterionResultSchema = z
     // kind of cast that later hides a real mismatch.
     evidence: z.array(EvidenceRefSchema).readonly().optional(),
     attempts: z.array(CriterionAttemptSchema).readonly().optional(),
+    // Story 5.3, ADDITIVE (AD-5). Both are present only on `needs_human` results.
+    //
+    // Declared here because this schema is `.strict()`: a field the domain carries but the
+    // mirror does not would make exactly the runs that used the feature unreadable from
+    // storage — serialized fine, refused on the way back. That is the shape the story 3.3
+    // follow-up hit with the stage `hint` mirror a few lines above.
+    //
+    // `SCHEMA_VERSIONS.jsonReport` is deliberately NOT bumped for these. An added optional
+    // key is the additive case `schemas/versions.ts` describes, every document written
+    // before this change still parses (asserted in `tests/unit/schemas/result-guidance.test.ts`),
+    // and the repo's own precedent is commit `ec23ce1`, which added the optional `hint` key
+    // to a strict sub-schema of THIS document after story 3.5 registered the version, and
+    // did not bump it either.
+    needsHumanReason: NeedsHumanReasonSchema.optional(),
+    // The same `BoundedTextSchema` evidence uses — not a second inline-content shape.
+    // Guidance is redacted and bounded at derivation, so what reaches here is already
+    // final: a reader prints `text` and appends `truncationMarker`, never re-redacting.
+    reviewerGuidance: BoundedTextSchema.optional(),
   })
   .strict();
 
