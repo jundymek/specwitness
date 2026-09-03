@@ -40,8 +40,11 @@ import type {
   CriterionAttemptRecord,
   DerivedCriterionResult,
 } from '../domain/criterion-result.js';
-import type { NeedsHumanReason } from '../domain/plan.js';
-import { CRITERION_STATUSES, GATE_STATUSES } from '../domain/result.js';
+import {
+  CRITERION_STATUSES,
+  GATE_STATUSES,
+  type NeedsHumanReason,
+} from '../domain/result.js';
 import type { RunResult } from '../domain/run-result.js';
 import type { StageTimelineEntry } from '../domain/stage.js';
 import { MARK_WIDTH, criterionMark, gateMark, stageMark, verdictLine } from './format.js';

@@ -35,6 +35,10 @@ export type CriterionStatus = (typeof CRITERION_STATUSES)[number];
  * `needs_human` (there is nothing to adjudicate) nor `error` (a gate that
  * cannot run is an InfraError raised by the stage, not a gate result).
  */
+export const GATE_STATUSES = ['pass', 'fail', 'skipped'] as const;
+
+export type GateStatus = (typeof GATE_STATUSES)[number];
+
 /**
  * Why a criterion is carried as needs-human rather than compiled into probes.
  *
@@ -61,10 +65,6 @@ export const NEEDS_HUMAN_REASONS = Object.freeze([
 ] as const);
 
 export type NeedsHumanReason = (typeof NEEDS_HUMAN_REASONS)[number];
-
-export const GATE_STATUSES = ['pass', 'fail', 'skipped'] as const;
-
-export type GateStatus = (typeof GATE_STATUSES)[number];
 
 /**
  * The V0 result of one acceptance criterion.

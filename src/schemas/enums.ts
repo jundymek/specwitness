@@ -17,8 +17,7 @@
 import { z } from 'zod';
 
 import { KINDS, SEVERITIES, VERIFIABILITIES } from '../domain/contract.js';
-import { NEEDS_HUMAN_REASONS } from '../domain/plan.js';
-import { CRITERION_STATUSES, GATE_STATUSES } from '../domain/result.js';
+import { CRITERION_STATUSES, GATE_STATUSES, NEEDS_HUMAN_REASONS } from '../domain/result.js';
 import { INFRA_ERROR_CLASSIFICATIONS, VERDICTS } from '../domain/run-outcome.js';
 
 /** `pass | fail | needs_human | skipped | error` */
