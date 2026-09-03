@@ -322,6 +322,10 @@ const GateResultSchema = z
 const CriterionAttemptSchema = z
   .object({
     attempt: z.number().int().positive(),
+    // Which probe the attempt belongs to. A criterion may declare several probes and
+    // reports one result, so records from more than one probe can share this array — see
+    // `select` in `pipeline/stages/probes.ts`, and `CriterionAttemptRecord.probeId`.
+    probeId: z.string().min(1).optional(),
     outcome: z.enum(ATTEMPT_OUTCOMES),
     durationMs: z.number().int().nonnegative(),
     expected: z.string().optional(),

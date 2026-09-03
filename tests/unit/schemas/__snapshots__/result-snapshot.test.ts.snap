@@ -105,6 +105,7 @@ exports[`the persisted result.json shape (AC3, NFR-7) > matches the recorded sna
       "attempts": [
         {
           "attempt": 1,
+          "probeId": "health-endpoint",
           "outcome": "fail",
           "durationMs": 5100,
           "expected": "status 200 within 2000ms",
@@ -118,6 +119,7 @@ exports[`the persisted result.json shape (AC3, NFR-7) > matches the recorded sna
         },
         {
           "attempt": 2,
+          "probeId": "health-endpoint",
           "outcome": "pass",
           "durationMs": 380,
           "evidence": [

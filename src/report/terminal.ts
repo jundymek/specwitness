@@ -313,10 +313,22 @@ function attemptLines(attempts: readonly CriterionAttemptRecord[] | undefined): 
     return [];
   }
 
+  // A criterion may declare several probes and reports one result, so `select` can hand
+  // this function records from more than one of them. `of N` must then count that probe's
+  // attempts rather than the array's length, and the probe has to be named — otherwise two
+  // probes' records read as one impossible sequence: attempt 1, attempt 1, attempt 2.
+  // Named ONLY when it disambiguates, so the ordinary single-probe criterion — which is
+  // almost every criterion — reads exactly as it did.
+  const probes = new Set(attempts.map((record) => record.probeId));
+  const totalFor = (probeId: string | undefined): number =>
+    attempts.filter((record) => record.probeId === probeId).length;
+
   return attempts.flatMap((record) => {
+    const which =
+      probes.size > 1 && record.probeId !== undefined ? ` (probe ${record.probeId})` : '';
     const lines = [
-      `      attempt ${record.attempt} of ${attempts.length}: ${record.outcome}` +
-        ` (${record.durationMs} ms)`,
+      `      attempt ${record.attempt} of ${totalFor(record.probeId)}${which}:` +
+        ` ${record.outcome} (${record.durationMs} ms)`,
     ];
     if (record.expected !== undefined) {
       lines.push(`        expected: ${record.expected}`);

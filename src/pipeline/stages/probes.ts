@@ -38,11 +38,13 @@
  * decides a status.
  *
  * **Retries are opt-in per probe class and default to 0**, so a run is deterministic
- * unless a project asked otherwise. There is today no field anywhere — not in the Project
- * Config, not in 4.2's frozen Plan schema — in which a project CAN ask, so `retries`
- * resolves to zero for every surface and is injected only by tests. Adding a field is a
- * schema widening and therefore an ADR, not this story's edit; the mechanism is built and
- * proven so that the ADR has nothing left to design.
+ * unless a project asked otherwise. Story 5.4 added the field a project asks in: a
+ * `retries:` block in the PROJECT CONFIG — not in 4.2's frozen Plan schema, because a plan
+ * is fingerprinted alongside its contract and a retry count baked into it would make "the
+ * same verification" change on a flaky machine. `src/cli/verify/probe-dispatch.ts`'s
+ * `createRetryPolicy` turns that block into the `RetryPolicy` below, at the edge, because
+ * `src/config/**` may not import this layer. Absent the block every surface is 0, and
+ * `deps.retries` being undefined still means exactly one attempt per probe.
  *
  * ============================================================================
  * A CRITERION MAY HAVE SEVERAL PROBES, AND ONLY ONE RESULT
@@ -66,6 +68,13 @@
  * `flaky` is carried up: a criterion whose selected result is a pass is marked flaky if
  * ANY of its probes only passed on retry. FR-32's point is visibility, and a flake that
  * happened in the second of two probes is exactly as worth seeing as one in the first.
+ *
+ * **AND SO ARE THE ATTEMPT RECORDS** (story 5.4), for the same reason and after a defect
+ * that proved the reason: carrying `flaky` up without the records left a criterion marked
+ * flaky beside the CHOSEN probe's records, which — if the chosen probe passed cleanly —
+ * were absent. The stored run then said "this flaked" and "nothing was retried" at once.
+ * Each record carries its `probeId`, so `attempt` stays unambiguous when two probes' arrays
+ * become one. See `select` at the bottom of this file.
  *
  * ============================================================================
  * AN OBSERVATION'S `around` RUNS THE WRAPPED PROBE, AND NOTHING ELSE DOES
@@ -278,7 +287,12 @@ async function executePlan(
 
     const options: DerivationOptions = { ...deps.redaction };
     const perProbe = entry.probes.map((probe) =>
-      deriveCriterionResult(criterion, attempts.get(probe.id) ?? [], options),
+      // `probeId` so every attempt record says which probe it describes — load-bearing
+      // once `select` below merges the records of several probes into one criterion.
+      deriveCriterionResult(criterion, attempts.get(probe.id) ?? [], {
+        ...options,
+        probeId: probe.id,
+      }),
     );
 
     context.run.criteria.push(select(perProbe));
@@ -598,9 +612,26 @@ function select(results: readonly DerivedCriterionResult[]): DerivedCriterionRes
 
   // FR-32 is about VISIBILITY, so a flake in any probe of a passing criterion survives
   // into the criterion's result rather than being lost to selection.
-  if (chosen.status === 'pass' && chosen.flaky !== true && results.some((r) => r.flaky === true)) {
-    return { ...chosen, flaky: true };
-  }
+  const flaky =
+    chosen.status === 'pass' && (chosen.flaky === true || results.some((r) => r.flaky === true));
 
-  return chosen;
+  // AND SO DO THE ATTEMPT RECORDS, for exactly the same reason (story 5.4).
+  //
+  // This was a real defect, found by codex review rather than by the author. Carrying
+  // `flaky` up but not the records produced a criterion marked `flaky: true` beside the
+  // CHOSEN probe's records — which, if the chosen probe passed cleanly, are absent. The
+  // stored document then said "this criterion flaked" and "nothing was retried" at once,
+  // the run-level counts derived from it reported `retriedCriteria: 0`, and the failed
+  // attempt's detail was gone from the criterion entirely. A document that contradicts
+  // itself is worse than one that omits: no reader can tell which half is right.
+  //
+  // Every probe's records, in probe order, each stamped with its `probeId` so `attempt`
+  // stays unambiguous once two probes' arrays sit side by side.
+  const attempts = results.flatMap((result) => result.attempts ?? []);
+
+  return {
+    ...chosen,
+    ...(flaky ? { flaky: true } : {}),
+    ...(attempts.length === 0 ? {} : { attempts }),
+  };
 }

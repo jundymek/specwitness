@@ -168,13 +168,35 @@ describe('summarizeFlakiness', () => {
   });
 
   it('counts a flaky criterion that carries no attempt record as flaky but not retried', () => {
-    // Defensive rather than reachable: `flaky` is only ever set alongside more than one
-    // attempt. If those two ever came apart, the flake must still be counted — losing a
-    // flake is the one direction this function may not fail in.
+    // The last line of defence, and NOT hypothetical: codex review found a real path to
+    // exactly this state — a multi-probe criterion whose SECOND probe flaked while the
+    // CHOSEN probe passed cleanly, so `flaky` was carried up and the records were not.
+    // `probes.ts`'s `select` now carries both, and
+    // `tests/integration/probes-retries.test.ts` produces that criterion end to end. This
+    // stays because losing a flake is the one direction this function may not fail in.
     expect(summarizeFlakiness([criterion('E5-01', 'pass', true)])).toEqual({
       flakyCriteria: 1,
       retriedCriteria: 0,
       extraAttempts: 0,
+    });
+  });
+
+  it('counts attempts from EVERY probe of a criterion, not only the representative one', () => {
+    const twoProbes: DerivedCriterionResult = {
+      ...criterion('E5-05', 'pass', true),
+      attempts: [
+        { attempt: 1, probeId: 'clean-probe', outcome: 'pass', durationMs: 1 },
+        { attempt: 1, probeId: 'flaky-probe', outcome: 'fail', durationMs: 1 },
+        { attempt: 2, probeId: 'flaky-probe', outcome: 'pass', durationMs: 1 },
+      ],
+    };
+
+    // Three records, one criterion, two probes — so the repetition actually spent is 1
+    // (the flaky probe's second attempt), not 2 (records minus one).
+    expect(summarizeFlakiness([twoProbes])).toEqual({
+      flakyCriteria: 1,
+      retriedCriteria: 1,
+      extraAttempts: 1,
     });
   });
 });

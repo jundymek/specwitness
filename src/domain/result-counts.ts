@@ -117,10 +117,26 @@ export function summarizeFlakiness(
   let extraAttempts = 0;
 
   for (const criterion of criteria) {
-    // `?? []` rather than a guard: a criterion with one attempt carries no record at all
-    // (see `DerivedCriterionResult.attempts`), and `length - 1` on an absent array must
-    // read as zero extra attempts rather than as minus one.
-    const extra = Math.max((criterion.attempts?.length ?? 1) - 1, 0);
+    // COUNTED PER PROBE, not per criterion, and that is not a detail. A criterion may
+    // declare several probes and reports one result, so `select` in
+    // `pipeline/stages/probes.ts` merges every probe's records into one array — `records
+    // minus one` would then read three records from two probes as two extra attempts when
+    // only one attempt was ever repeated. `probeId` is what makes the grouping possible,
+    // and it is why the record carries one.
+    //
+    // A criterion with a single attempt carries no record at all (see
+    // `DerivedCriterionResult.attempts`), so an absent array contributes nothing rather
+    // than minus one.
+    const perProbe = new Map<string | undefined, number>();
+    for (const record of criterion.attempts ?? []) {
+      perProbe.set(record.probeId, (perProbe.get(record.probeId) ?? 0) + 1);
+    }
+
+    let extra = 0;
+    for (const attemptsOfOneProbe of perProbe.values()) {
+      extra += attemptsOfOneProbe - 1;
+    }
+
     if (extra > 0) {
       retriedCriteria += 1;
       extraAttempts += extra;

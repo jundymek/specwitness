@@ -109,9 +109,9 @@ afterAll(async () => {
   await rm(scratch, { recursive: true, force: true });
 });
 
-function httpProbe(path: string): ProbeSpec {
+function httpProbe(id: string, path: string): ProbeSpec {
   return {
-    id: 'probe',
+    id,
     surface: 'http',
     mechanics: { serviceId: 'svc', method: 'GET', path },
     assertions: [
@@ -160,7 +160,20 @@ interface Ran {
  * does, and `recordEvidence` arrives from the stage already bound to the run accumulator —
  * so the evidence assertions below cover the real chain rather than a stub of it.
  */
+interface ProbePlan {
+  readonly id: string;
+  readonly path: string;
+}
+
+/** One criterion, one probe — the shape almost every assertion in this file wants. */
 async function run(path: string, retries: RetryPolicy | undefined): Promise<Ran> {
+  return await runMany([{ id: 'probe', path }], retries);
+}
+
+async function runMany(
+  probes: readonly ProbePlan[],
+  retries: RetryPolicy | undefined,
+): Promise<Ran> {
   const accumulator: RunAccumulator = {
     epic: 'epic-5',
     baseSha: 'a'.repeat(40),
@@ -183,7 +196,11 @@ async function run(path: string, retries: RetryPolicy | undefined): Promise<Ran>
   };
 
   const criteria: readonly PlanCriterion[] = [
-    { criterionId: CRITERION.criterionId, disposition: 'automated', probes: [httpProbe(path)] },
+    {
+      criterionId: CRITERION.criterionId,
+      disposition: 'automated',
+      probes: probes.map((plan) => httpProbe(plan.id, plan.path)),
+    },
   ];
 
   const stage = createProbesStage({
@@ -206,7 +223,10 @@ async function run(path: string, retries: RetryPolicy | undefined): Promise<Ran>
         probe,
         // A closed port on localhost for the exec-error case: the kernel REFUSES the
         // connection, so the failure comes from the network stack rather than a fake.
-        baseUrl: path === '/refused' ? 'http://127.0.0.1:1' : baseUrl,
+        baseUrl:
+          probes.find((plan) => plan.id === probe.id)?.path === '/refused'
+            ? 'http://127.0.0.1:1'
+            : baseUrl,
         attempt,
       },
     }),
@@ -389,6 +409,61 @@ describe('AC2 — retries never change classification, only repetition', () => {
     expect(ran.criteria[0]?.status).toBe('error');
     expect(ran.criteria[0]?.flaky).toBeUndefined();
     expect(ran.criteria[0]?.attempts?.map((a) => a.outcome)).toEqual(['error', 'error']);
+  });
+});
+
+describe('a criterion with SEVERAL probes keeps every probe’s attempts (codex review, P1)', () => {
+  // THE DEFECT: `select` carries `flaky` up from any probe — "FR-32 is about VISIBILITY" —
+  // but the first version of this story did not carry the attempt RECORDS up with it. A
+  // criterion whose first probe passed cleanly and whose second flaked was therefore stored
+  // as `flaky: true` beside the first probe's absent records: the document said "this
+  // flaked" and "nothing was retried" at once, the run-level counts agreed with the wrong
+  // half, and the failed attempt's detail was gone. Found by review, not by the author —
+  // the same way Epic 4's worst-shaped defect was.
+  it('reports flaky, the repetition, and the failed attempt, when the SECOND probe flaked', async () => {
+    const ran = await runMany(
+      [
+        { id: 'clean-probe', path: '/always-pass' },
+        { id: 'flaky-probe', path: '/fail-then-pass' },
+      ],
+      httpRetries(1),
+    );
+
+    const criterion = ran.criteria[0];
+    expect(criterion?.status).toBe('pass');
+    expect(criterion?.flaky).toBe(true);
+
+    // BOTH probes' records survive selection, each naming its probe. `select` chooses the
+    // clean probe as the representative — it is the first `pass` — so before the fix the
+    // criterion carried only the clean probe's records and the FAILURE was simply gone,
+    // beside a `flaky: true` that then pointed at nothing.
+    //
+    // The retry policy is per SURFACE, so the clean probe repeats too: two passes. That is
+    // the design — a project asking http for a retry asks every http probe — and it is why
+    // the repetition below is 2 rather than 1.
+    expect(criterion?.attempts?.map((a) => [a.probeId, a.outcome])).toEqual([
+      ['clean-probe', 'pass'],
+      ['clean-probe', 'pass'],
+      ['flaky-probe', 'fail'],
+      ['flaky-probe', 'pass'],
+    ]);
+
+    // The counts agree with the criterion sitting beside them, and are counted PER PROBE:
+    // four records from two probes are two extra attempts, not three.
+    const document = JSON.parse(serializeRunResult(ran.result)) as {
+      flakiness: { flakyCriteria: number; retriedCriteria: number; extraAttempts: number };
+    };
+    expect(document.flakiness).toEqual({
+      flakyCriteria: 1,
+      retriedCriteria: 1,
+      extraAttempts: 2,
+    });
+
+    // The terminal names the probe, because `attempt 1, attempt 2, attempt 1, attempt 2`
+    // would otherwise read as one impossible sequence.
+    const report = renderTerminal(ran.result);
+    expect(report).toContain('attempt 1 of 2 (probe clean-probe)');
+    expect(report).toContain('attempt 1 of 2 (probe flaky-probe): fail');
   });
 });
 

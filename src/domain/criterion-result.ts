@@ -180,6 +180,23 @@ export interface DerivedCriterionResult extends CriterionResult {
 export interface CriterionAttemptRecord {
   /** 1-based, copied from the attempt rather than from the array index. */
   readonly attempt: number;
+  /**
+   * Which probe of the criterion this attempt belongs to.
+   *
+   * NOT decoration, and the reason is a defect codex review found in the first version of
+   * this story. A criterion may declare several probes and reports ONE result, so
+   * `probes.ts`'s `select` chooses a representative — and `flaky` is deliberately carried
+   * up from ANY probe, because "FR-32 is about VISIBILITY". The attempt records must be
+   * carried up the same way, or a criterion whose SECOND probe flaked reports
+   * `flaky: true` beside the FIRST probe's (absent) records: a document that contradicts
+   * itself, with the failed attempt's detail lost. Once records from several probes share
+   * one array, `attempt` alone stops identifying an attempt — 1, 1, 2 — so the probe is
+   * named.
+   *
+   * Optional because `deriveCriterionResult` is total and may be called without one; the
+   * probes stage always supplies it.
+   */
+  readonly probeId?: string;
   /** What this attempt alone came out as, before retry orchestration is considered. */
   readonly outcome: AttemptOutcome;
   /** Whole milliseconds, from the injected `Clock` (AD-9). */
@@ -222,6 +239,15 @@ export interface DerivationOptions extends RedactionOptions {
    * mistake rather than a legitimate case.)
    */
   readonly plannedNeedsHuman?: boolean;
+  /**
+   * The probe these attempts came from, stamped onto every attempt record (story 5.4).
+   *
+   * See `CriterionAttemptRecord.probeId`: a criterion may have several probes and one
+   * result, so records that travel up through `select` need to say which probe they
+   * describe. It rides in the options bag rather than as a fourth parameter for the reason
+   * this interface exists at all — one options bag reaching the single producer.
+   */
+  readonly probeId?: string;
 }
 
 /** How one attempt came out, before retry orchestration is considered. */
@@ -405,6 +431,7 @@ function attemptRecord(
 
   return {
     attempt: attempt.attempt,
+    ...(options?.probeId === undefined ? {} : { probeId: options.probeId }),
     outcome,
     durationMs: attempt.durationMs,
     ...(expected === undefined ? {} : { expected }),

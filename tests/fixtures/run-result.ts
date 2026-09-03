@@ -190,6 +190,7 @@ export function fullyPopulatedRunResult(): RunResult {
         attempts: [
           {
             attempt: 1,
+            probeId: 'health-endpoint',
             outcome: 'fail',
             durationMs: 5100,
             expected: 'status 200 within 2000ms',
@@ -198,6 +199,7 @@ export function fullyPopulatedRunResult(): RunResult {
           },
           {
             attempt: 2,
+            probeId: 'health-endpoint',
             outcome: 'pass',
             durationMs: 380,
             evidence: [{ kind: 'http', path: 'probes/http-e7-02-02.response.txt' }],
