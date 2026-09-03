@@ -23,6 +23,7 @@ import { deriveCriterionResult } from '../../../src/domain/criterion-result.js';
 import type { ContractCriterionRef, ProbeAttempt } from '../../../src/domain/criterion-result.js';
 import type { ProcessOutcome } from '../../../src/domain/process-runner.js';
 import type { BrowserEvidence } from '../../../src/domain/evidence.js';
+import { InfraError } from '../../../src/domain/errors.js';
 import { BrowserSurfaceExecutor } from '../../../src/surfaces/browser.js';
 import {
   announceBrowserAvailability,
@@ -121,6 +122,11 @@ interface RunInput {
    * assertion checks.
    */
   readonly forceProcessOutcome?: { outcome: ProcessOutcome; exitCode: number | null };
+  /**
+   * Makes the injected BINARY evidence writer reject, as `RunStore` does on a full disk, a
+   * permissions change, or a containment refusal. Everything else stays real.
+   */
+  readonly failEvidenceBytes?: boolean;
 }
 
 interface Executed {
@@ -158,7 +164,15 @@ async function execute(input: RunInput): Promise<Executed> {
       ...(input.browsersPath === undefined ? {} : { browsersPath: input.browsersPath }),
     },
     writeEvidence: sink.writeEvidence,
-    writeEvidenceBytes: sink.writeEvidenceBytes,
+    writeEvidenceBytes:
+      input.failEvidenceBytes === true
+        ? async () => {
+            throw new InfraError(
+              'could not durably write the evidence file',
+              'check free space and permissions on the run directory',
+            );
+          }
+        : sink.writeEvidenceBytes,
     resolveRunPath: sink.resolveRunPath,
     recordEvidence: sink.recordEvidence,
     stepTimeoutMs: input.stepTimeoutMs ?? 15_000,
@@ -563,6 +577,55 @@ describeWithBrowser('evidence: two channels, both artifacts, and one honest limi
       expect(member.screenshot).toBeUndefined();
       // And the limitation is stated where a reader of the evidence meets it.
       expect(member.explanation).toContain('cannot be scrubbed by a text redactor');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'REFUSES a clean pass when the evidence writer could not persist the artifact (codex P2)',
+    async () => {
+      // ⚠️ TWO FAILURES, NOT ONE — the defect shape this story keeps meeting. An earlier
+      // version wrapped BOTH "Playwright never produced the artifact" and "the persistence
+      // boundary refused" in one catch that returned `undefined`, so a probe could report a
+      // clean PASS while the evidence it is required to carry was silently never written.
+      // Found by the codex auto-review of this branch.
+      //
+      // A failing byte writer is now a SpecWitness infrastructure failure and propagates,
+      // exactly as the text writer beside it already did.
+      const failure = await execute({
+        assertions: [HEADING_IS_ORDERS],
+        failEvidenceBytes: true,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+
+      expect(failure, 'a silently evidence-less PASS was produced').toBeInstanceOf(InfraError);
+      expect((failure as InfraError).message).toContain('durably write');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'still tolerates an artifact Playwright never produced — the other half of that pair',
+    async () => {
+      // The distinction the fix preserves: a browser that never launched produces no trace
+      // and no screenshot, and that is a fact about the run rather than a failure to record
+      // it. It stays an `execError` about the browser, NOT a thrown InfraError about a file.
+      const empty = join(process.cwd(), 'node_modules', '.specwitness-no-browsers-here-3');
+      await rm(empty, { recursive: true, force: true });
+
+      const { attempt, sink } = await execute({
+        browsersPath: empty,
+        assertions: [HEADING_IS_ORDERS],
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(sink.members).toHaveLength(1);
+      const member = sink.members[0] as BrowserEvidence;
+      expect(member.trace).toBeUndefined();
+      expect(member.screenshot).toBeUndefined();
+      expect(member.explanation).toContain('no trace was captured');
     },
     TEST_TIMEOUT_MS,
   );

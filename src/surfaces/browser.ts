@@ -1047,10 +1047,31 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
   /**
    * Copies Playwright's binary artifacts into the run directory through the injected writer.
    *
-   * Failure to store one is NOT an `execError`. The probe may have observed everything it
-   * needed; losing a diagnostic artifact is a smaller problem than reporting that the
-   * observation did not happen, and reporting exit 3 for a failed file copy would be the
-   * misclassification this module exists to avoid, arriving from the tidy-up.
+   * ⚠️ TWO FAILURES LIVE HERE AND THEY ARE NOT THE SAME FAILURE. An earlier version wrapped
+   * both in one `catch` that returned `undefined`, and the codex auto-review of this branch
+   * caught what that collapses: a probe could return a clean PASS while the evidence it is
+   * required to carry was silently never written. That is this module's own recurring defect
+   * shape — two situations flattened into one code path, so testing one of them proves
+   * nothing about the other — arriving for the fourth time in this story, in the tidy-up.
+   *
+   *   READING THE ARTIFACT FAILS  =>  TOLERATED. Playwright simply did not produce it: the
+   *                                   browser never launched, or tracing was unavailable.
+   *                                   `trace` and `screenshot` are optional precisely so
+   *                                   that this is representable, and the member's
+   *                                   `explanation` says which artifacts exist.
+   *
+   *   WRITING THE ARTIFACT FAILS  =>  PROPAGATES. This is the injected PERSISTENCE
+   *                                   BOUNDARY refusing — a full disk, changed permissions,
+   *                                   `RunStore`'s containment check. SpecWitness could not
+   *                                   record what it observed, and a verdict whose required
+   *                                   evidence was silently dropped is exactly the
+   *                                   green-for-nothing this product exists to prevent.
+   *                                   `RunStore` already raises `InfraError` there, so it
+   *                                   surfaces as exit 3 with a message naming the path.
+   *
+   * That also makes the byte channel behave like the TEXT channel beside it, which has
+   * always propagated: `#captureEvidence` does not wrap its `writeEvidence` calls either.
+   * The anomaly was the swallow, not the propagation.
    */
   async #storeArtifacts(input: {
     stem: string;
@@ -1061,12 +1082,19 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
       if (from === undefined) {
         return undefined;
       }
+
+      let bytes: Uint8Array;
       try {
-        const bytes = await readFile(from);
-        return await this.#deps.writeEvidenceBytes(name, bytes);
+        bytes = await readFile(from);
       } catch {
+        // The artifact was never produced. Tolerated, and visible in the member's
+        // `explanation` rather than inferred from an absent field.
         return undefined;
       }
+
+      // NOT wrapped. See above: a persistence failure is SpecWitness failing to record what
+      // it observed, and it must not be turned into a quietly incomplete PASS.
+      return await this.#deps.writeEvidenceBytes(name, bytes);
     };
 
     const trace = await copy(input.tracePath, `${input.stem}.trace.zip`);
