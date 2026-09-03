@@ -188,6 +188,16 @@
  * A MISSING SELECTOR IS NEVER AN `execError`. The page answered; the answer was that
  * nothing matched. That is a fact about the product.
  *
+ * ⚠️ BUT A FAILURE TO READ AT ALL IS ALWAYS AN `execError`, AND THE TWO ARE EASY TO
+ * CONFLATE. A page that crashes, closes or times out WHILE a value is being read throws
+ * rather than answering, and an earlier version of the generated driver caught that and
+ * reported it as an absent value — which made a dead browser look like an unsatisfied
+ * assertion and turned infrastructure into product FAIL. Found by the codex review of this
+ * branch. The driver now catches nothing inside a read: an ABSENCE is reported as a fact
+ * about the page, an EXCEPTION escapes and becomes `execError`. A missing element and a
+ * dead browser are not the same observation, and the whole story is about not conflating
+ * them.
+ *
  * ============================================================================
  * EVIDENCE (AD-10, FR-28, Q32) — the COHORT RULE, and the one thing it cannot do
  * ============================================================================
@@ -346,8 +356,9 @@ import type { ProcessResult, ProcessRunner } from '../domain/process-runner.js';
  * healthy-but-slow page converts honest work into a spurious exit 3, which is the exact
  * misclassification this story exists to prevent.
  *
- * Injectable via `BrowserExecutorDeps` so a test asserts the timeout path in milliseconds
- * instead of waiting it out.
+ * This is the OUTERMOST of three nested bounds — see `#bounds` for the ordering and why it
+ * is load-bearing. Injectable via `BrowserExecutorDeps` so a test asserts the timeout path
+ * in milliseconds instead of waiting it out.
  */
 export const BROWSER_PROBE_TIMEOUT_MS = 90_000;
 
@@ -480,31 +491,42 @@ const { readFileSync, writeFileSync } = require('node:fs');
 const { test } = require(process.env.SPECWITNESS_BROWSER_RUNNER);
 const payload = JSON.parse(readFileSync(process.env.SPECWITNESS_BROWSER_PAYLOAD, 'utf8'));
 
+// ⚠️ THIS FUNCTION DELIBERATELY DOES NOT CATCH. An earlier version wrapped the whole body
+// in a try/catch that turned every Playwright exception into an ABSENT VALUE - so a page
+// that crashed, closed, or timed out WHILE BEING READ produced an unsatisfied assertion and
+// the criterion reported product FAIL instead of infrastructure error. That is precisely
+// the headline defect this story exists to prevent, arriving through the one door nobody was
+// watching, and it was found by the codex review of this branch.
+//
+// The rule, stated so it is not re-broken: an ABSENCE is a fact about the page and is
+// reported as one; an EXCEPTION means the page could not be read at all, and must escape to
+// the caller's handler, where it becomes ok:false and therefore an execError. A missing
+// element and a dead browser are not the same observation.
+//
+// An unparseable selector escapes here too, and that is correct rather than merely
+// tolerable: SpecWitness could not perform the read, so nothing was adjudicated. Exit 3 is
+// honest and can never mint a pass.
 async function readOne(page, read) {
-  try {
-    if (read.source === 'url') {
-      return { present: true, value: page.url() };
-    }
-    if (read.source === 'title') {
-      return { present: true, value: await page.title() };
-    }
-    const locator = page.locator(read.selector).first();
-    if (await locator.count() === 0) {
-      return { present: false, why: 'no element matches the selector' };
-    }
-    if (read.source === 'visible') {
-      return { present: true, value: (await locator.isVisible()) ? 'true' : 'false' };
-    }
-    if (read.source === 'text') {
-      const text = await locator.textContent();
-      return text === null
-        ? { present: false, why: 'the element has no text content' }
-        : { present: true, value: text };
-    }
-    return { present: false, why: 'this executor cannot read that assertion target' };
-  } catch (error) {
-    return { present: false, why: 'reading the value failed: ' + describe(error) };
+  if (read.source === 'url') {
+    return { present: true, value: page.url() };
   }
+  if (read.source === 'title') {
+    return { present: true, value: await page.title() };
+  }
+  const locator = page.locator(read.selector).first();
+  if (await locator.count() === 0) {
+    return { present: false, why: 'no element matches the selector' };
+  }
+  if (read.source === 'visible') {
+    return { present: true, value: (await locator.isVisible()) ? 'true' : 'false' };
+  }
+  if (read.source === 'text') {
+    const text = await locator.textContent();
+    return text === null
+      ? { present: false, why: 'the element has no text content' }
+      : { present: true, value: text };
+  }
+  return { present: false, why: 'this executor cannot read that assertion target' };
 }
 
 function describe(error) {
@@ -675,7 +697,10 @@ export interface BrowserExecutorDeps {
   readonly recordEvidence: BrowserEvidenceRecorder;
   /** `RunStore.recordProcessGroup` — AD-8, so `specwitness clean` can reap a browser tree. */
   readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
-  /** Bounds the whole spawn. Defaults to `BROWSER_PROBE_TIMEOUT_MS` plus the overhead. */
+  /**
+   * Bounds the WHOLE spawn — the outermost backstop. Defaults to `BROWSER_PROBE_TIMEOUT_MS`,
+   * raised if necessary so it always exceeds the inner test timeout (see `#bounds`).
+   */
   readonly timeoutMs?: number;
   /** Bounds one navigation or action. Defaults to `BROWSER_STEP_TIMEOUT_MS`. */
   readonly stepTimeoutMs?: number;
@@ -891,7 +916,7 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     const tracePath = join(workspace, 'trace.zip');
     const screenshotPath = join(workspace, 'screenshot.png');
 
-    const timeoutMs = this.#deps.timeoutMs ?? stepTimeoutMs + BROWSER_RUNNER_OVERHEAD_MS;
+    const { timeoutMs, testTimeoutMs } = this.#bounds(stepTimeoutMs);
 
     // AD-3: ARGV, never a command line. `process.execPath` running Playwright's own CLI is
     // SpecWitness's own hard-coded invocation, on the same footing as 5.1's `npm` spawn and
@@ -918,7 +943,7 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
           [ENV.testDir]: dirOf(specPath),
           [ENV.spec]: baseOf(specPath),
           [ENV.output]: join(workspace, 'output'),
-          [ENV.timeout]: String(stepTimeoutMs + BROWSER_RUNNER_OVERHEAD_MS),
+          [ENV.timeout]: String(testTimeoutMs),
         },
       },
       ...(this.#deps.onProcessGroup === undefined
@@ -1079,6 +1104,39 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     }
 
     return { refs, member };
+  }
+
+  /**
+   * The THREE nested bounds, and the ordering between them, which is load-bearing.
+   *
+   *   step   <  test   <  spawn
+   *
+   * `step` bounds one navigation or one action. `test` bounds the generated driver, and is
+   * enforced by Playwright's own runner. `spawn` bounds the whole child process and is
+   * enforced by `ProcessRunner`, which tears the process GROUP down when it fires.
+   *
+   * WHY THE ORDER MATTERS, rather than being tidy: only the INNER two produce a classified
+   * `execError` naming what timed out, because the driver's `finally` block still runs and
+   * still writes its result, its screenshot and its trace. The OUTER one kills a corpse and
+   * leaves this file to say only "it was still running". Both are honest exit 3, but one
+   * tells an operator which step hung — so the inner bounds must fire first in every
+   * ordinary case, and the spawn bound exists purely to guarantee termination.
+   *
+   * A caller that injects a small `timeoutMs` (the suites do) still gets a spawn bound that
+   * exceeds the test bound, because a spawn killed before its own runner could time out
+   * would report every slow machine as an unclassifiable hang.
+   */
+  #bounds(stepTimeoutMs: number): { timeoutMs: number; testTimeoutMs: number } {
+    // The runner has to boot, resolve a config, start a worker and launch a browser before
+    // the first navigation, and write a trace archive afterwards. None of that is covered by
+    // the per-action timeout, so the head-room is added rather than assumed away.
+    const testTimeoutMs = stepTimeoutMs + BROWSER_RUNNER_OVERHEAD_MS;
+    const requested = this.#deps.timeoutMs ?? BROWSER_PROBE_TIMEOUT_MS;
+
+    return {
+      testTimeoutMs,
+      timeoutMs: Math.max(requested, testTimeoutMs + BROWSER_RUNNER_OVERHEAD_MS),
+    };
   }
 
   /**

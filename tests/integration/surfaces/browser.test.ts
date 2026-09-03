@@ -391,6 +391,42 @@ describeWithBrowser('AD-6/AD-7: could not look is ERROR, and never FAIL', () => 
   );
 
   it(
+    'a read that THROWS is execError, not an unsatisfied assertion (codex P1)',
+    async () => {
+      // ⚠️ THE DOOR NOBODY WAS WATCHING. An earlier generated driver wrapped every read in a
+      // try/catch and turned any Playwright exception into an ABSENT VALUE — so a page that
+      // crashed, closed or timed out WHILE BEING READ produced an unsatisfied assertion and
+      // the criterion reported product FAIL instead of infrastructure `error`. Found by the
+      // codex review of this branch, and it is exactly the misclassification the whole story
+      // exists to prevent.
+      //
+      // PRODUCED, not mocked: an unparseable selector makes `locator.count()` throw a real
+      // Playwright exception — the same exception class, through the same code path, as a
+      // crashed or closed page. A renderer crash reaches this branch by construction, since
+      // there is now no catch anywhere inside a read.
+      const { attempt } = await execute({
+        assertions: [
+          {
+            description: 'a selector this executor cannot evaluate',
+            target: { source: 'text', selector: 'h1:::not-a-selector[' },
+            comparison: 'equals',
+            expected: 'anything',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeDefined();
+      // ZERO assertions: nothing was adjudicated, so nothing may be reported as adjudicated.
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+
+      const derived = deriveCriterionResult(CRITERION, [attempt]);
+      expect(derived.status).toBe('error');
+      expect(derived.status).not.toBe('fail');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
     'a step whose element never appears is execError, not a product FAIL',
     async () => {
       // The distinction this row of the table exists for: the scenario could not be

@@ -45,12 +45,62 @@ const FIXTURE_MAX_LIFETIME_MS = 300_000;
 
 export const clock = new SystemClock();
 
-let cachedEnvironment: PlaywrightEnvironment | undefined;
+/**
+ * 5.1's answer for THIS repository, resolved at MODULE SCOPE with a top-level await.
+ *
+ * ⚠️ THE SCOPE IS THE WHOLE POINT, and the first version of this file got it wrong in a way
+ * that made the skip VACUOUS. `describe` / `describe.skip` is chosen at COLLECTION time,
+ * which happens before any `beforeAll` runs — so a version that resolved the environment in
+ * `beforeAll` and read the answer in `describeWithBrowser` always read `undefined`, always
+ * chose `describe`, and on a browser-less machine would have RUN every browser test and
+ * failed them instead of skipping. It passed here only because this machine has a browser,
+ * which is exactly how a guard stops guarding without anybody noticing.
+ *
+ * Resolution is read-only, performs no network I/O and never spawns (5.1's header), so
+ * paying for it at import is cheap and buys a decision that is settled before collection.
+ */
+export const BROWSER_ENVIRONMENT: PlaywrightEnvironment = await resolvePlaywrightEnvironment({
+  projectRoot: process.cwd(),
+});
 
-/** 5.1's answer for THIS repository, resolved once per worker. */
+/** 5.1's answer, for the suites that want it as a value. */
 export async function playwrightEnvironment(): Promise<PlaywrightEnvironment> {
-  cachedEnvironment ??= await resolvePlaywrightEnvironment({ projectRoot: process.cwd() });
-  return cachedEnvironment;
+  return BROWSER_ENVIRONMENT;
+}
+
+/**
+ * Says ONCE per process, on stderr, that the browser suites are being skipped and why.
+ *
+ * A silent skip is how a suite stops proving anything without anybody noticing, and this
+ * suite is the only proof the browser surface has. Announced at module scope for the same
+ * reason the resolution is: it must happen whether or not any hook ever runs.
+ */
+function announce(): void {
+  if (BROWSER_ENVIRONMENT.ready || process.env['SPECWITNESS_BROWSER_SKIP_ANNOUNCED'] === 'yes') {
+    return;
+  }
+  process.env['SPECWITNESS_BROWSER_SKIP_ANNOUNCED'] = 'yes';
+  process.stderr.write(
+    '\n[specwitness] SKIPPING the browser surface integration suites: ' +
+      `${
+        BROWSER_ENVIRONMENT.source === 'absent'
+          ? BROWSER_ENVIRONMENT.reason
+          : 'no browsers are downloaded'
+      }\n` +
+      '[specwitness] this is a skipped TEST, not a skipped CRITERION - the browser executor ' +
+      'has no skip path at all. Run `specwitness doctor` to provision Playwright.\n',
+  );
+}
+
+announce();
+
+/**
+ * Kept so existing call sites read naturally; the decision is already made at import.
+ *
+ * Returns whether a browser is available, so a caller can assert on it if it wants to.
+ */
+export async function announceBrowserAvailability(): Promise<boolean> {
+  return BROWSER_ENVIRONMENT.ready;
 }
 
 /**
@@ -58,38 +108,15 @@ export async function playwrightEnvironment(): Promise<PlaywrightEnvironment> {
  * SKIPPED LOUDLY, naming 5.1's own reason so the skip is a diagnosis rather than a silence.
  *
  * Never downloads. The browser download is a one-time cached step outside the suite's hot
- * path (`specwitness doctor` provisions; this suite only consumes), because H-8 puts this
- * suite in the auto-review's way.
+ * path (`specwitness doctor` provisions; these suites only consume), because H-8 puts them
+ * in the auto-review's way.
  */
 export function describeWithBrowser(title: string, body: () => void): void {
-  const ready = process.env['SPECWITNESS_BROWSER_SUITE_READY'];
-  if (ready === 'no') {
+  if (!BROWSER_ENVIRONMENT.ready) {
     describe.skip(`${title} [SKIPPED: no usable Playwright environment on this machine]`, body);
     return;
   }
   describe(title, body);
-}
-
-/**
- * Decides once, before any suite is collected, whether a browser is available — and says so
- * on stderr when it is not, because a silent skip is how a suite stops proving anything
- * without anybody noticing.
- */
-export async function announceBrowserAvailability(): Promise<boolean> {
-  const environment = await playwrightEnvironment();
-  if (!environment.ready) {
-    process.env['SPECWITNESS_BROWSER_SUITE_READY'] = 'no';
-    process.stderr.write(
-      `\n[specwitness] SKIPPING the browser surface integration suite: ${
-        environment.source === 'absent' ? environment.reason : 'no browsers are downloaded'
-      }\n` +
-        '[specwitness] this is a skipped TEST, not a skipped CRITERION - the executor has no ' +
-        'skip path. Run `specwitness doctor` to provision Playwright.\n',
-    );
-    return false;
-  }
-  process.env['SPECWITNESS_BROWSER_SUITE_READY'] = 'yes';
-  return true;
 }
 
 /* ── the fixture app ────────────────────────────────────────────────────────────────── */
