@@ -134,6 +134,11 @@ interface RunInput {
    * result file — and only the `trace` flag the driver itself wrote is flipped.
    */
   readonly dropTraceFromResult?: boolean;
+  /**
+   * Deletes the trace file after a fully real run, so the driver honestly reports
+   * `trace: true` and reading it back fails. That is the gap a driver-flag check misses.
+   */
+  readonly deleteTraceFile?: boolean;
 }
 
 interface Executed {
@@ -157,8 +162,9 @@ async function execute(input: RunInput): Promise<Executed> {
   const recording = createRecordingRunner();
   const forced = input.forceProcessOutcome;
   const dropTrace = input.dropTraceFromResult === true;
+  const deleteTrace = input.deleteTraceFile === true;
   const runner =
-    forced === undefined && !dropTrace
+    forced === undefined && !dropTrace && !deleteTrace
       ? recording
       : {
           run: async (options: Parameters<typeof recording.run>[0]) => {
@@ -176,6 +182,13 @@ async function execute(input: RunInput): Promise<Executed> {
                   JSON.stringify({ ...written, trace: false }),
                   'utf8',
                 );
+              }
+            }
+            if (deleteTrace) {
+              const tracePath = options.env.set?.['SPECWITNESS_BROWSER_TRACE'];
+              if (tracePath !== undefined) {
+                const { rm } = await import('node:fs/promises');
+                await rm(tracePath, { force: true });
               }
             }
             return { ...result, ...(forced ?? {}) };
@@ -552,7 +565,8 @@ describeWithBrowser('AD-3: the page may not leave the declared service origin', 
       // codex review of this branch.
       //
       // PRODUCED, not mocked: a SECOND fixture server on its own ephemeral port is a
-      // genuinely different origin, and the first server serves a real link to it.
+      // genuinely different origin, and the first server serves a real link to it. The
+      // navigation is refused before the request leaves, so the second server never sees it.
       const other = await startFixtureApp((_request, response) => {
         response.writeHead(200, { 'content-type': 'text/html' });
         response.end(ordersPage('<h1 id="heading">Undeclared host</h1>'));
@@ -584,7 +598,7 @@ describeWithBrowser('AD-3: the page may not leave the declared service origin', 
           // It is an INFRASTRUCTURE failure, not a product observation: the probe could not
           // be completed safely, so nothing was adjudicated.
           expect(attempt.execError).toBeDefined();
-          expect(attempt.execError?.message).toContain('left the declared service origin');
+          expect(attempt.execError?.message).toContain('declared service origin');
           expect(attempt.assertionEvaluations).toHaveLength(0);
           expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
 
@@ -635,13 +649,62 @@ describeWithBrowser('AD-3: the page may not leave the declared service origin', 
           });
 
           expect(attempt.execError).toBeDefined();
-          expect(attempt.execError?.message).toContain('left the declared service origin');
-          // Step 1 reached the undeclared host — that is the navigation we could not prevent,
-          // only detect. Step 2 must never have run.
-          expect(beaconHits).toContain('/first');
-          expect(beaconHits, 'the scenario kept driving an undeclared host').not.toContain(
-            '/beacon',
+          expect(attempt.execError?.message).toContain('declared service origin');
+
+          // ⚠️ THE STRONGEST FORM OF THIS ASSERTION, and it only became available once the
+          // guard moved from DETECTION to PREVENTION. An earlier version expected `/first`
+          // to have been hit — the navigation happened and was noticed afterwards — and
+          // only `/beacon` to be absent. With context-level interception the request is
+          // never sent at all, so the undeclared server's log is EMPTY. That is the property
+          // worth having: for a verification tool, contacting an undeclared host IS the
+          // harm, and noticing afterwards does not undo it.
+          expect(beaconHits, 'a request reached an undeclared host').toEqual([]);
+          expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+        } finally {
+          await linking.close();
+        }
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a target=_blank popup cannot reach an undeclared host either',
+    async () => {
+      // ⚠️ THE BYPASS A PAGE-LEVEL CHECK MISSES ENTIRELY, and the reason the guard sits on
+      // the CONTEXT. A target=_blank link opens a SECOND page, so a check that inspects the
+      // original page sees an origin that never moved — the popup could talk to the outside
+      // while the probe reported PASS. Raised by the codex review after the first origin fix.
+      const popupHits: string[] = [];
+      const other = await startFixtureApp((request, response) => {
+        popupHits.push(request.url ?? '');
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end(ordersPage('<h1 id="heading">Undeclared host</h1>'));
+      });
+
+      try {
+        const linking = await startFixtureApp((_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(
+            ordersPage(
+              `<a id="away" target="_blank" href="${other.baseUrl}/popup">go</a>`,
+            ),
           );
+        });
+
+        try {
+          const { attempt } = await execute({
+            baseUrl: linking.baseUrl,
+            path: '/orders',
+            scenario: 'click "#away"',
+            assertions: [HEADING_IS_ORDERS],
+          });
+
+          // The undeclared host is never contacted, popup or not.
+          expect(popupHits, 'a popup reached an undeclared host').toEqual([]);
+          expect(attempt.execError).toBeDefined();
           expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
         } finally {
           await linking.close();
@@ -780,6 +843,26 @@ describeWithBrowser('evidence: two channels, both artifacts, and one honest limi
       const { attempt } = await execute({
         assertions: [HEADING_IS_ORDERS],
         dropTraceFromResult: true,
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.execError?.message).toContain('no Playwright trace was captured');
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'REFUSES a pass when the trace was written but cannot be read back (codex P1)',
+    async () => {
+      // The gap a DRIVER-FLAG check misses: the driver honestly reports `trace: true`, and
+      // reading `trace.zip` back then fails, so no trace is stored. Basing the required-trace
+      // check on the STORED ARTIFACT rather than on the flag is what closes it — the stored
+      // result is the only thing that knows whether a file actually exists.
+      const { attempt } = await execute({
+        assertions: [HEADING_IS_ORDERS],
+        deleteTraceFile: true,
       });
 
       expect(attempt.execError).toBeDefined();

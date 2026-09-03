@@ -65,6 +65,17 @@
  *    spawn is on — so NO `DeclaredCommand` is minted and none may be: that brand constrains
  *    project-declared SHELL STRINGS, and there is no shell here to constrain.
  *    `tests/unit/config/boundary-scan.test.ts` covers this file automatically.
+ *  - **NOTHING LEAVES THE DECLARED ORIGIN, AND IT IS PREVENTED RATHER THAN DETECTED.**
+ *    Request interception is installed on the browser CONTEXT before anything navigates, so
+ *    a request whose origin differs from the declared service is never sent at all. That
+ *    covers what a path rule cannot: a `click` follows whatever the page put in an `href`,
+ *    and the page is written by the system under verification. It also covers popups, which
+ *    a page-level check misses entirely — a `target="_blank"` link opens a SECOND page, so
+ *    inspecting the original one sees an origin that never moved. Both were codex findings
+ *    on this branch, the second arriving after the first fix, and the second is why the
+ *    guard sits on the CONTEXT rather than on the page. A blocked NAVIGATION fails the
+ *    attempt; a blocked subresource does not, because a page referencing an external font is
+ *    not a probe pointed at production.
  *  - **No URL from the plan.** `BrowserProbeMechanics` has a `serviceId` and a
  *    service-relative `path` and NO url field — that absence is AD-3's "no production URL
  *    defaults" expressed structurally, and it must never gain one (5.6 also depends on the
@@ -572,6 +583,16 @@ function describe(error) {
 // So the origin is re-checked after EVERY navigation and before ANY value is read. Leaving
 // the declared service is an infrastructure failure, not a product observation: nothing was
 // adjudicated, and nothing from an undeclared host may become evidence.
+function assertNoBlockedNavigation(blocked, payload) {
+  if (blocked.length > 0) {
+    throw new Error(
+      'the scenario tried to leave the declared service origin: ' + blocked[0] +
+        ' was blocked before the request was sent, expected origin ' + payload.origin +
+        '. A browser probe may only ever be driven at the service the project declared',
+    );
+  }
+}
+
 function assertOrigin(page, payload) {
   let current;
   try {
@@ -590,6 +611,40 @@ function assertOrigin(page, payload) {
 
 test('specwitness browser probe', async ({ page, context }) => {
   const outcome = { ok: false, phase: 'start', message: 'the driver did not run', reads: {} };
+  const blocked = [];
+
+  // PREVENTION, NOT DETECTION - and the difference is the whole point. Checking the origin
+  // only AFTER a navigation returns is too late: the request has already been sent to the
+  // undeclared host, which for a verification tool is the harm itself. Worse, a link with
+  // target=_blank opens a SECOND page, so a check that inspects the original page sees an
+  // origin that never moved and can still report PASS while the popup talks to the outside.
+  // Both raised by the codex review of this branch, the second after the first fix.
+  //
+  // So interception is installed on the CONTEXT, before anything navigates, and it covers
+  // every page the context opens - popups included. Nothing whose origin differs from the
+  // declared service is allowed out at all.
+  //
+  // A SUBRESOURCE and a NAVIGATION are treated differently on purpose. Both are blocked -
+  // AD-12 is hermetic, localhost only - but only a NAVIGATION fails the attempt, because
+  // only a navigation means the probe was being driven at an undeclared host. A page that
+  // merely references an external font is not a probe pointed at production, and failing on
+  // it would make the rule unusable without making anything safer.
+  await context.route('**/*', (route) => {
+    const request = route.request();
+    let origin;
+    try {
+      origin = new URL(request.url()).origin;
+    } catch (error) {
+      origin = null;
+    }
+    if (origin === payload.origin) {
+      return route.continue();
+    }
+    if (request.isNavigationRequest()) {
+      blocked.push(request.url());
+    }
+    return route.abort();
+  });
 
   // NOT WRAPPED, and that is the fix for a defect the codex review found: the failure used
   // to be stored in a field nothing read, so a probe whose tracing never started could still
@@ -604,6 +659,7 @@ test('specwitness browser probe', async ({ page, context }) => {
 
     outcome.phase = 'navigate';
     await page.goto(payload.url, { waitUntil: 'load' });
+    assertNoBlockedNavigation(blocked, payload);
     assertOrigin(page, payload);
 
     for (let index = 0; index < payload.steps.length; index += 1) {
@@ -621,13 +677,18 @@ test('specwitness browser probe', async ({ page, context }) => {
       } else {
         throw new Error('the payload carried a verb this driver does not implement');
       }
-      // After EVERY step, not only after a goto: a click is the one that can leave.
+      // After EVERY step, not only after a goto: a click is the one that can leave. The
+      // interception above already refused to SEND it; this is what turns a refused
+      // navigation into a failed ATTEMPT rather than a silently ignored click.
+      assertNoBlockedNavigation(blocked, payload);
       assertOrigin(page, payload);
     }
 
     outcome.phase = 'read';
     // And once more immediately before anything is read, so no value from an undeclared
-    // host can ever become an observation.
+    // host can ever become an observation - including one reached by a popup, which the
+    // context-level interception covers and a page-level check would not.
+    assertNoBlockedNavigation(blocked, payload);
     assertOrigin(page, payload);
     for (const read of payload.reads) {
       outcome.reads[read.key] = await readOne(page, read);
@@ -1059,12 +1120,17 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     // So a verdict requires BOTH: the driver said it observed the page, AND the process that
     // ran it completed with exit 0. Anything else is `execError`.
     const runnerFailed = result.outcome !== 'completed' || result.exitCode !== 0;
-    // ⚠️ AND THE TRACE MUST ACTUALLY HAVE LANDED. AC1 requires a trace stored as evidence
-    // (Q32), so an attempt that observed the page but produced no trace has not met the
-    // story's own evidence bar. Tracing that cannot START now throws inside the driver; this
-    // covers the other half - tracing that started and could not be WRITTEN. Reporting PASS
-    // there would be the evidence-less green the persistence fix one method below refuses.
-    const traceMissing = outcome !== undefined && outcome.ok && outcome.trace !== true;
+    // ⚠️ AND THE TRACE MUST ACTUALLY HAVE LANDED — judged on the STORED ARTIFACT, not on the
+    // driver's own flag. AC1 requires a trace stored as evidence (Q32), so an attempt that
+    // observed the page and produced no stored trace has not met the story's evidence bar.
+    //
+    // Reading `artifacts.trace` rather than `outcome.trace` closes a gap the codex review
+    // found in the first version of this check: the driver can report `trace: true` while
+    // READING `trace.zip` back fails, in which case `#storeArtifacts` returns nothing and a
+    // flag-based check would still have called the evidence present. The stored result is
+    // the only thing that knows whether a file actually exists, and it subsumes the flag —
+    // a driver that never wrote a trace also stores none.
+    const traceMissing = outcome !== undefined && outcome.ok && artifacts.trace === undefined;
     const execError =
       outcome === undefined || !outcome.ok || runnerFailed || traceMissing
         ? classifyFailure(result, outcome, url, timeoutMs, redaction, traceMissing)
