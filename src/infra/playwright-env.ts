@@ -1060,6 +1060,51 @@ function isStaleOwnedCache(environment: PlaywrightResolved | PlaywrightAbsent): 
 }
 
 /**
+ * Create the cache directory and its private manifest, translating a raw
+ * filesystem failure into this module's own error type.
+ *
+ * ⚠️ THE UNWRAPPED VERSION BROKE THIS MODULE'S ONE PROMISE.
+ * `provisionPlaywright` says every failure is an `InfraError` carrying
+ * `ERROR:`/`HINT:` material, and an unwritable or read-only cache made `mkdir`
+ * or `writeFile` reject with a bare `EACCES`/`EROFS` before the classified npm
+ * invocation was ever reached. The exit code was still 3 — `exitCodeForError`
+ * fails closed — but the operator got a filesystem error with no hint, no
+ * mention of which directory SpecWitness had chosen, and no way to move it.
+ * Reported by the seventh codex review of this branch.
+ *
+ * A private manifest is written so npm treats the cache as its own project and
+ * does not walk upward into whatever happens to be above it.
+ */
+async function prepareCacheDirectory(cacheDir: string): Promise<void> {
+  try {
+    await mkdir(cacheDir, { recursive: true });
+    await writeFile(
+      join(cacheDir, 'package.json'),
+      `${JSON.stringify(
+        {
+          name: 'specwitness-playwright-cache',
+          version: '0.0.0',
+          private: true,
+          description:
+            'SpecWitness-owned Playwright cache. Created by `specwitness`; safe to delete.',
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+  } catch (error) {
+    throw new InfraError(
+      `could not prepare the SpecWitness Playwright cache at ${cacheDir}: ${echo(
+        error instanceof Error ? error.message : String(error),
+      )}`,
+      'check that directory is writable, or point the cache root elsewhere (XDG_CACHE_HOME on ' +
+        'Linux, LOCALAPPDATA on Windows) and run the command again',
+    );
+  }
+}
+
+/**
  * `npm install @playwright/test@<pinned>` into the cache.
  *
  * A private manifest is written first so npm treats the cache as its own
@@ -1069,22 +1114,7 @@ async function installPackageIntoCache(
   options: ProvisionOptions,
   paths: PlaywrightCachePaths & { readonly platform: NodeJS.Platform },
 ): Promise<void> {
-  await mkdir(paths.cacheDir, { recursive: true });
-  await writeFile(
-    join(paths.cacheDir, 'package.json'),
-    `${JSON.stringify(
-      {
-        name: 'specwitness-playwright-cache',
-        version: '0.0.0',
-        private: true,
-        description:
-          'SpecWitness-owned Playwright cache. Created by `specwitness`; safe to delete.',
-      },
-      null,
-      2,
-    )}\n`,
-    'utf8',
-  );
+  await prepareCacheDirectory(paths.cacheDir);
 
   const npmBinary = options.npmBinary ?? defaultNpmBinary(paths.platform);
 

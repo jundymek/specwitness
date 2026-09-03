@@ -1421,6 +1421,49 @@ describe('provisionPlaywright', () => {
     }
   });
 
+  /**
+   * REGRESSION — codex review of this branch, round 7.
+   *
+   * `provisionPlaywright` promises that EVERY failure is an `InfraError`
+   * carrying `ERROR:`/`HINT:` material. An unwritable cache made `mkdir` or
+   * `writeFile` reject with a bare filesystem error before the classified npm
+   * invocation was reached: the exit code was still 3, because
+   * `exitCodeForError` fails closed, but the operator got `ENOTDIR` with no
+   * hint and no mention of which directory SpecWitness had chosen.
+   */
+  it('reports an unwritable cache as an InfraError with a hint, not a raw fs error', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      // A FILE where the cache root has to be a directory: `mkdir -p` under it
+      // fails with ENOTDIR, which is the shape of a read-only or occupied path
+      // without needing to change any permissions.
+      const blocked = join(home, 'blocker');
+      await writeFile(blocked, 'not a directory', 'utf8');
+      const { runner, runs } = fakeRunner([ok(), ok()]);
+
+      const error = await expectInfraError(
+        provisionPlaywright({
+          projectRoot: project,
+          runner,
+          env: { XDG_CACHE_HOME: blocked },
+          platform: 'linux',
+          homeDir: home,
+          timeoutMs: 1_000,
+        }),
+      );
+
+      expect(error.message).toContain('SpecWitness Playwright cache');
+      expect(error.message).toContain(join(blocked, 'specwitness', 'playwright'));
+      expect(error.hint).toMatch(/writable|XDG_CACHE_HOME/i);
+      // The refusal lands before npm is ever invoked.
+      expect(runs).toHaveLength(0);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it('does not reinstall when the project already has a ready installation', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
