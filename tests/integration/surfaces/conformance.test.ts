@@ -44,6 +44,39 @@
  * IT ALSO CLOSES THE OBSERVATION INPUT SHAPES NOBODY EXERCISED
  * ============================================================================
  *
+ * ============================================================================
+ * THE FOURTH SURFACE (story 5.2)
+ * ============================================================================
+ *
+ * Epic 4's retrospective §6 said this file "is the right place to add the fourth surface,
+ * and it will fail loudly if a browser executor diverges structurally from the other
+ * three". Story 5.2 makes that good: `browser` is driven through the same four situations
+ * by the same helper, and no second conformance suite was written.
+ *
+ * It agrees on every DERIVED result. It diverges on ONE recorded evidence member, and the
+ * divergence is forced by the union in exactly the way the rule above describes:
+ *
+ *   browser      EVERY attempt, a failed launch included. `BrowserEvidence.url` is known
+ *                before anything is spawned - the CALLER resolved the origin - so it states
+ *                what was attempted rather than claiming an observation, and `trace` and
+ *                `screenshot` are BOTH optional, so an attempt that produced no artifact is
+ *                representable without inventing anything. That is shell's side of the
+ *                divergence, reached by shell's reasoning rather than by preference, and it
+ *                is strictly better than http's documented FR-28 gap.
+ *
+ *                The artifacts themselves follow HOW FAR the attempt got: a refused
+ *                connection still yields a trace, because chromium launched and only the
+ *                navigation failed. Only a browser that never started produces a member
+ *                with neither field.
+ *
+ * ⚠️ **THE BROWSER ROW IS CONDITIONAL ON A BROWSER EXISTING**, and it says so loudly on
+ * stderr when it is dropped. That is a skipped TEST on a machine with no Playwright; the
+ * PRODUCTION code has no skip path, and every route by which a browser probe could produce
+ * no attempts is an `InfraError` or an `execError`. Conflating those two is Epic 4 retro
+ * §2 observation 2 arriving a third time.
+ *
+ * ============================================================================
+ *
  * Cohort 2's supervisor measured that `src/surfaces/observation.ts` is correct but leaves
  * three params shapes untested. They are the `readProbeId` arms, and the gap is not
  * academic: **every merged observation test passes `probeId`, while a compiled plan carries
@@ -52,9 +85,9 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -67,7 +100,10 @@ import type {
 import { EVIDENCE_KINDS, type Evidence } from '../../../src/domain/evidence.js';
 import { createProcessRunner } from '../../../src/infra/process-runner.js';
 import { SystemClock } from '../../../src/infra/clock.js';
+import { resolvePlaywrightEnvironment } from '../../../src/infra/playwright-env.js';
+import type { PlaywrightEnvironment } from '../../../src/infra/playwright-env.js';
 import {
+  BrowserSurfaceExecutor,
   HttpSurfaceExecutor,
   ObservationSurfaceExecutor,
   ShellSurfaceExecutor,
@@ -90,7 +126,29 @@ const SITUATIONS: readonly Situation[] = [
   'retry-then-pass',
 ];
 
-const SURFACES: readonly ProbeSurface[] = ['http', 'observation', 'shell'];
+/**
+ * Story 5.2's fourth surface joins only when this machine can actually open a browser.
+ *
+ * Resolved with a top-level await so the value is settled before the suites below are
+ * collected, and announced on stderr when it is dropped - a silent reduction in coverage is
+ * how a conformance proof stops proving anything without anybody noticing.
+ */
+const playwright: PlaywrightEnvironment = await resolvePlaywrightEnvironment({
+  projectRoot: process.cwd(),
+});
+
+if (!playwright.ready) {
+  process.stderr.write(
+    '\n[specwitness] surface conformance is running with THREE surfaces, not four: ' +
+      `${playwright.source === 'absent' ? playwright.reason : 'no browsers are downloaded'}\n` +
+      '[specwitness] this is a skipped TEST, not a skipped CRITERION - the browser executor ' +
+      'has no skip path. Run `specwitness doctor` to provision Playwright.\n',
+  );
+}
+
+const SURFACES: readonly ProbeSurface[] = playwright.ready
+  ? ['http', 'observation', 'shell', 'browser']
+  : ['http', 'observation', 'shell'];
 
 /** What one execution produced: the attempts, and every evidence member recorded. */
 interface Executed {
@@ -141,6 +199,21 @@ process.exit(code);
 
   server = createServer((request, response) => {
     const url = request.url ?? '/';
+
+    // Story 5.2's routes: a browser needs HTML, and the flaky one has to flip on the
+    // SECOND request the way the JSON one does.
+    if (url.startsWith('/page')) {
+      const heading =
+        url === '/page-bad'
+          ? 'bad'
+          : url === '/page-flaky'
+            ? ((flakyCallCount += 1), flakyCallCount === 1 ? 'bad' : 'ok')
+            : 'ok';
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(`<!doctype html><html><head><title>t</title></head><body><h1 id="h">${heading}</h1></body></html>`);
+      return;
+    }
+
     if (url === '/flaky') {
       flakyCallCount += 1;
       response.writeHead(flakyCallCount === 1 ? 500 : 200, { 'content-type': 'application/json' });
@@ -249,6 +322,64 @@ async function executeOnce(
 
   const missing = situation === 'exec-error';
 
+  if (surface === 'browser') {
+    // A REAL evidence sink, because Playwright's own CLI has to OPEN the generated spec:
+    // the other three surfaces never read back what they wrote, so the shared no-op writer
+    // above is enough for them and is not enough here.
+    const write = async (name: string, contents: string | Uint8Array): Promise<string> => {
+      const absolute = join(scratch, name);
+      await mkdir(dirname(absolute), { recursive: true });
+      await writeFile(absolute, contents);
+      return name;
+    };
+
+    const executor = new BrowserSurfaceExecutor({
+      clock,
+      runner,
+      cwd: scratch,
+      environment: playwright,
+      writeEvidence: write,
+      writeEvidenceBytes: write,
+      resolveRunPath: (name) => join(scratch, name),
+      recordEvidence: evidence.recordEvidence,
+      stepTimeoutMs: 5_000,
+      timeoutMs: 90_000,
+    });
+
+    const path =
+      situation === 'satisfied'
+        ? '/page'
+        : situation === 'unsatisfied'
+          ? '/page-bad'
+          : situation === 'retry-then-pass'
+            ? '/page-flaky'
+            : '/page';
+
+    return await executor.execute({
+      criterionId: CRITERION.criterionId,
+      surface: 'browser',
+      params: {
+        probe: {
+          id: 'probe',
+          surface: 'browser',
+          mechanics: { serviceId: 'svc', path, scenario: '# navigate and read' },
+          assertions: [
+            {
+              description: 'the heading says ok',
+              target: { source: 'text', selector: '#h' },
+              comparison: 'equals',
+              expected: 'ok',
+            },
+          ],
+        },
+        // A closed port on localhost: the browser cannot reach anything, which is this
+        // surface's exec-error and is never a product fail.
+        baseUrl: missing ? 'http://127.0.0.1:1' : baseUrl,
+        attempt,
+      },
+    });
+  }
+
   if (surface === 'observation') {
     const executor = new ObservationSurfaceExecutor({
       runner,
@@ -355,7 +486,7 @@ describe('surface conformance — derived results (owner-assigned, story 4.7)', 
         expect(shape, `${SURFACES[index + 1]} diverges from ${SURFACES[0]}`).toEqual(reference);
       }
     },
-    30_000,
+    180_000,
   );
 
   it.each([
@@ -387,7 +518,7 @@ describe('surface conformance — derived results (owner-assigned, story 4.7)', 
         }
       }
     },
-    30_000,
+    180_000,
   );
 });
 
@@ -404,7 +535,7 @@ describe('surface conformance — recorded evidence members', () => {
         expect(EVIDENCE_KINDS).toContain(members[0]?.kind);
       }
     },
-    30_000,
+    180_000,
   );
 
   it('records the divergence on exec-error that the UNION forces, and only that', async () => {
@@ -434,7 +565,32 @@ describe('surface conformance — recorded evidence members', () => {
     // That reference did not exist before story 4.7; this test is what measured its absence.
     expect(observation.members).toHaveLength(0);
     expect(observation.attempts[0]?.evidence.length ?? 0).toBeGreaterThan(0);
-  });
+
+    // browser (story 5.2) — a member IS recorded, which is shell's side of the divergence
+    // reached by shell's reasoning: `BrowserEvidence.url` is a bare `string` the CALLER
+    // resolved before anything was spawned, so it states what was ATTEMPTED rather than
+    // claiming an observation that did not happen, and `trace`/`screenshot` are both
+    // OPTIONAL, so an attempt that produced no artifact is representable without inventing
+    // anything.
+    //
+    // ⚠️ AND THE ARTIFACTS ARE PRESENT HERE, which is worth stating because the first
+    // version of this assertion expected them absent and was WRONG. A closed port is a
+    // NAVIGATION failure, not a launch failure: chromium really started, so the driver's
+    // `finally` block really ran and really captured a trace of a browser sitting on an
+    // error page. That is the honest and more useful outcome — the evidence follows how far
+    // the attempt actually got, rather than being all-or-nothing. The genuinely
+    // artifact-less case is a browser that never launched at all, and
+    // `browser.test.ts` covers it by pointing the runner at an empty browser registry.
+    if (playwright.ready) {
+      const browser = await execute('browser', 'exec-error');
+      expect(browser.members).toHaveLength(1);
+      expect(browser.members[0]?.kind).toBe('browser');
+      const member = browser.members[0] as { url?: unknown; trace?: unknown };
+      expect(typeof member.url).toBe('string');
+      expect(member.trace).toBeDefined();
+      expect(browser.attempts[0]?.evidence.length ?? 0).toBeGreaterThan(0);
+    }
+  }, 120_000);
 
   it('the union really is shaped the way that rule claims', async () => {
     // If a later story adds an absence marker to `HttpEvidence` or `ObservationEvidence`,
@@ -451,7 +607,18 @@ describe('surface conformance — recorded evidence members', () => {
     const observation = await execute('observation', 'satisfied');
     const observationMember = observation.members[0] as { snapshot?: unknown };
     expect(observationMember.snapshot).toBeDefined();
-  }, 30_000);
+
+    // And the half that makes browser's divergence legitimate rather than a preference:
+    // `url` is required and both artifact fields are optional. If a later story makes
+    // `trace` required, browser can no longer honestly record a failed launch and this
+    // assertion is where that is noticed.
+    if (playwright.ready) {
+      const browser = await execute('browser', 'satisfied');
+      const browserMember = browser.members[0] as { url?: unknown; trace?: unknown };
+      expect(typeof browserMember.url).toBe('string');
+      expect(browserMember.trace).toBeDefined();
+    }
+  }, 120_000);
 });
 
 describe('the observation params shapes nobody exercised (cohort 2 handover)', () => {

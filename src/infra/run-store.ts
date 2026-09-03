@@ -793,6 +793,41 @@ export class RunStore {
    * fine and their parent directories are created.
    */
   async writeEvidenceFile(runId: string, relativeName: string, contents: string): Promise<string> {
+    return await this.#writeEvidence(runId, relativeName, contents);
+  }
+
+  /**
+   * Writes one BINARY evidence file into a run directory and returns its RELATIVE
+   * path. Story 5.2.
+   *
+   * The twin of `writeEvidenceFile`, sharing every containment, symlink-refusal and
+   * durability guarantee with it - literally the same private implementation, differing
+   * only in what reaches the file handle.
+   *
+   * IT EXISTS BECAUSE A TRACE IS A ZIP AND A SCREENSHOT IS A PNG. Story 5.2's AC1
+   * requires both stored as evidence (Q32), and the text writer encodes as UTF-8, so
+   * routing them through it would store an artifact of roughly the right size and
+   * entirely the wrong bytes, which no trace viewer can open. Base64 was the alternative
+   * and was rejected for the same reason: evidence a human cannot open is not evidence.
+   *
+   * IT IS ALSO WHY AD-8 SURVIVES CONTACT WITH PLAYWRIGHT. `RunStore` is the sole writer
+   * beneath `.specwitness/runs/`, and a subprocess writing its own artifacts there is
+   * exactly what that forbids - so the browser executor points Playwright at a temporary
+   * directory outside the run and copies the bytes in through here.
+   */
+  async writeEvidenceBytes(
+    runId: string,
+    relativeName: string,
+    contents: Uint8Array,
+  ): Promise<string> {
+    return await this.#writeEvidence(runId, relativeName, contents);
+  }
+
+  async #writeEvidence(
+    runId: string,
+    relativeName: string,
+    contents: string | Uint8Array,
+  ): Promise<string> {
     return this.#serialize(async () => {
       const dir = this.runDir(runId);
       const contained = this.#containedPath(dir, relativeName);
@@ -1050,14 +1085,29 @@ export class RunStore {
    * name; this is the manifest's own append discipline. The staging names do
    * not collide (`.<filename>.writing` here, `.result.json.tmp` there).
    */
-  async #writeDurably(dir: string, filename: string, contents: string): Promise<void> {
+  async #writeDurably(
+    dir: string,
+    filename: string,
+    contents: string | Uint8Array,
+  ): Promise<void> {
     const path = join(dir, filename);
     const staging = join(dir, `.${filename}.writing`);
 
     try {
       const file = await open(staging, 'w');
       try {
-        await file.writeFile(contents, 'utf8');
+        // `'utf8'` FOR TEXT ONLY. Story 5.2 added the byte path because a Playwright
+        // trace is a `.zip` and a screenshot is a `.png`, and encoding either as UTF-8
+        // replaces every byte outside the ASCII range with U+FFFD - producing a file of
+        // the right name and the wrong contents, which is worse than no artifact at all,
+        // because a reference to it looks exactly like a reference to a good one.
+        // A `Uint8Array` is written verbatim; a string keeps the encoding every caller
+        // before 5.2 relied on.
+        if (typeof contents === 'string') {
+          await file.writeFile(contents, 'utf8');
+        } else {
+          await file.writeFile(contents);
+        }
         await file.sync();
         this.#hooks.onFsync?.('file');
       } finally {
