@@ -66,10 +66,15 @@ export const playwrightCapabilityCheck: DoctorCheck = {
     }
 
     if (environment.source === 'absent') {
+      // ALL THREE FACTS, INCLUDING HERE. AC2 asks for source, version and
+      // browsers-present, and omitting two of them on an unprovisioned machine
+      // makes the output incomplete at exactly the moment an operator is
+      // reading it to find out what is missing. Reported by the fourth codex
+      // review of this branch.
       return {
         status: 'warn',
         detail:
-          `${PACKAGE} is absent — ${environment.reason}. ` +
+          `source: absent, version: unknown, browsers: absent — ${environment.reason}. ` +
           `HINT: install ${PACKAGE} in the project to use your own pinned version, or let ` +
           `SpecWitness provision one into ${environment.cacheDir} on the first browser probe ` +
           '(not required for gate, HTTP, observation or shell verification)',

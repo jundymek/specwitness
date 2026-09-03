@@ -34,6 +34,7 @@ import { InfraError } from '../../../src/domain/errors.js';
 import type { ProcessResult, ProcessRunOptions } from '../../../src/domain/process-runner.js';
 import {
   PLAYWRIGHT_PACKAGE,
+  PROVISIONED_PLAYWRIGHT_VERSION,
   provisionPlaywright,
   resolvePlaywrightEnvironment,
   specwitnessPlaywrightCacheDir,
@@ -75,7 +76,13 @@ async function installFakePlaywright(
   await mkdir(packageDir, { recursive: true });
   await writeFile(
     join(packageDir, 'package.json'),
-    JSON.stringify({ name: PLAYWRIGHT_PACKAGE, version, main: 'index.js' }),
+    JSON.stringify({
+      name: PLAYWRIGHT_PACKAGE,
+      version,
+      main: 'index.js',
+      // The real shape: npm's map form, which is what `@playwright/test` uses.
+      bin: { playwright: 'cli.js' },
+    }),
     'utf8',
   );
   await writeFile(join(packageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
@@ -566,6 +573,43 @@ describe('resolvePlaywrightEnvironment', () => {
   });
 
   /**
+   * Found by self-audit after three review rounds, all of the same class:
+   * hard-coding an answer Playwright's own metadata gives.
+   *
+   * The CLI path came from a literal `cli.js`. It comes from the manifest's
+   * `bin` field now, so a package that names its entry point differently is
+   * driven correctly instead of being spawned at a path that does not exist.
+   */
+  it('takes the CLI path from the package’s own bin field, not a literal', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      const packageDir = await installFakePlaywright(project, '1.62.1');
+      // Rewrite the manifest to declare a differently named entry point.
+      await writeFile(
+        join(packageDir, 'package.json'),
+        JSON.stringify({
+          name: PLAYWRIGHT_PACKAGE,
+          version: '1.62.1',
+          main: 'index.js',
+          bin: { playwright: 'lib/entry.js' },
+        }),
+        'utf8',
+      );
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      if (env.source === 'absent') {
+        throw new Error('unreachable');
+      }
+      expect(env.cliPath).toBe(join(env.packageDir, 'lib', 'entry.js'));
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
    * REGRESSION — codex review of this branch, round 3.
    *
    * A project pinning a Playwright that predates the separate headless-shell
@@ -1001,6 +1045,37 @@ describe('provisionPlaywright', () => {
     }
   });
 
+  it('spawns npm.cmd on Windows, because ProcessRunner uses no shell', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      const cacheDir = join(home, 'AppData', 'Local', 'specwitness', 'playwright');
+      const { runner, runs } = fakeRunner([ok(), ok()], async (call, run) => {
+        if (call === 0) {
+          await installFakePlaywright(cacheDir, '1.62.1');
+        } else {
+          await installFakeChromium(String(run.env.set?.['PLAYWRIGHT_BROWSERS_PATH']));
+        }
+      });
+
+      await provisionPlaywright({
+        projectRoot: project,
+        runner,
+        env: {},
+        platform: 'win32',
+        homeDir: home,
+        timeoutMs: 1_000,
+      });
+
+      // A bare `npm` is a shell script on POSIX and a `.cmd` on Windows; with
+      // no shell, the bare name resolves to nothing executable there.
+      expect(runs[0]?.options.binary).toBe('npm.cmd');
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it('does not refuse a COMPLETE package-local installation, and spawns nothing for it', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
@@ -1029,25 +1104,29 @@ describe('provisionPlaywright', () => {
     }
   });
 
-  it('refuses to provision INTO a package-local registry, explaining why', async () => {
+  it('refuses to provision INTO a PROJECT\u2019s package-local registry, explaining why', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
     try {
       const { runner, runs } = fakeRunner([ok(), ok()]);
+      // A project installation with nothing downloaded. Honouring `=0` here
+      // would write a browser bundle inside the project's own node_modules,
+      // which AC1 forbids outright.
+      await installFakePlaywright(project, '1.62.1');
 
       const error = await expectInfraError(
         provisionPlaywright({
-        projectRoot: project,
-        runner,
-        env: { PLAYWRIGHT_BROWSERS_PATH: '0' },
-        platform: 'linux',
-        homeDir: home,
-        timeoutMs: 1_000,
+          projectRoot: project,
+          runner,
+          env: { PLAYWRIGHT_BROWSERS_PATH: '0' },
+          platform: 'linux',
+          homeDir: home,
+          timeoutMs: 1_000,
         }),
       );
 
-      expect(error).toBeInstanceOf(InfraError);
       expect(error.message).toContain('PLAYWRIGHT_BROWSERS_PATH');
+      expect(error.message).toMatch(/project/i);
       expect(runs).toHaveLength(0);
     } finally {
       await rm(project, { recursive: true, force: true });
@@ -1055,14 +1134,73 @@ describe('provisionPlaywright', () => {
     }
   });
 
-  it('downloads only the browsers when the project has its own Playwright, and never into the project tree', async () => {
+  /**
+   * REGRESSION — codex review of this branch, round 4.
+   *
+   * With no project Playwright, the fallback package AND its `.local-browsers`
+   * both live inside SpecWitness's own cache, so there is no project tree to
+   * damage and nothing to refuse. The earlier refusal was written for the
+   * project route and applied to both by accident.
+   */
+  it('honours PLAYWRIGHT_BROWSERS_PATH=0 on the owned-cache route instead of refusing', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
     try {
       const cacheDir = join(home, '.cache', 'specwitness', 'playwright');
-      await installFakePlaywright(project, '1.30.0');
-      const { runner, runs } = fakeRunner([ok()], async (_call, run) => {
-        await installFakeChromium(String(run.env.set?.['PLAYWRIGHT_BROWSERS_PATH']));
+      const { runner, runs } = fakeRunner([ok(), ok()], async (call) => {
+        if (call === 0) {
+          await installFakePlaywright(cacheDir, '1.62.1');
+        } else {
+          await installFakeChromium(
+            join(cacheDir, 'node_modules', 'playwright-core', '.local-browsers'),
+          );
+        }
+      });
+
+      const env = await provisionPlaywright({
+        projectRoot: project,
+        runner,
+        env: { PLAYWRIGHT_BROWSERS_PATH: '0' },
+        platform: 'linux',
+        homeDir: home,
+        timeoutMs: 1_000,
+      });
+
+      expect(env.source).toBe('specwitness-cache');
+      expect(env.ready).toBe(true);
+      expect(runs).toHaveLength(2);
+      // `0` is passed through verbatim, so Playwright puts the bundle where the
+      // operator asked — inside the cache's own package, still SpecWitness-owned.
+      expect(runs[1]?.options.env.set?.['PLAYWRIGHT_BROWSERS_PATH']).toBe('0');
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * REGRESSION — codex review of this branch, round 4.
+   *
+   * A ready owned cache from an older SpecWitness would otherwise be reused
+   * indefinitely, so bumping the pin would change nothing on any machine that
+   * already had one: browser probes running an untested fallback while
+   * `package.json` said otherwise.
+   */
+  it('reinstalls an owned cache that is ready but pinned to an older version', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      const cacheDir = join(home, '.cache', 'specwitness', 'playwright');
+      // Ready, and stale: an older SpecWitness left this behind.
+      await installFakePlaywright(cacheDir, '1.40.0');
+      await installFakeChromium(join(cacheDir, 'browsers'));
+
+      const { runner, runs } = fakeRunner([ok(), ok()], async (call) => {
+        if (call === 0) {
+          await installFakePlaywright(cacheDir, PROVISIONED_PLAYWRIGHT_VERSION);
+        } else {
+          await installFakeChromium(join(cacheDir, 'browsers'));
+        }
       });
 
       const env = await provisionPlaywright({
@@ -1074,18 +1212,66 @@ describe('provisionPlaywright', () => {
         timeoutMs: 1_000,
       });
 
-      // Their pinned version is honoured: nothing installs a second copy.
-      expect(env.source).toBe('project');
-      expect(env.version).toBe('1.30.0');
-      expect(runs).toHaveLength(1);
-      expect(runs[0]?.options.args).toContain('chromium');
+      expect(env.version).toBe(PROVISIONED_PLAYWRIGHT_VERSION);
+      expect(runs[0]?.options.args.join(' ')).toContain(
+        `${PLAYWRIGHT_PACKAGE}@${PROVISIONED_PLAYWRIGHT_VERSION}`,
+      );
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 
-      // The bundle goes to the project's Playwright's OWN registry — a user
-      // cache — and neither into the project tree nor into SpecWitness's cache.
-      const browsersPath = String(runs[0]?.options.env.set?.['PLAYWRIGHT_BROWSERS_PATH']);
-      expect(browsersPath).toBe(join(home, '.cache', 'ms-playwright'));
-      expect(relative(project, browsersPath).startsWith('..')).toBe(true);
-      expect(relative(cacheDir, browsersPath).startsWith('..')).toBe(true);
+  it('leaves an owned cache alone when it is ready AT the pinned version', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      const cacheDir = join(home, '.cache', 'specwitness', 'playwright');
+      await installFakePlaywright(cacheDir, PROVISIONED_PLAYWRIGHT_VERSION);
+      await installFakeChromium(join(cacheDir, 'browsers'));
+      const { runner, runs } = fakeRunner([ok()]);
+
+      const env = await provisionPlaywright({
+        projectRoot: project,
+        runner,
+        env: {},
+        platform: 'linux',
+        homeDir: home,
+        timeoutMs: 1_000,
+      });
+
+      expect(env.source).toBe('specwitness-cache');
+      expect(runs).toHaveLength(0);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The pin bounds only what SPECWITNESS installs. A project's version is the
+   * project's decision, and honouring it is the whole reason the project's
+   * installation is preferred (FR-24).
+   */
+  it('never second-guesses a PROJECT installation’s version', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.30.0', '1045', 'legacy');
+      await installFakeLegacyChromium(join(home, '.cache', 'ms-playwright'), '1045');
+      const { runner, runs } = fakeRunner([ok()]);
+
+      const env = await provisionPlaywright({
+        projectRoot: project,
+        runner,
+        env: {},
+        platform: 'linux',
+        homeDir: home,
+        timeoutMs: 1_000,
+      });
+
+      expect(env.version).toBe('1.30.0');
+      expect(runs).toHaveLength(0);
     } finally {
       await rm(project, { recursive: true, force: true });
       await rm(home, { recursive: true, force: true });

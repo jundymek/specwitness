@@ -151,6 +151,19 @@ const INSTALLATION_COMPLETE = 'INSTALLATION_COMPLETE';
 /** Where Playwright keeps browsers when `PLAYWRIGHT_BROWSERS_PATH=0`. */
 const PACKAGE_LOCAL_BROWSERS_DIR = '.local-browsers';
 
+/**
+ * Last resort for the CLI entry point, used only when the package's own `bin`
+ * cannot be read.
+ *
+ * A LAST RESORT AND NOT A DEFAULT: the path comes from the manifest's `bin`
+ * field, because "what is this Playwright's CLI called?" is a question
+ * Playwright's own metadata answers and this module has now been wrong three
+ * times for guessing such answers instead of reading them. Kept only so that a
+ * package with an unreadable manifest produces a classified spawn failure
+ * naming a plausible path, rather than no attempt at all.
+ */
+const FALLBACK_CLI_ENTRY = 'cli.js';
+
 /** Bound on any subprocess text echoed into an error message. */
 const MAX_ECHOED_OUTPUT = 400;
 
@@ -474,7 +487,7 @@ async function describe(
   paths: PlaywrightCachePaths,
   context: CachePathInputs & { readonly browsersPath: string },
 ): Promise<PlaywrightResolved> {
-  const version = await readVersion(packageDir);
+  const manifest = await readManifest(packageDir);
   const coreDir = findPackageNear(packageDir, 'playwright-core');
 
   // `PLAYWRIGHT_BROWSERS_PATH=0` is a SUPPORTED Playwright configuration, not
@@ -495,8 +508,8 @@ async function describe(
   return {
     source,
     packageDir,
-    cliPath: join(packageDir, 'cli.js'),
-    version,
+    cliPath: join(packageDir, manifest.binRelative ?? FALLBACK_CLI_ENTRY),
+    version: manifest.version,
     browsersPath,
     browsersPathFromEnv: paths.browsersPathFromEnv,
     browsersPresent,
@@ -505,18 +518,54 @@ async function describe(
   };
 }
 
-async function readVersion(packageDir: string): Promise<string | null> {
+/** The facts this module reads out of a resolved package's own manifest. */
+interface PackageManifest {
+  /** `null` when unreadable — reported as an unknown version, never guessed. */
+  readonly version: string | null;
+  /** The `bin` entry for Playwright's CLI, relative to the package directory. */
+  readonly binRelative: string | null;
+}
+
+/**
+ * Read the resolved package's manifest once, for both facts that come from it.
+ *
+ * An unreadable manifest is NOT a failure: the package still resolves and a run
+ * could still drive it, so the version is reported unknown and the CLI path
+ * falls back — a spawn against a wrong path is classified as an `InfraError`
+ * with a real diagnosis, which beats refusing an installation that may work.
+ */
+async function readManifest(packageDir: string): Promise<PackageManifest> {
   try {
     const parsed: unknown = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8'));
-    if (typeof parsed === 'object' && parsed !== null) {
-      const version = (parsed as { version?: unknown }).version;
-      if (typeof version === 'string' && version !== '') {
-        return version;
-      }
+    if (typeof parsed !== 'object' || parsed === null) {
+      return { version: null, binRelative: null };
     }
+    const declared = parsed as { version?: unknown; bin?: unknown };
+    const version =
+      typeof declared.version === 'string' && declared.version !== '' ? declared.version : null;
+    return { version, binRelative: playwrightBinEntry(declared.bin) };
   } catch {
-    // An unreadable manifest is reported as an unknown version, never as a
-    // failure: the package still resolves and a run could still drive it.
+    return { version: null, binRelative: null };
+  }
+}
+
+/**
+ * The CLI path Playwright's manifest declares.
+ *
+ * Both npm `bin` shapes are handled — a bare string, and the map form
+ * `{"playwright": "cli.js"}` that `@playwright/test` actually uses — because
+ * reading the field is only an improvement over hard-coding `cli.js` if it
+ * reads the field as npm defines it.
+ */
+function playwrightBinEntry(bin: unknown): string | null {
+  if (typeof bin === 'string' && bin !== '') {
+    return bin;
+  }
+  if (typeof bin === 'object' && bin !== null) {
+    const entry = (bin as Record<string, unknown>)['playwright'];
+    if (typeof entry === 'string' && entry !== '') {
+      return entry;
+    }
   }
   return null;
 }
@@ -808,32 +857,36 @@ export async function provisionPlaywright(options: ProvisionOptions): Promise<Pl
   // at a configuration SpecWitness cannot write into, fired at one it did not
   // need to write into at all. Reported by the codex re-review of this branch.
   const existing = await resolvePlaywrightEnvironment(options);
-  if (existing.ready) {
+  if (existing.ready && !isStaleOwnedCache(existing)) {
     return existing;
   }
 
-  if (paths.browsersPackageLocal) {
-    // Still a refusal, and still exit 3 — but now only when something actually
-    // has to be downloaded. `=0` puts the bundle inside the Playwright package,
-    // which for a project's installation means inside the project's own
-    // `node_modules`: a target repository that gained a browser bundle because
-    // it was verified would have been damaged by its verifier (AC1, FR-24).
-    throw new InfraError(
-      `PLAYWRIGHT_BROWSERS_PATH=${BROWSERS_PATH_PACKAGE_LOCAL} asks Playwright to keep browsers ` +
-        `inside its own package directory, and SpecWitness will not write a browser bundle into ` +
-        `a project's tree`,
-      `run \`npx playwright install ${PROVISIONED_BROWSER}\` yourself to populate it, or unset ` +
-        'PLAYWRIGHT_BROWSERS_PATH (or point it at a directory SpecWitness may write to) and run ' +
-        'the command again',
-    );
-  }
-
   if (existing.source === 'project') {
+    if (paths.browsersPackageLocal) {
+      // A refusal, exit 3, and now narrowly scoped: only the PROJECT route.
+      // `=0` puts the bundle inside the Playwright package, which for a
+      // project's own installation means inside the project's `node_modules` —
+      // and a target repository that gained a browser bundle because it was
+      // verified would have been damaged by its verifier (AC1, FR-24).
+      throw new InfraError(
+        `PLAYWRIGHT_BROWSERS_PATH=${BROWSERS_PATH_PACKAGE_LOCAL} asks Playwright to keep browsers ` +
+          `inside its own package directory, and SpecWitness will not write a browser bundle into ` +
+          `a project's tree`,
+        `run \`npx playwright install ${PROVISIONED_BROWSER}\` yourself to populate it, or unset ` +
+          'PLAYWRIGHT_BROWSERS_PATH (or point it at a directory SpecWitness may write to) and run ' +
+          'the command again',
+      );
+    }
     await installBrowsers(options, context.projectRoot, existing, existing.browsersPath);
     return await requireReady(options, 'project');
   }
 
-  await installPackageIntoCache(options, paths);
+  // The owned-cache route. `=0` is honoured here rather than refused: the
+  // fallback package AND its `.local-browsers` both live inside SpecWitness's
+  // own cache, so there is no project tree to damage. Reported by the fourth
+  // codex review, which is worth naming — the earlier refusal was written for
+  // the project route and applied to both by accident.
+  await installPackageIntoCache(options, { ...paths, platform: context.platform });
 
   const installed = await resolvePlaywrightEnvironment(options);
   if (installed.source !== 'specwitness-cache') {
@@ -844,8 +897,38 @@ export async function provisionPlaywright(options: ProvisionOptions): Promise<Pl
     );
   }
 
-  await installBrowsers(options, paths.cacheDir, installed, paths.browsersPath);
+  await installBrowsers(
+    options,
+    paths.cacheDir,
+    installed,
+    // `0` is passed through verbatim so Playwright puts the bundle inside the
+    // cache's own package, which is exactly where the operator asked for it and
+    // is still SpecWitness-owned.
+    paths.browsersPackageLocal ? BROWSERS_PATH_PACKAGE_LOCAL : paths.browsersPath,
+  );
   return await requireReady(options, 'specwitness-cache');
+}
+
+/**
+ * True when a ready environment is SpecWitness's OWN cache at a version this
+ * build was never exercised against.
+ *
+ * A ready cache would otherwise be reused indefinitely across SpecWitness
+ * upgrades, so bumping `PROVISIONED_PLAYWRIGHT_VERSION` would change the pin
+ * everywhere except on the machines that already had a cache — browser probes
+ * running against an untested fallback while `package.json` said otherwise.
+ * That is the contract-freeze rule's own concern: implementation must never
+ * silently change expected behaviour. Reported by the fourth codex review.
+ *
+ * A PROJECT's installation is deliberately exempt. Its version is the project's
+ * decision, and honouring it is the whole reason the project is preferred
+ * (FR-24) — the pin bounds only what SpecWitness installs for itself.
+ */
+function isStaleOwnedCache(environment: PlaywrightResolved | PlaywrightAbsent): boolean {
+  return (
+    environment.source === 'specwitness-cache' &&
+    environment.version !== PROVISIONED_PLAYWRIGHT_VERSION
+  );
 }
 
 /**
@@ -856,7 +939,7 @@ export async function provisionPlaywright(options: ProvisionOptions): Promise<Pl
  */
 async function installPackageIntoCache(
   options: ProvisionOptions,
-  paths: PlaywrightCachePaths,
+  paths: PlaywrightCachePaths & { readonly platform: NodeJS.Platform },
 ): Promise<void> {
   await mkdir(paths.cacheDir, { recursive: true });
   await writeFile(
@@ -875,8 +958,10 @@ async function installPackageIntoCache(
     'utf8',
   );
 
+  const npmBinary = options.npmBinary ?? defaultNpmBinary(paths.platform);
+
   const result = await spawn(options, {
-    binary: options.npmBinary ?? 'npm',
+    binary: npmBinary,
     args: [
       'install',
       `${PLAYWRIGHT_PACKAGE}@${PROVISIONED_PLAYWRIGHT_VERSION}`,
@@ -889,7 +974,7 @@ async function installPackageIntoCache(
     env: { inherit: true },
   });
 
-  classify(result, `installing ${PLAYWRIGHT_PACKAGE} into ${paths.cacheDir}`, options.npmBinary ?? 'npm');
+  classify(result, `installing ${PLAYWRIGHT_PACKAGE} into ${paths.cacheDir}`, npmBinary);
 }
 
 /** `playwright install chromium`, into `browsersPath`. */
@@ -916,6 +1001,19 @@ async function installBrowsers(
   });
 
   classify(result, `downloading ${PROVISIONED_BROWSER} into ${browsersPath}`, nodeBinary);
+}
+
+/**
+ * `npm` is a shell script on POSIX and a `.cmd` batch file on Windows, and
+ * `ProcessRunner` spawns with no shell (AD-3) — so on Windows the bare name
+ * does not resolve to anything executable.
+ *
+ * NOT VERIFIED ON WINDOWS, and said so in the PR body rather than implied: no
+ * gate in five epics has run on it. It is written this way because a bare
+ * `npm` there is knowably wrong, not because the alternative is tested.
+ */
+function defaultNpmBinary(platform: NodeJS.Platform): string {
+  return platform === 'win32' ? 'npm.cmd' : 'npm';
 }
 
 async function spawn(

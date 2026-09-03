@@ -120,7 +120,12 @@ describe('playwright-capability (optional)', () => {
     const result = await run(ABSENT);
 
     expect(result.status).toBe('warn');
-    expect(result.detail).toMatch(/absent|does not resolve/i);
+    // ALL THREE OF AC2's FACTS, on the path where they matter most: an operator
+    // reading this is trying to find out what is missing. Reporting only the
+    // source made the output incomplete on exactly an unprovisioned machine.
+    expect(result.detail).toMatch(/source:\s*absent/i);
+    expect(result.detail).toMatch(/version:\s*unknown/i);
+    expect(result.detail).toMatch(/browsers:\s*absent/i);
     expect(result.detail).toContain('HINT:');
     // The hint must name the cache the operator's bytes would land in — this is
     // the only work in five epics that writes outside the repository.
