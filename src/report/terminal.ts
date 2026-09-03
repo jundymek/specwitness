@@ -32,10 +32,14 @@ import {
 } from '../domain/evidence.js';
 import {
   countCriterionStatuses,
-  countFlaky,
   countGateStatuses,
+  summarizeFlakiness,
+  type FlakinessCounts,
 } from '../domain/result-counts.js';
-import type { DerivedCriterionResult } from '../domain/criterion-result.js';
+import type {
+  CriterionAttemptRecord,
+  DerivedCriterionResult,
+} from '../domain/criterion-result.js';
 import { CRITERION_STATUSES, GATE_STATUSES } from '../domain/result.js';
 import type { RunResult } from '../domain/run-result.js';
 import type { StageTimelineEntry } from '../domain/stage.js';
@@ -279,8 +283,81 @@ function criterionLines(criterion: DerivedCriterionResult): string[] {
   for (const ref of criterion.evidence ?? []) {
     detail.push(`      evidence: ${ref.kind} at ${ref.path}`);
   }
+  detail.push(...attemptLines(criterion.attempts));
 
   return [head, ...detail];
+}
+
+/**
+ * What each attempt did, beneath a criterion that took more than one (story 5.4).
+ *
+ * THIS IS THE HALF OF FR-32 THE `(flaky)` MARKER ABOVE CANNOT CARRY. A pass returns from
+ * the derivation with no expected, no actual and no evidence — nothing to look at — so
+ * without these lines the marker names a problem and points nowhere, and a flake a reader
+ * cannot investigate is a flake they learn to skim past. That is the laundering defect
+ * this story exists to prevent, arriving one step later than expected: the report is
+ * technically correct and practically useless.
+ *
+ * PRINTED FOR AN EXHAUSTED RETRY TOO, not only for a flaky pass. AC2 says retries change
+ * repetition and never classification, and someone debugging a criterion that failed three
+ * times needs the first two attempts exactly as much as a flake reader needs the failed
+ * one. Nothing is printed for the ordinary single-attempt criterion, which — retries being
+ * opt-in and 0 by default — is every criterion of almost every run.
+ *
+ * BOUNDED BY CONSTRUCTION (FR-29): `retries` is capped at `MAX_PROBE_RETRIES` in the
+ * config schema, so this is at most six attempts of at most four lines, and only for
+ * criteria a project explicitly asked to repeat.
+ */
+function attemptLines(attempts: readonly CriterionAttemptRecord[] | undefined): string[] {
+  if (attempts === undefined) {
+    return [];
+  }
+
+  return attempts.flatMap((record) => {
+    const lines = [
+      `      attempt ${record.attempt} of ${attempts.length}: ${record.outcome}` +
+        ` (${record.durationMs} ms)`,
+    ];
+    if (record.expected !== undefined) {
+      lines.push(`        expected: ${record.expected}`);
+    }
+    if (record.actual !== undefined) {
+      lines.push(`        actual:   ${record.actual}`);
+    }
+    for (const ref of record.evidence ?? []) {
+      // The attempt number is in the file name (see `evidenceStem` in the http surface):
+      // attempt 2 never overwrites attempt 1, so a flaky pass points at the artifact that
+      // actually shows the failure rather than at one showing the pass.
+      lines.push(`        evidence: ${ref.kind} at ${ref.path}`);
+    }
+    return lines;
+  });
+}
+
+/**
+ * The run's flake figures for the Counts section (story 5.4).
+ *
+ * THE FLAKY COUNT IS ALWAYS PRINTED, INCLUDING ZERO. Until this story it was suppressed
+ * when nothing was flaky, which left "nothing was flaky" and "this build does not report
+ * flake" looking identical on the page — the same ambiguity that made `flakiness` a key
+ * the persisted document always writes rather than one it omits when empty. FR-32's
+ * subject is that a reader can tell; a silence they have to interpret is not telling them.
+ *
+ * The repetition figures ARE suppressed when there was none, and the asymmetry is
+ * deliberate: `0 flaky` answers a question every reader of a verification report has,
+ * whereas `0 retried` answers one only a project that opted into retries is asking. When
+ * they do appear, they are SM-C3's denominator — "retry-to-green rate must stay visible,
+ * never optimized away by hidden retries" — and a rate needs both halves.
+ */
+function flakinessSummary(counts: FlakinessCounts): string {
+  const parts = [`${counts.flakyCriteria} flaky`];
+  if (counts.retriedCriteria > 0) {
+    parts.push(
+      `${counts.retriedCriteria} retried`,
+      `${counts.extraAttempts} extra ${counts.extraAttempts === 1 ? 'attempt' : 'attempts'}`,
+    );
+  }
+  return parts.join(' · ');
 }
 
 /** The pointers alone, for entries whose text the report does not inline. */
@@ -302,7 +379,11 @@ function pointerLines(texts: readonly BoundedText[], indent: string): string[] {
 export function renderTerminal(result: RunResult): string {
   const criterionCounts = countCriterionStatuses(result.criteria);
   const gateCounts = countGateStatuses(result.gates);
-  const flaky = countFlaky(result.criteria);
+  // The SAME derivation `schemas/result.ts` writes into `result.json` (story 5.4). Two
+  // views, one implementation: a flaky count that disagreed between the human report and
+  // the machine document would be AD-11's drift in the one field whose entire purpose is
+  // that somebody sees it.
+  const flakiness = summarizeFlakiness(result.criteria);
 
   const lines: string[] = [
     `SpecWitness run ${result.runId}`,
@@ -339,7 +420,7 @@ export function renderTerminal(result: RunResult): string {
 
     ...section('Counts', [
       `  Criteria:  ${CRITERION_STATUSES.map((s) => `${criterionCounts[s]} ${s}`).join(' · ')}` +
-        `${flaky === 0 ? '' : `  (${flaky} flaky)`}`,
+        `  (${flakinessSummary(flakiness)})`,
       `  Gates:     ${GATE_STATUSES.map((s) => `${gateCounts[s]} ${s}`).join(' · ')}`,
     ]),
 

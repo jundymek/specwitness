@@ -27,7 +27,7 @@
 export { commandText, type DeclaredCommand } from './declared-command.js'
 export { MissingConfigFileError, isMissingConfigFileError } from './errors.js'
 export { CONFIG_RELATIVE_PATH, loadConfig } from './load.js'
-export { AI_ROLES } from './schema.js'
+export { AI_ROLES, MAX_PROBE_RETRIES } from './schema.js'
 export {
   getObservationCommand,
   resolveRoleProvider,
@@ -39,6 +39,7 @@ export {
   type ProviderConfig,
   type ReadinessConfig,
   type ResolvedProvider,
+  type RetriesConfig,
   type ServiceConfig,
   type SetupConfig,
   type SpecwitnessConfig,

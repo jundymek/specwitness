@@ -83,6 +83,9 @@ describe('serializeRunResult — the one byte sequence (AC1)', () => {
       'stages',
       'gates',
       'criteria',
+      // Story 5.4's run-level retry/flake counts, placed immediately after the array they
+      // are derived from so a reader meets the summary where the data is.
+      'flakiness',
       'evidence',
       'providerUsage',
       'environment',
@@ -138,15 +141,21 @@ describe('toRunResult is the exact inverse of toRunResultDocument (AC1)', () => 
     expect(toRunResult(toRunResultDocument(original))).toEqual(original);
   });
 
-  it('drops schemaVersion and nothing else', () => {
-    // The one key the document adds. If it ever dropped a second, a renderer would be
-    // handed a model missing a fact and AD-11 would be violated silently.
+  it('drops the document-only keys and nothing else', () => {
+    // The keys the document adds. If it ever dropped one MORE than these, a renderer would
+    // be handed a model missing a fact and AD-11 would be violated silently.
+    //
+    // `flakiness` joined `schemaVersion` in story 5.4 and is dropped for the opposite
+    // reason to being carried: it is DERIVED from `criteria`, and a model that stored it
+    // would be the second source of truth `domain/result-counts.ts` refuses. A renderer
+    // handed the recovered model recomputes the same three numbers.
+    const documentOnly = ['schemaVersion', 'flakiness'];
     const document = toRunResultDocument(fullyPopulatedRunResult());
 
     const model = toRunResult(document) as unknown as Record<string, unknown>;
 
     expect(Object.keys(model)).toEqual(
-      Object.keys(document).filter((key) => key !== 'schemaVersion'),
+      Object.keys(document).filter((key) => !documentOnly.includes(key)),
     );
   });
 

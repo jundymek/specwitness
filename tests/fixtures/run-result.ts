@@ -181,6 +181,28 @@ export function fullyPopulatedRunResult(): RunResult {
         flaky: true,
         statement: 'The health endpoint responds within the configured timeout.',
         severity: 'normal',
+        // Story 5.4. The flaky pass carries its ATTEMPTS, because a `pass` result has no
+        // expected, no actual and no evidence of its own — so this is the only place the
+        // attempt it was flaky about survives, and a snapshot of a document without it
+        // could not notice the field changing. Note attempt 1's evidence path differs from
+        // attempt 2's: a retry that overwrote the failed attempt's artifact would leave
+        // `flaky: true` pointing at a file showing a pass.
+        attempts: [
+          {
+            attempt: 1,
+            outcome: 'fail',
+            durationMs: 5100,
+            expected: 'status 200 within 2000ms',
+            actual: 'status 503',
+            evidence: [{ kind: 'http', path: 'probes/http-e7-02-01.response.txt' }],
+          },
+          {
+            attempt: 2,
+            outcome: 'pass',
+            durationMs: 380,
+            evidence: [{ kind: 'http', path: 'probes/http-e7-02-02.response.txt' }],
+          },
+        ],
       },
       {
         criterionId: 'E7-03',

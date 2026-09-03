@@ -31,6 +31,8 @@
 
 import { z } from 'zod';
 
+import type { ProbeSurface } from '../domain/criterion-result.js';
+
 import type { DeclaredCommand } from './declared-command.js';
 
 const DEFAULT_PLANNING_ARTIFACTS = 'docs/planning-artifacts';
@@ -151,6 +153,69 @@ const observationSchema = z.strictObject({
   run: declaredCommand(),
 });
 
+/**
+ * ============================================================================
+ * `retries:` — story 5.4. The field Epic 4 built the mechanism for and left out.
+ * ============================================================================
+ *
+ * WHY IT LIVES HERE AND NOT IN THE PLAN. Both were candidates and the argument is not
+ * close. A retry count is an *environment* property — "this machine's browser is flaky",
+ * "this CI box drops the first connection" — and the Project Config is where every other
+ * per-environment knob already lives. The Plan (`src/schemas/plan.ts`) is compiled from a
+ * frozen contract and carries that contract's fingerprint: a retry count baked into it
+ * would become part of what "the same verification" MEANS, so raising it on a flaky
+ * machine would read as tampering with the specification rather than as tuning the
+ * environment. Disagreement with that is an ADR in `docs/adr/`, not an edit here.
+ *
+ * OPT-IN, DEFAULT 0, FOR EVERY SURFACE (AD-9, question Q43). A run is deterministic
+ * unless the project asked otherwise. A default retry would silently convert every flaky
+ * environment into green, which is FR-32's failure mode arriving through the config file
+ * — so the default is written surface by surface below and pinned by a test that fails if
+ * any of them ever becomes non-zero.
+ *
+ * REJECTED, NOT CLAMPED — and this deliberately diverges from `src/providers/invoke.ts`,
+ * whose `clampRetries` folds an out-of-range `maxRetries` into `[0, 5]` because "clamping
+ * is friendlier than rejecting a config over a number that has an obviously sane
+ * interpretation". That reasoning holds for an INTERNAL option with a documented default
+ * that no human typed. It does not hold here, for two reasons. First, this file's whole
+ * convention is to fail closed and name the offending YAML path, because a config error a
+ * user can find is worth more than one the product papers over. Second, and decisively:
+ * an operator who wrote `retries: { http: 1000 }` and got 5 would believe they had
+ * configured something they did not get, and a verification tool whose settings quietly
+ * mean something other than what they say is the same class of defect as a verdict that
+ * quietly means something other than what it says. The ceiling exists so a typo cannot
+ * spend an afternoon; saying so out loud costs one error message.
+ *
+ * `z.number().int().min(0).max(...)` closes every non-terminating value in one line: zod's
+ * number rejects NaN, `.int()` rejects both infinities and any fraction, `.min(0)` rejects
+ * a negative. There is no path from this field to a loop that does not end.
+ */
+
+/**
+ * The most EXTRA attempts any one probe class may take, so 5 retries means at most 6
+ * attempts. The same ceiling `src/providers/invoke.ts` applies to provider retries, and
+ * deliberately the same number: two different bounds on "how many times may this be
+ * repeated" would be two numbers to look up and one to get wrong.
+ */
+export const MAX_PROBE_RETRIES = 5;
+
+const retryCount = z.number().int().min(0).max(MAX_PROBE_RETRIES).default(0);
+
+/**
+ * Declared as a `Record<ProbeSurface, ...>` rather than inline in `z.strictObject`, which
+ * is what makes the exhaustiveness a COMPILE-TIME fact: a fifth probe surface added to
+ * `PROBE_SURFACES` stops this file compiling until it is given a default here, and a key
+ * that is not a surface is rejected by the type checker before the schema ever sees it.
+ */
+const retriesShape: Record<ProbeSurface, typeof retryCount> = {
+  http: retryCount,
+  browser: retryCount,
+  observation: retryCount,
+  shell: retryCount,
+};
+
+const retriesSchema = z.strictObject(retriesShape);
+
 const baseConfigSchema = z.strictObject({
   version: z.literal(1),
   project: projectSchema,
@@ -170,6 +235,13 @@ const baseConfigSchema = z.strictObject({
   /** Free-form command map keyed by name; `reset` is the conventional key. */
   data: z.record(nonEmptyString, declaredCommand()).default({}),
   observations: z.record(nonEmptyString, observationSchema).default({}),
+  /**
+   * Opt-in bounded retries per probe class (AD-9, FR-32). `prefault`, not `default`, for
+   * the reason `planning` states above: a bare `.default({})` is returned AS-IS without
+   * being parsed, so an absent block would yield `{}` and every `config.retries.<surface>`
+   * read would be `undefined` rather than 0 — a silently policy-free retry policy.
+   */
+  retries: retriesSchema.prefault({}),
   ai: aiSchema.default({}),
 });
 

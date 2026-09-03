@@ -58,8 +58,10 @@
 
 import { z } from 'zod';
 
+import { ATTEMPT_OUTCOMES } from '../domain/criterion-result.js';
 import { InfraError } from '../domain/errors.js';
 import { EVIDENCE_KINDS } from '../domain/evidence.js';
+import { summarizeFlakiness } from '../domain/result-counts.js';
 import type { RunResult } from '../domain/run-result.js';
 import { STAGE_NAMES, STAGE_STATUSES } from '../domain/stage.js';
 import {
@@ -308,6 +310,26 @@ const GateResultSchema = z
   })
   .strict();
 
+/**
+ * One attempt of a retried criterion (story 5.4, AD-9's "every attempt recorded").
+ *
+ * Present on the criterion below only when it took MORE THAN ONE attempt — see
+ * `DerivedCriterionResult.attempts` for why a single attempt gets no record. The outcome
+ * vocabulary is `ATTEMPT_OUTCOMES`, DERIVED from the domain rather than re-listed, exactly
+ * as `schemas/enums.ts` derives every other closed vocabulary: an attempt is never
+ * `skipped`, because a criterion can be skipped but an attempt that ran cannot.
+ */
+const CriterionAttemptSchema = z
+  .object({
+    attempt: z.number().int().positive(),
+    outcome: z.enum(ATTEMPT_OUTCOMES),
+    durationMs: z.number().int().nonnegative(),
+    expected: z.string().optional(),
+    actual: z.string().optional(),
+    evidence: z.array(EvidenceRefSchema).readonly().optional(),
+  })
+  .strict();
+
 const CriterionResultSchema = z
   .object({
     criterionId: z.string().min(1),
@@ -322,6 +344,7 @@ const CriterionResultSchema = z
     // it is built from, and `toRunResultDocument` would need a cast — which is exactly the
     // kind of cast that later hides a real mismatch.
     evidence: z.array(EvidenceRefSchema).readonly().optional(),
+    attempts: z.array(CriterionAttemptSchema).readonly().optional(),
   })
   .strict();
 
@@ -373,6 +396,57 @@ const ContractSummarySchema = z
 // ---------------------------------------------------------------------------
 
 /**
+ * FR-33's per-run retry/flake counts, as the persisted document carries them (story 5.4).
+ *
+ * **The `scorecard` command that reads these is Epic 7 and does not exist yet.** What
+ * exists is the obligation that the numbers be IN the stored run, so Epic 7 can build a
+ * scorecard out of stored evidence instead of re-running a verification to recount it.
+ */
+const FlakinessCountsSchema = z
+  .object({
+    flakyCriteria: z.number().int().nonnegative(),
+    retriedCriteria: z.number().int().nonnegative(),
+    extraAttempts: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/**
+ * THE KEYS THE DOCUMENT ADDS TO THE MODEL — all of them, in one place.
+ *
+ * Until story 5.4 there was exactly one (`schemaVersion`), and three merged guards said so
+ * in three different ways: this module's own comments, `toRunResult`'s "document minus
+ * model = {schemaVersion}" reliance, and `tests/unit/schemas/result-mirror.type.test.ts`'s
+ * compile-time `schemaVersionIsTheOnlyExtra`. Those guards did their job — they made this
+ * a decision that had to be written down rather than one that could be slipped in.
+ *
+ * WHY `flakiness` JOINS IT. AC1 of story 5.4 requires flaky counts in the JSON, and
+ * `domain/result-counts.ts` records the opposite-facing decision that counts are DERIVED
+ * and never stored on `RunResult`, because "a persisted `{pass: 3}` next to four passing
+ * criteria is a document that contradicts itself and no reader can tell which half is
+ * right". Both hold at once only here: the value is derived by the shared
+ * `summarizeFlakiness` from the very `criteria` array this same document carries, in the
+ * same instant, so it cannot contradict its own file — and it never exists on the mutable
+ * model at all, so no stage can let it drift.
+ *
+ * The exception is NAMED AND TYPED rather than implicit, which keeps the guards at full
+ * strength instead of weakening them: the mirror test compares the document minus these
+ * keys against the model in both directions, and `toRunResult` strips exactly these. A
+ * fourth document-only key still cannot appear without editing this type and every guard
+ * that reads it.
+ */
+export interface RunResultDocumentOnlyFields {
+  readonly schemaVersion: number;
+  /**
+   * OPTIONAL on read, always written. A `result.json` stored before story 5.4 does not
+   * carry it, and `.strict()` would refuse such a document if this key were required —
+   * which is precisely the "a stored run from last week must stay readable" rule
+   * `schemas/versions.ts` states, and the reason `SCHEMA_VERSIONS.jsonReport` does not
+   * move for this change.
+   */
+  readonly flakiness?: z.infer<typeof FlakinessCountsSchema>;
+}
+
+/**
  * The persisted shape.
  *
  * `.strict()` for the same reason the manifest is: an unknown key means a newer writer
@@ -393,6 +467,8 @@ export const RunResultDocumentSchema = z
     stages: z.array(StageTimelineEntrySchema),
     gates: z.array(GateResultSchema),
     criteria: z.array(CriterionResultSchema),
+    /** Derived from `criteria` at serialization time; see `RunResultDocumentOnlyFields`. */
+    flakiness: FlakinessCountsSchema.optional(),
     evidence: z.array(EvidenceSchema),
     providerUsage: z.array(ProviderUsageSchema),
     environment: RunEnvironmentSchema,
@@ -405,11 +481,17 @@ export type RunResultDocument = z.infer<typeof RunResultDocumentSchema>;
 /**
  * Turns the in-memory model into the persisted document.
  *
- * Adds `schemaVersion` and NOTHING else — every other value is copied through unchanged.
- * Nothing here redacts, truncates, normalises a path or recomputes a count: redaction
- * happens at capture (AD-10) and counts are derived by `domain/result-counts.ts`. A
- * persistence layer that re-processed its input would be a second place where the meaning
- * of a run could change.
+ * Adds exactly the keys `RunResultDocumentOnlyFields` names and NOTHING else — every other
+ * value is copied through unchanged. Nothing here redacts, truncates or normalises a path:
+ * redaction happens at capture (AD-10). A persistence layer that re-processed its input
+ * would be a second place where the meaning of a run could change.
+ *
+ * `flakiness` is the one computed value, and it is computed rather than copied precisely
+ * so that it cannot be stale: `domain/result-counts.ts` refuses to store a count beside
+ * the array it counts, and deriving it here — from `result.criteria`, at the instant that
+ * same array is written — is how the document carries the number without the model ever
+ * holding a second source of truth. `summarizeFlakiness` is the SAME function
+ * `report/terminal.ts` calls, so the human report and this file cannot disagree (AD-11).
  *
  * THE KEY ORDER OF THIS OBJECT LITERAL IS THE KEY ORDER OF THE FILE. `JSON.stringify`
  * preserves insertion order for string keys, which is what makes the byte sequence
@@ -429,6 +511,7 @@ export function toRunResultDocument(result: RunResult): RunResultDocument {
     stages: [...result.stages],
     gates: [...result.gates],
     criteria: [...result.criteria],
+    flakiness: summarizeFlakiness(result.criteria),
     evidence: [...result.evidence],
     providerUsage: [...result.providerUsage],
     environment: result.environment,
@@ -440,7 +523,8 @@ export function toRunResultDocument(result: RunResult): RunResultDocument {
 }
 
 /**
- * The exact inverse of `toRunResultDocument`: drops `schemaVersion` and nothing else.
+ * The exact inverse of `toRunResultDocument`: drops the document-only keys and nothing
+ * else.
  *
  * It lives here, beside its inverse, rather than at each call site — for three reasons,
  * agreed with story 3.6 before either module was written. Nobody should have to discover
@@ -449,14 +533,21 @@ export function toRunResultDocument(result: RunResult): RunResultDocument {
  * entirely, so a renderer's signature stays `(result: RunResult) => string`.
  *
  * WHY A CAST IS SAFE HERE AND NOT A SHORTCUT. The document schema is derived from the
- * model field by field, and the ONLY key the document adds is `schemaVersion`; the
- * compiler checks that in `toRunResultDocument`, which builds a `RunResultDocument` out of
- * a `RunResult` without a cast. So the two types differ by exactly that key, and removing
- * it yields a `RunResult` by construction. If a future edit adds a second document-only
- * key, `toRunResultDocument` stops compiling first — which is the point.
+ * model field by field, and the keys the document adds are exactly those of
+ * `RunResultDocumentOnlyFields`; `tests/unit/schemas/result-mirror.type.test.ts` checks
+ * that at COMPILE time, in both directions, against that named type. So the two types
+ * differ by exactly those keys, and removing them yields a `RunResult` by construction.
+ * Adding a third document-only key means editing `RunResultDocumentOnlyFields`, and every
+ * guard that reads it — including the destructure below — has to be revisited with it,
+ * which is the point.
+ *
+ * `flakiness` is DROPPED rather than carried onto the model, deliberately: it is derived,
+ * and a model that carried a count would be the second source of truth
+ * `domain/result-counts.ts` refuses. A renderer handed the recovered model recomputes it
+ * from `criteria` and gets the same three numbers.
  */
 export function toRunResult(document: RunResultDocument): RunResult {
-  const { schemaVersion: _version, ...result } = document;
+  const { schemaVersion: _version, flakiness: _flakiness, ...result } = document;
   return result as RunResult;
 }
 

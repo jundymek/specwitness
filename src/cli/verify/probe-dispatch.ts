@@ -66,7 +66,7 @@ import {
   usesUnsupportedEscaping,
 } from '../../pipeline/stages/gate-command.js';
 import { resolveServiceBaseUrl } from '../../pipeline/stages/services.js';
-import type { ProbeDispatch, ProbeDispatcher } from '../../pipeline/stages/probes.js';
+import type { ProbeDispatch, ProbeDispatcher, RetryPolicy } from '../../pipeline/stages/probes.js';
 import { HttpSurfaceExecutor } from '../../surfaces/http.js';
 import { ObservationSurfaceExecutor } from '../../surfaces/observation.js';
 import { ShellSurfaceExecutor } from '../../surfaces/shell.js';
@@ -93,6 +93,36 @@ interface ResolvedCommand {
   readonly displayCommand: string;
   readonly binary: string;
   readonly baseArgs: readonly string[];
+}
+
+/**
+ * Turns the project's `retries:` block into the `RetryPolicy` the probes stage takes.
+ *
+ * ============================================================================
+ * THE WHOLE OF STORY 5.4'S MECHANISM CHANGE IS THIS FUNCTION
+ * ============================================================================
+ *
+ * Epic 4 built the retry loop, proved it across three surfaces and left it with no way for
+ * a project to ask: `RetryPolicy` was injectable only by tests, and resolved in production
+ * to zero for every surface because nothing constructed one. That is what this returns.
+ * The loop (`pipeline/stages/probes.ts`, `cyclesFor` and its callers), the flake rule
+ * (`domain/criterion-result.ts`) and `PROBE_PRECEDENCE` are untouched and must stay so:
+ * they are merged, proven, and the only thing that was missing was the question.
+ *
+ * IT LIVES HERE RATHER THAN IN `src/config/` FOR A STRUCTURAL REASON, not a stylistic one.
+ * `RetryPolicy` is declared in `src/pipeline/`, and `adapters-core-only` forbids
+ * `src/config/**` to import the application layer — so a config module physically cannot
+ * name this type. That is the same rule that pushes service-URL and command resolution to
+ * this file, and it prescribes the same remedy: the edge composes.
+ *
+ * NO CLAMPING AND NO FALLBACK HERE, deliberately. `config.retries` is bounded and
+ * defaulted by the schema, where an out-of-range value is REJECTED with the YAML path
+ * named rather than quietly folded into range (see the reasoning at `config/schema.ts`'s
+ * `retries:` block). A second policy at this seam would be a second place for "how many
+ * attempts is this project allowed" to be answered, and the two would eventually disagree.
+ */
+export function createRetryPolicy(config: SpecwitnessConfig): RetryPolicy {
+  return (surface) => config.retries[surface];
 }
 
 export function createProbeDispatcher(deps: ProbeDispatchDeps): ProbeDispatcher {
