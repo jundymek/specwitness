@@ -145,6 +145,68 @@ export interface DerivedCriterionResult extends CriterionResult {
   readonly actual?: string;
   /** At least one reference on every non-pass result (FR-28). */
   readonly evidence?: readonly EvidenceRef[];
+  /**
+   * What every attempt did, when there was more than one (story 5.4, AD-9, FR-32).
+   *
+   * PRESENT ONLY WHEN A CRITERION TOOK MORE THAN ONE ATTEMPT, and that is a decision
+   * rather than an omission. Retries default to 0 for every surface, so in the shipped
+   * default configuration every criterion has exactly one attempt whose outcome,
+   * `expected`/`actual` and evidence ARE the fields above — repeating them here would
+   * double every stored run to say nothing a reader could not already see. The record
+   * exists exactly where it carries information the result cannot: on the attempts the
+   * derivation threw away.
+   *
+   * IT IS THE ONLY PLACE A FLAKY PASS'S FAILED ATTEMPT SURVIVES on the criterion. The
+   * pass branch below returns early with no `expected`, no `actual` and no `evidence`,
+   * because a pass has nothing to put there — so without this, `flaky: true` would be a
+   * marker pointing at nothing, and a flake nobody can investigate is a flake everybody
+   * learns to skim past. That is the failure FR-32 exists to prevent, arriving one step
+   * later than expected.
+   */
+  readonly attempts?: readonly CriterionAttemptRecord[];
+}
+
+/**
+ * One attempt, as the persisted run and the terminal report record it.
+ *
+ * Deliberately NOT `ProbeAttempt`. That type carries raw observations and every assertion
+ * evaluation, redacted by nobody, and is an execution input rather than a report; this is
+ * the auditable summary — what the attempt came out as, how long it took, what it was
+ * compared against, and where its artifact is. Everything textual here has been through
+ * `redactText` at the same boundary as the criterion's own diagnostics, because an
+ * attempt whose text took a different route is a leak the other attempts' clean output
+ * would disguise.
+ */
+export interface CriterionAttemptRecord {
+  /** 1-based, copied from the attempt rather than from the array index. */
+  readonly attempt: number;
+  /**
+   * Which probe of the criterion this attempt belongs to.
+   *
+   * NOT decoration, and the reason is a defect codex review found in the first version of
+   * this story. A criterion may declare several probes and reports ONE result, so
+   * `probes.ts`'s `select` chooses a representative — and `flaky` is deliberately carried
+   * up from ANY probe, because "FR-32 is about VISIBILITY". The attempt records must be
+   * carried up the same way, or a criterion whose SECOND probe flaked reports
+   * `flaky: true` beside the FIRST probe's (absent) records: a document that contradicts
+   * itself, with the failed attempt's detail lost. Once records from several probes share
+   * one array, `attempt` alone stops identifying an attempt — 1, 1, 2 — so the probe is
+   * named.
+   *
+   * Optional because `deriveCriterionResult` is total and may be called without one; the
+   * probes stage always supplies it.
+   */
+  readonly probeId?: string;
+  /** What this attempt alone came out as, before retry orchestration is considered. */
+  readonly outcome: AttemptOutcome;
+  /** Whole milliseconds, from the injected `Clock` (AD-9). */
+  readonly durationMs: number;
+  /** What this attempt required, when it evaluated something and was unsatisfied. */
+  readonly expected?: string;
+  /** What this attempt observed — or, for an `error`, why it could not observe. */
+  readonly actual?: string;
+  /** This attempt's own artifacts. Attempt 2 never overwrites attempt 1's files. */
+  readonly evidence?: readonly EvidenceRef[];
 }
 
 /**
@@ -177,10 +239,35 @@ export interface DerivationOptions extends RedactionOptions {
    * mistake rather than a legitimate case.)
    */
   readonly plannedNeedsHuman?: boolean;
+  /**
+   * The probe these attempts came from, stamped onto every attempt record (story 5.4).
+   *
+   * See `CriterionAttemptRecord.probeId`: a criterion may have several probes and one
+   * result, so records that travel up through `select` need to say which probe they
+   * describe. It rides in the options bag rather than as a fourth parameter for the reason
+   * this interface exists at all — one options bag reaching the single producer.
+   */
+  readonly probeId?: string;
 }
 
 /** How one attempt came out, before retry orchestration is considered. */
-type AttemptOutcome = Exclude<CriterionStatus, 'skipped'>;
+export type AttemptOutcome = Exclude<CriterionStatus, 'skipped'>;
+
+/**
+ * The same union as a value, so `src/schemas/` can mirror it without re-listing literals.
+ *
+ * `satisfies` pins it to the type, so a member that is not an attempt outcome fails to
+ * compile; `tests/unit/domain/criterion-attempts.test.ts` covers the other direction — a
+ * status added to `CRITERION_STATUSES` and forgotten here. `skipped` is excluded because
+ * an attempt that ran is by definition not skipped: the criterion may be, the attempt
+ * cannot.
+ */
+export const ATTEMPT_OUTCOMES = [
+  'pass',
+  'fail',
+  'needs_human',
+  'error',
+] as const satisfies readonly AttemptOutcome[];
 
 function outcomeOf(attempt: ProbeAttempt): AttemptOutcome {
   if (attempt.execError !== undefined) {
@@ -261,8 +348,18 @@ export function deriveCriterionResult(
   const flaky =
     status === 'pass' && attempts.slice(0, -1).some((earlier) => outcomeOf(earlier) !== 'pass');
 
+  // Story 5.4. Built for EVERY status including `pass`, and spread into both returns below
+  // rather than into one, because the flaky case is precisely the one that returns early:
+  // a pass carries no expected, no actual and no evidence, so this is the only place the
+  // attempt it was flaky ABOUT is recorded at all. See `DerivedCriterionResult.attempts`
+  // for why a single attempt gets no record.
+  const record =
+    attempts.length > 1
+      ? { attempts: attempts.map((each) => attemptRecord(each, options)) }
+      : {};
+
   if (status === 'pass') {
-    return flaky ? { ...base, status, flaky: true } : { ...base, status };
+    return flaky ? { ...base, status, flaky: true, ...record } : { ...base, status, ...record };
   }
 
   // FR-28: every non-pass result carries expected vs actual plus at least one evidence
@@ -277,14 +374,7 @@ export function deriveCriterionResult(
   // a captured credential reaches a stored run unredacted, sitting right beside the
   // evidence fields that are protected. AD-10 says redaction happens at capture; this is
   // capture.
-  const firstUnsatisfied = final.assertionEvaluations.find((evaluation) => !evaluation.satisfied);
-  const redact = (value: string | undefined): string | undefined =>
-    value === undefined ? undefined : redactText(value, options);
-
-  const expected = redact(firstUnsatisfied?.expected);
-  const actual = redact(
-    status === 'error' ? final.execError?.message : firstUnsatisfied?.actual,
-  );
+  const { expected, actual } = diagnostics(final, status, options);
 
   return {
     ...base,
@@ -292,5 +382,60 @@ export function deriveCriterionResult(
     ...(expected === undefined ? {} : { expected }),
     ...(actual === undefined ? {} : { actual }),
     ...(final.evidence.length === 0 ? {} : { evidence: final.evidence }),
+    ...record,
+  };
+}
+
+/**
+ * What one attempt was required to see and what it saw, redacted.
+ *
+ * Extracted so the criterion's own diagnostics and every per-attempt record are produced
+ * by ONE function. Two copies of this would be two redaction boundaries, and the second
+ * one is the one that eventually forgets — a leak the first attempt's clean output would
+ * disguise, which is exactly the shape Epic 3's retrospective §7 warns about.
+ */
+function diagnostics(
+  attempt: ProbeAttempt,
+  outcome: AttemptOutcome,
+  options: DerivationOptions | undefined,
+): { expected?: string; actual?: string } {
+  const firstUnsatisfied = attempt.assertionEvaluations.find(
+    (evaluation) => !evaluation.satisfied,
+  );
+  const redact = (value: string | undefined): string | undefined =>
+    value === undefined ? undefined : redactText(value, options);
+
+  return {
+    expected: redact(firstUnsatisfied?.expected),
+    actual: redact(
+      outcome === 'error' ? attempt.execError?.message : firstUnsatisfied?.actual,
+    ),
+  };
+}
+
+/**
+ * One attempt as the report and the persisted run record it (story 5.4).
+ *
+ * Notice what this does NOT do: it never looks at any other attempt, and it never
+ * produces a `CriterionStatus`. `outcome` is what THIS attempt alone came out as —
+ * `deriveCriterionResult` above is still the single producer of the criterion's status
+ * (AD-13), and the flake rule is still the one Epic 4 wrote and proved. Recording an
+ * attempt is bookkeeping; deciding what a criterion is remains one function's job.
+ */
+function attemptRecord(
+  attempt: ProbeAttempt,
+  options: DerivationOptions | undefined,
+): CriterionAttemptRecord {
+  const outcome = outcomeOf(attempt);
+  const { expected, actual } = diagnostics(attempt, outcome, options);
+
+  return {
+    attempt: attempt.attempt,
+    ...(options?.probeId === undefined ? {} : { probeId: options.probeId }),
+    outcome,
+    durationMs: attempt.durationMs,
+    ...(expected === undefined ? {} : { expected }),
+    ...(actual === undefined ? {} : { actual }),
+    ...(attempt.evidence.length === 0 ? {} : { evidence: attempt.evidence }),
   };
 }

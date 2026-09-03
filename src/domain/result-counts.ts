@@ -73,3 +73,75 @@ export function countGateStatuses(gates: readonly GateResult[]): GateStatusCount
 export function countFlaky(criteria: readonly DerivedCriterionResult[]): number {
   return criteria.filter((criterion) => criterion.flaky === true).length;
 }
+
+/**
+ * The retry/flake numbers FR-33's per-run scorecard record is defined to carry.
+ *
+ * Story 5.4. **The `scorecard` command that reads them is Epic 7 and does not exist yet**
+ * — what exists is the obligation that the numbers be in the persisted run, so that Epic 7
+ * can compute a scorecard from stored evidence rather than by re-running a verification.
+ *
+ * A DERIVATION, like every other count in this module, and for the reason stated at the
+ * top of the file. The difference from `countCriterionStatuses` is only where it is read:
+ * `src/schemas/result.ts` calls it when it builds the persisted document, so the number
+ * lands in `result.json` — computed from the very array the same document carries, in the
+ * same instant, which is what makes it unable to contradict its own file. `src/report/
+ * terminal.ts` calls the same function. Two views, one implementation, no drift: AD-11
+ * applied to the one field whose entire purpose is that a human sees it.
+ *
+ * SM-C3 is the reason this is three numbers rather than one: "retry-to-green rate must
+ * stay visible, never optimized away by hidden retries". A rate needs a numerator AND a
+ * denominator, so how much repetition a project bought (`extraAttempts`) is recorded
+ * beside how much of it turned green (`flakyCriteria`).
+ */
+export interface FlakinessCounts {
+  /** Criteria that passed only on retry (FR-32). Always equals `countFlaky`. */
+  readonly flakyCriteria: number;
+  /**
+   * Criteria that took more than one attempt, WHATEVER they came out as.
+   *
+   * A retried failure counts here. It is not flake — `criterion-result.ts` is explicit
+   * that a run which passed and then failed is a failure — but it is repetition, and a
+   * scorecard that counted only the retries that turned green would report a project as
+   * cheap to verify precisely when it is expensive.
+   */
+  readonly retriedCriteria: number;
+  /** Attempts beyond the first, summed across criteria — the repetition actually spent. */
+  readonly extraAttempts: number;
+}
+
+export function summarizeFlakiness(
+  criteria: readonly DerivedCriterionResult[],
+): FlakinessCounts {
+  let retriedCriteria = 0;
+  let extraAttempts = 0;
+
+  for (const criterion of criteria) {
+    // COUNTED PER PROBE, not per criterion, and that is not a detail. A criterion may
+    // declare several probes and reports one result, so `select` in
+    // `pipeline/stages/probes.ts` merges every probe's records into one array — `records
+    // minus one` would then read three records from two probes as two extra attempts when
+    // only one attempt was ever repeated. `probeId` is what makes the grouping possible,
+    // and it is why the record carries one.
+    //
+    // A criterion with a single attempt carries no record at all (see
+    // `DerivedCriterionResult.attempts`), so an absent array contributes nothing rather
+    // than minus one.
+    const perProbe = new Map<string | undefined, number>();
+    for (const record of criterion.attempts ?? []) {
+      perProbe.set(record.probeId, (perProbe.get(record.probeId) ?? 0) + 1);
+    }
+
+    let extra = 0;
+    for (const attemptsOfOneProbe of perProbe.values()) {
+      extra += attemptsOfOneProbe - 1;
+    }
+
+    if (extra > 0) {
+      retriedCriteria += 1;
+      extraAttempts += extra;
+    }
+  }
+
+  return { flakyCriteria: countFlaky(criteria), retriedCriteria, extraAttempts };
+}

@@ -101,7 +101,7 @@ import { createDoctorEffects } from '../doctor/effects.js';
 import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
 import { armInterruptNotice } from '../verify/interrupt.js';
-import { createProbeDispatcher } from '../verify/probe-dispatch.js';
+import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
 
 /** Injected at build time by tsup, and by vitest for source-level runs. */
@@ -378,6 +378,9 @@ async function verify(
                 writeEvidence,
                 onProcessGroup: recordProcessGroup,
               }),
+              // Story 5.4. Zero for every surface unless the project declared otherwise,
+              // so a run stays deterministic unless somebody asked for repetition (AD-9).
+              retries: createRetryPolicy(config),
             },
           }),
       // Write 1 of two: the crash-durable snapshot, at position 10 of 11. It is

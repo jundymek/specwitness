@@ -65,7 +65,10 @@ import type {
   RunResult,
 } from '../../../src/domain/run-result.js';
 import type { StageTimelineEntry } from '../../../src/domain/stage.js';
-import type { RunResultDocument } from '../../../src/schemas/result.js';
+import type {
+  RunResultDocument,
+  RunResultDocumentOnlyFields,
+} from '../../../src/schemas/result.js';
 
 /**
  * Recursively marks arrays and properties readonly, on both sides of a comparison.
@@ -103,15 +106,27 @@ type CheckedEvidenceKinds = 'http' | 'browser' | 'observation' | 'command' | 'ga
 
 const mirrors: {
   /**
-   * THE load-bearing check: the document is the model plus exactly one key, compared
-   * structurally and recursively. On its own this catches every drift below; the rest
-   * exist so a failure names the shape rather than dumping the whole tree.
+   * THE load-bearing check: the document is the model plus exactly the document-only
+   * keys, compared structurally and recursively. On its own this catches every drift
+   * below; the rest exist so a failure names the shape rather than dumping the whole tree.
    */
-  wholeDocument: Exact<Omit<RunResultDocument, 'schemaVersion'>, RunResult>;
-  /** `schemaVersion` is the ONE key the document adds — asserted, not assumed. */
-  schemaVersionIsTheOnlyExtra: Exact<
+  wholeDocument: Exact<Omit<RunResultDocument, keyof RunResultDocumentOnlyFields>, RunResult>;
+  /**
+   * The document-only keys are EXACTLY those `RunResultDocumentOnlyFields` names —
+   * asserted, not assumed, in both directions.
+   *
+   * Story 5.4 widened this from the literal `{ schemaVersion: number }` it was until then,
+   * and the widening is the guard working rather than being weakened: the exception is now
+   * a named, exported type with its reasoning stated at the declaration, so a THIRD
+   * document-only key still cannot appear without editing that type and re-reading why the
+   * second one was allowed. A count in the document was required by story 5.4's AC1, while
+   * `domain/result-counts.ts` refuses to store a count on the mutable model — deriving it
+   * here, at write time, from the array the same document carries, is the only shape that
+   * satisfies both.
+   */
+  documentOnlyKeysAreExactlyThose: Exact<
     Omit<RunResultDocument, keyof RunResult>,
-    { schemaVersion: number }
+    RunResultDocumentOnlyFields
   >;
   /**
    * Every member of the closed union is checked below. DERIVED from the union rather than
@@ -142,7 +157,7 @@ const mirrors: {
   evidenceRef: Exact<NonNullable<DocEvidence<'browser'>['trace']>, EvidenceRef>;
 } = {
   wholeDocument: true,
-  schemaVersionIsTheOnlyExtra: true,
+  documentOnlyKeysAreExactlyThose: true,
   everyEvidenceKindIsChecked: true,
   stages: true,
   gates: true,
