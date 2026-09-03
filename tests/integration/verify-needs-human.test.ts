@@ -270,3 +270,54 @@ describe('the guidance never displaces the frozen contract statement', () => {
     expect(stderr).toContain(CONTRACT_HUMAN_GUIDANCE);
   });
 });
+
+describe('ADR-003 — a gate failure must not strip the guidance off a human criterion', () => {
+  it('keeps the reason and guidance when a failing gate short-circuits the probes stage', async () => {
+    // FOUND BY REVIEW, NOT BY ME. When a gate fails, ADR-003 stops the pipeline early and
+    // the probes stage never runs — so the branch that forwards the plan's reason and
+    // guidance is never reached. The aggregate stage then materialises the missing results
+    // with `deriveCriterionResult(criterion, [])`, and a contract-human criterion stays
+    // `needs_human` (the clause is unconditional) while losing both new fields.
+    //
+    // The verdict is FAIL here, not NEEDS_HUMAN — `fail` outranks `needs_human` (ADR-003,
+    // Q45/Q46) and I do not touch that. But the needs_human items are still listed for the
+    // eventual human pass, and a listed criterion that says a person must decide while
+    // telling them nothing is exactly the stop sign this story exists to write on.
+    const project = await fixture({ human: true, gates: [{ id: 'lint', passes: false }] });
+
+    const { exitCode, stdout, stderr } = await runCli(['verify', project.epic, '--json'], {
+      cwd: project.root,
+    });
+
+    expect(exitCode, stderr).toBe(1);
+
+    const document = JSON.parse(stdout) as RunDocument;
+    expect(document.outcome.verdict).toBe('FAIL');
+
+    const human = document.criteria.find((entry) => entry.criterionId === 'E1-04');
+    expect(human?.status).toBe('needs_human');
+    expect(human?.needsHumanReason).toBe('human-verifiability');
+    expect(human?.reviewerGuidance?.text).toBe(CONTRACT_HUMAN_GUIDANCE);
+
+    // And it reaches the person, not only the document.
+    expect(stderr).toContain(CONTRACT_HUMAN_GUIDANCE);
+  });
+
+  it('still reports the automated criteria as skipped, unchanged', async () => {
+    // The guard on my own fix. The aggregate stage materialises EVERY unresolved criterion,
+    // so handing it plan metadata must not turn an automated criterion into something new:
+    // a plan-deferred criterion becoming `needs_human` on this path would be a decision
+    // about ADR-003 semantics, which is 4.7 territory and not mine to take quietly.
+    const project = await fixture({ human: true, gates: [{ id: 'lint', passes: false }] });
+
+    const { stdout } = await runCli(['verify', project.epic, '--json'], { cwd: project.root });
+
+    const automated = (JSON.parse(stdout) as RunDocument).criteria.filter(
+      (entry) => entry.criterionId !== 'E1-04',
+    );
+
+    expect(automated.map((entry) => entry.status)).toEqual(['skipped', 'skipped', 'skipped']);
+    expect(automated.every((entry) => entry.reviewerGuidance === undefined)).toBe(true);
+    expect(automated.every((entry) => entry.needsHumanReason === undefined)).toBe(true);
+  });
+});
