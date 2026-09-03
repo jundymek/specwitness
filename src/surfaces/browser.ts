@@ -66,16 +66,30 @@
  *    project-declared SHELL STRINGS, and there is no shell here to constrain.
  *    `tests/unit/config/boundary-scan.test.ts` covers this file automatically.
  *  - **NOTHING LEAVES THE DECLARED ORIGIN, AND IT IS PREVENTED RATHER THAN DETECTED.**
- *    Request interception is installed on the browser CONTEXT before anything navigates, so
- *    a request whose origin differs from the declared service is never sent at all. That
+ *    Interception is installed on the browser CONTEXT before anything navigates, so a
+ *    request whose origin differs from the declared service is never sent at all. That
  *    covers what a path rule cannot: a `click` follows whatever the page put in an `href`,
  *    and the page is written by the system under verification. It also covers popups, which
  *    a page-level check misses entirely — a `target="_blank"` link opens a SECOND page, so
- *    inspecting the original one sees an origin that never moved. Both were codex findings
- *    on this branch, the second arriving after the first fix, and the second is why the
- *    guard sits on the CONTEXT rather than on the page. A blocked NAVIGATION fails the
- *    attempt; a blocked subresource does not, because a page referencing an external font is
- *    not a probe pointed at production.
+ *    inspecting the original one sees an origin that never moved. A blocked NAVIGATION
+ *    fails the attempt; a blocked subresource does not, because a page referencing an
+ *    external font is not a probe pointed at production.
+ *
+ *    ⚠️ THE BOUNDARY TOOK FOUR ROUNDS OF REVIEW TO BECOME COMPLETE, and the sequence is
+ *    worth keeping because each round found a route the previous fix did not cover:
+ *
+ *      1. a `goto` could name any host          => the schema's path rule, before any I/O
+ *      2. a `click` follows an href             => an origin check after every step
+ *      3. checking AFTER a navigation is late,  => interception on the CONTEXT, so the
+ *         and `target="_blank"` evades it          request is never sent, popups included
+ *      4. `context.route` sees neither          => `routeWebSocket` for sockets, and
+ *         WEBSOCKETS nor SERVICE WORKERS           `serviceWorkers: 'block'` in the config
+ *
+ *    Each of those was a codex finding, and every one of them was a way OUT that the
+ *    previous fix had left open while reading as complete. That is why the claim here is
+ *    stated as the four mechanisms rather than as "nothing gets out": a boundary is only as
+ *    good as the transports it actually covers, and naming them is what lets the next
+ *    reader check rather than trust.
  *  - **No URL from the plan.** `BrowserProbeMechanics` has a `serviceId` and a
  *    service-relative `path` and NO url field — that absence is AD-3's "no production URL
  *    defaults" expressed structurally, and it must never gain one (5.6 also depends on the
@@ -501,7 +515,15 @@ module.exports = {
   fullyParallel: false,
   forbidOnly: true,
   reporter: [['line']],
-  use: { headless: true, browserName: 'chromium' },
+  use: {
+    headless: true,
+    browserName: 'chromium',
+    // Requests a SERVICE WORKER handles do not reach context routing, so a page that
+    // registers one could fetch an undeclared origin straight past the network boundary
+    // below. Blocking them is what makes that boundary complete rather than nearly so.
+    // Raised by the codex review of this branch.
+    serviceWorkers: 'block',
+  },
 };
 `;
 
@@ -583,10 +605,22 @@ function describe(error) {
 // So the origin is re-checked after EVERY navigation and before ANY value is read. Leaving
 // the declared service is an infrastructure failure, not a product observation: nothing was
 // adjudicated, and nothing from an undeclared host may become evidence.
+// ws://host:port and http://host:port name the same origin in different words.
+function websocketOrigin(url) {
+  try {
+    const parsed = new URL(url);
+    const scheme =
+      parsed.protocol === 'wss:' ? 'https:' : parsed.protocol === 'ws:' ? 'http:' : parsed.protocol;
+    return scheme + '//' + parsed.host;
+  } catch (error) {
+    return null;
+  }
+}
+
 function assertNoBlockedNavigation(blocked, payload) {
   if (blocked.length > 0) {
     throw new Error(
-      'the scenario tried to leave the declared service origin: ' + blocked[0] +
+      'the page tried to leave the declared service origin: ' + blocked[0] +
         ' was blocked before the request was sent, expected origin ' + payload.origin +
         '. A browser probe may only ever be driven at the service the project declared',
     );
@@ -629,6 +663,19 @@ test('specwitness browser probe', async ({ page, context }) => {
   // only a navigation means the probe was being driven at an undeclared host. A page that
   // merely references an external font is not a probe pointed at production, and failing on
   // it would make the rule unusable without making anything safer.
+  // A WEBSOCKET HANDSHAKE IS NOT AN HTTP ROUTE, so context.route never sees it and a page
+  // could open a socket to an undeclared host straight past the guard below. Also a codex
+  // finding on this branch. A ws:// origin and an http:// origin are spelled differently for
+  // the same host, so the scheme is normalised before they are compared.
+  await context.routeWebSocket('**/*', (ws) => {
+    if (websocketOrigin(ws.url()) === payload.origin) {
+      ws.connectToServer();
+      return;
+    }
+    blocked.push(ws.url());
+    ws.close();
+  });
+
   await context.route('**/*', (route) => {
     const request = route.request();
     let origin;

@@ -238,8 +238,21 @@ async function execute(input: RunInput): Promise<Executed> {
     },
   });
 
+  const configRef = attempt.evidence.find((ref) => ref.path.endsWith('.config.cjs'));
+  if (configRef !== undefined && GENERATED_CONFIG_TEXT === '') {
+    GENERATED_CONFIG_TEXT = await readSinkFile(sink, configRef.path);
+  }
+
   return { attempt, sink, spawns: recording.spawns };
 }
+
+/**
+ * The generated Playwright config, as a real run writes it into the run directory.
+ *
+ * Read from disk rather than imported: the constant is module-private on purpose, and what
+ * matters is what actually reaches the runner.
+ */
+let GENERATED_CONFIG_TEXT = '';
 
 const HEADING_IS_ORDERS = {
   description: 'the heading reads Orders',
@@ -668,6 +681,78 @@ describeWithBrowser('AD-3: the page may not leave the declared service origin', 
       }
     },
     TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a WebSocket to an undeclared host is refused before the handshake',
+    async () => {
+      // ⚠️ A WEBSOCKET HANDSHAKE IS NOT AN HTTP ROUTE, so `context.route` never sees it — a
+      // page could open a socket straight past the guard that covers everything else. Raised
+      // by the codex review AFTER the interception fix, which is the point worth keeping: a
+      // boundary is only as good as the transports it actually covers.
+      //
+      // PRODUCED, not mocked: a real second server on its own port, and a real page that
+      // really calls `new WebSocket(...)` at it. The server records every connection
+      // attempt, including the HTTP upgrade request, so "never contacted" is observed from
+      // the undeclared side rather than claimed by the executor.
+      const upgrades: string[] = [];
+      const other = await startFixtureApp((request, response) => {
+        upgrades.push(request.url ?? '');
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end('nope');
+      });
+
+      try {
+        const wsUrl = other.baseUrl.replace('http://', 'ws://');
+        const app = await startFixtureApp((_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(
+            ordersPage(
+              '<h1 id="heading">Orders</h1>' +
+                `<script>try { new WebSocket('${wsUrl}/socket'); } catch (e) {}</script>`,
+            ),
+          );
+        });
+
+        try {
+          const { attempt } = await execute({
+            baseUrl: app.baseUrl,
+            path: '/orders',
+            // A wait long enough for the socket attempt to have been made and refused.
+            scenario: '# the page opens the socket on load',
+            assertions: [HEADING_IS_ORDERS],
+          });
+
+          // The undeclared host is never contacted — no upgrade request ever arrives.
+          expect(upgrades, 'a WebSocket reached an undeclared host').toEqual([]);
+          // Whether the socket attempt also fails the ATTEMPT depends on timing (the page
+          // opens it during load), so the assertion that matters is the one above: nothing
+          // left the machine for an undeclared origin. If it was seen in time, it is an
+          // execError; if not, the criterion is adjudicated normally from the page — either
+          // way no traffic escaped.
+          if (attempt.execError !== undefined) {
+            expect(attempt.execError.message).toContain('declared service origin');
+            expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+          }
+        } finally {
+          await app.close();
+        }
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'blocks service workers, which routing alone does not cover',
+    () => {
+      // Requests a SERVICE WORKER handles never reach context routing, so a page that
+      // registers one could fetch an undeclared origin straight past every other guard.
+      // Asserted on the generated config itself, because the property is a context OPTION
+      // rather than a behaviour a fixture page can exercise without shipping a worker.
+      expect(GENERATED_CONFIG_TEXT).toContain("serviceWorkers: 'block'");
+    },
   );
 
   it(
