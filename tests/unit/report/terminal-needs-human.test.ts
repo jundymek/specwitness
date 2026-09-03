@@ -63,6 +63,25 @@ describe('AC2 — what to check', () => {
     expect(report).toContain('truncated');
     expect(report).toContain('9000 bytes');
   });
+
+  it('tells the reader WHERE truncated guidance continues, not only how much was withheld', () => {
+    // FR-29 wants the bound and a route to the rest. `truncationMarker` gives the first
+    // half alone, and it can only print a `fullPath` when a file exists in the RUN to point
+    // at — guidance has none, because it is not lost: it is in the compiled plan, and the
+    // derivation dropped the tail from the result rather than from the artifact.
+    const report = reportFor(contractHuman({ reviewerGuidance: boundedText('g'.repeat(9000)) }));
+
+    expect(report).toContain('the full guidance is in the compiled plan');
+  });
+
+  it('does NOT claim a plan lookup when the guidance fits', () => {
+    // A pointer on untruncated content sends a reader to look up something they have
+    // already read in full — the same reason `BoundedTextSchema` refuses a `fullPath` on
+    // untruncated content.
+    const report = reportFor(contractHuman());
+
+    expect(report).not.toContain('the full guidance is in the compiled plan');
+  });
 });
 
 describe('AC2 — WHY it is a human question, in the plan command vocabulary', () => {
@@ -132,6 +151,18 @@ describe('AC2 — where the evidence lives', () => {
 
     expect(report).toContain('screenshots and traces are NOT redacted');
     expect(report).toContain('cannot be scrubbed by a text redactor');
+  });
+
+  it('names the trace as the LARGER exposure, with the reason the first line does not give', () => {
+    // The first line's reason — a text redactor cannot scrub image content — is true of a
+    // screenshot and NOT of a trace, whose content is text: DOM snapshots, network payloads
+    // and console output. A reviewer acting on the first line alone would conclude the trace
+    // is the safer of the two, when a credential inside one is greppable rather than merely
+    // visible. Raised by 5.2 after its own review sharpened the fact.
+    const report = reportFor(contractHuman());
+
+    expect(report).toContain('a trace is the larger exposure');
+    expect(report).toContain('DOM snapshots, network payloads and console output');
   });
 });
 

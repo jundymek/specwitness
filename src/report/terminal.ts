@@ -352,6 +352,27 @@ function reviewerLines(criterion: DerivedCriterionResult, runDirectory: string):
   if (guidance !== undefined) {
     const marker = truncationMarker(guidance);
     lines.push(`      check:    ${guidance.text}${marker === '' ? '' : ` ${marker}`}`);
+    if (guidance.truncated) {
+      // FR-29 wants the bound AND a route to the rest. `truncationMarker` supplies the
+      // first half on its own — how much was withheld — but it can only print a `fullPath`
+      // when there is a file in the RUN to point at, and guidance has none.
+      //
+      // IT IS NOT LOST, WHICH IS WHY THIS IS A POINTER AND NOT A REPAIR. The full text is
+      // in the compiled plan on disk, where the plan-author wrote it; the derivation
+      // dropped the tail from the RESULT, not from the artifact. The named remedy in
+      // review was to persist the guidance as run evidence and pass its path here, and
+      // that is deliberately not done: `BoundedText.fullPath` is validated run-relative so
+      // it cannot address the plan, `src/report/**` may not import `src/authoring/**` where
+      // `planRelativePath` lives, and `deriveCriterionResult` is pure and may not write a
+      // file — so the only way to obtain such a path is for two pipeline stages to start
+      // writing a second, redacted copy of a document that already exists. Two artifacts
+      // holding one fact, differing by redaction, is a drift generator; one line naming the
+      // artifact that already holds it is not.
+      //
+      // The epic is printed in this report's header, so the reader has both halves of the
+      // location without this renderer composing a path it cannot legally import.
+      lines.push('                the full guidance is in the compiled plan for this epic');
+    }
   }
 
   // Printed for every needs_human criterion, including one carrying neither field: a person
@@ -362,14 +383,32 @@ function reviewerLines(criterion: DerivedCriterionResult, runDirectory: string):
       `the run's evidence is under ${runDirectory}`,
   );
   // The one sentence in Epic 5 where 5.3 and 5.2 genuinely meet, agreed verbatim with 5.2
-  // rather than invented here. Every TEXT channel a browser probe captures IS redacted at
-  // capture — URLs, page text, titles, error messages. The image and archive channels are
-  // the ones out of reach, and a trace matters more than a screenshot: it is a .zip
-  // carrying page snapshots, network payloads and console text. Overstating this would
-  // train a reviewer to distrust fields that are in fact protected.
+  // rather than invented here — and kept verbatim on purpose: 5.2 quotes it in its module
+  // header and in the browser evidence member's own `explanation`, so rewording it here
+  // would desynchronise the two places the product says this.
+  //
+  // Every TEXT channel a browser probe captures IS redacted at capture — URLs, page text,
+  // titles, error messages. Overstating that would train a reviewer to distrust fields that
+  // are in fact protected.
   lines.push(
     '      caution:  screenshots and traces are NOT redacted — ' +
       'image content cannot be scrubbed by a text redactor',
+  );
+  // THE SECOND LINE EXISTS BECAUSE THE FIRST ONE'S REASON ONLY COVERS THE SCREENSHOT, and
+  // a reviewer acting on the first line alone would draw the wrong conclusion about the
+  // bigger risk. A screenshot is pixels; a trace is a zip of DOM snapshots, network
+  // payloads and console output — so a credential inside one is GREPPABLE, not merely
+  // visible, and the trace is the larger exposure of the two. Told to a reviewer at the
+  // moment they are pointed at the evidence, because that is when they decide what to open
+  // and who to show it to.
+  //
+  // 5.2 raised the distinction after its own review sharpened it, and deliberately did NOT
+  // close the exposure: AC1 requires the trace and 5.6 needs it for the probes it adapts.
+  // That AC1-vs-AD-10 tension is reported to the owner in 5.2's PR body and is not settled
+  // here — this line makes the reviewer aware of it, which is the part 5.3 owns.
+  lines.push(
+    '                a trace is the larger exposure: it carries DOM snapshots, ' +
+      'network payloads and console output',
   );
 
   return lines;
