@@ -113,8 +113,8 @@ export const PROVISIONED_BROWSER = 'chromium';
  */
 const BROWSERS_PATH_PACKAGE_LOCAL = '0';
 
-/** Directory-name prefixes Playwright uses for a downloaded chromium bundle. */
-const CHROMIUM_PREFIXES = ['chromium-', 'chromium_headless_shell-'] as const;
+/** The entry in Playwright's `browsers.json` that names the chromium build. */
+const CHROMIUM_BROWSER_NAME = 'chromium';
 
 /** Bound on any subprocess text echoed into an error message. */
 const MAX_ECHOED_OUTPUT = 400;
@@ -216,7 +216,16 @@ export function specwitnessPlaywrightCacheDir(inputs: CachePathInputs): Playwrig
   if (override !== undefined && override !== '') {
     return {
       cacheDir,
-      browsersPath: override,
+      // ABSOLUTISED, never stored verbatim. A relative override would be read
+      // against THIS process's cwd here and against the child's cwd - the
+      // project root, or the cache - inside `playwright install`, so a download
+      // could succeed into one directory while readiness was checked in
+      // another. Resolving once, against the parent's cwd (which is where the
+      // operator typed the variable), makes parent and child agree; the
+      // absolute value is then passed explicitly to every child rather than
+      // inherited, so there is no second interpretation of it anywhere.
+      // Reported by the codex review of this branch.
+      browsersPath: resolve(override),
       browsersPathFromEnv: true,
       browsersPackageLocal: false,
     };
@@ -433,7 +442,7 @@ async function describe(
   const version = await readVersion(packageDir);
   const browsersPresent = paths.browsersPackageLocal
     ? false
-    : await hasChromium(context.browsersPath);
+    : await hasRequiredChromium(packageDir, context.browsersPath);
 
   return {
     source,
@@ -464,14 +473,118 @@ async function readVersion(packageDir: string): Promise<string | null> {
   return null;
 }
 
-/** True when the registry directory holds a downloaded chromium bundle. */
-async function hasChromium(browsersPath: string): Promise<boolean> {
+/**
+ * True when the registry holds the chromium build THIS Playwright requires.
+ *
+ * ⚠️ A PREFIX MATCH IS NOT ENOUGH, and this is the correction that matters most
+ * in the file. Playwright's registry accumulates one directory per revision, so
+ * a developer machine routinely carries several — the machine this was written
+ * on carried `chromium-1208`, `-1217`, `-1228` and `-1234` side by side while
+ * the pinned 1.62.1 required exactly `1234`. Accepting any `chromium-*` would
+ * therefore report `ready` for a registry that cannot launch this Playwright at
+ * all: provisioning would skip the download it needed, and the failure would
+ * surface later as Playwright's own missing-executable error, from a machine
+ * `doctor` had already called green. That is the green-for-nothing shape this
+ * story exists to keep out of Epic 5, arriving through the third fact rather
+ * than the first. Reported by the codex review of this branch.
+ *
+ * The required revision comes from `playwright-core`'s `browsers.json` — the
+ * same table `playwright install` itself reads.
+ *
+ * FAIL-CLOSED when the revision cannot be determined: `false`, never a fallback
+ * to the prefix match. An installation whose `playwright-core` cannot be found
+ * is one `playwright install` could not drive either, so the honest answer is
+ * "not ready" plus the provisioning path's real diagnosis, rather than a guess
+ * that happens to look green.
+ */
+async function hasRequiredChromium(packageDir: string, browsersPath: string): Promise<boolean> {
+  const revision = await requiredChromiumRevision(packageDir);
+  if (revision === null) {
+    return false;
+  }
+
   try {
     const entries = await readdir(browsersPath);
-    return entries.some((entry) => CHROMIUM_PREFIXES.some((prefix) => entry.startsWith(prefix)));
+    return entries.includes(`${CHROMIUM_BROWSER_NAME}-${revision}`);
   } catch {
     return false;
   }
+}
+
+/**
+ * The chromium revision this Playwright requires, from its own `playwright-core`.
+ *
+ * ⚠️ `require.resolve` IS NOT USED HERE, and the reason is a hazard worth
+ * recording: **Node's CommonJS resolution consults `NODE_PATH` (and the legacy
+ * global folders) as a fallback after the `node_modules` walk, and the `paths`
+ * option does NOT suppress it** — both measured on the installed Node before
+ * this was written. Vitest sets `NODE_PATH` to SpecWitness's own pnpm
+ * directories, so `require.resolve('playwright-core')` from an unrelated
+ * directory answered with SPECWITNESS's core, and a fixture Playwright with no
+ * core of its own was handed this repository's revision table. That is the
+ * hoisting hazard again wearing a different hat: a fact about SpecWitness's
+ * installation reported as a fact about someone else's.
+ *
+ * The `node_modules` chain above the resolved package is therefore walked
+ * directly, with no global fallback. It finds a project-local
+ * `node_modules/playwright-core`, and it finds pnpm's hoisted
+ * `node_modules/.pnpm/node_modules/playwright-core` — both of which really are
+ * part of the same installation — and nothing else.
+ *
+ * `browsers.json` is read from disk rather than imported: `playwright-core`'s
+ * `exports` map does not expose it (`ERR_PACKAGE_PATH_NOT_EXPORTED`).
+ */
+async function requiredChromiumRevision(packageDir: string): Promise<string | null> {
+  const coreDir = findPackageNear(packageDir, 'playwright-core');
+  if (coreDir === null) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(coreDir, 'browsers.json'), 'utf8'));
+    const browsers = (parsed as { browsers?: unknown }).browsers;
+    if (!Array.isArray(browsers)) {
+      return null;
+    }
+    for (const browser of browsers as { name?: unknown; revision?: unknown }[]) {
+      if (browser.name === CHROMIUM_BROWSER_NAME) {
+        const revision = browser.revision;
+        if (typeof revision === 'string' && revision !== '') {
+          return revision;
+        }
+        if (typeof revision === 'number') {
+          return String(revision);
+        }
+      }
+    }
+  } catch {
+    // Unreadable, or an unexpected shape. Fail closed above.
+  }
+  return null;
+}
+
+/**
+ * Walk the `node_modules` chain above `fromDir` for a package, with NO global
+ * fallback of any kind. Returns its directory, or `null`.
+ *
+ * Bounded, so a symlink cycle or a malformed tree terminates rather than
+ * climbing forever.
+ */
+function findPackageNear(fromDir: string, name: string): string | null {
+  let current = fromDir;
+
+  for (let depth = 0; depth < 24; depth += 1) {
+    if (readFileSyncSafe(join(current, 'node_modules', name, 'package.json')) !== null) {
+      return join(current, 'node_modules', name);
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+
+  return null;
 }
 
 function absentReason(

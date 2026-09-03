@@ -26,7 +26,7 @@
 
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -46,15 +46,25 @@ async function tempRoot(): Promise<string> {
   return await mkdtemp(join(tmpdir(), 'specwitness-pw-'));
 }
 
+/** The chromium revision every fixture Playwright below requires. */
+const FIXTURE_REVISION = '1234';
+
 /**
- * Writes a fake `@playwright/test` into `<dir>/node_modules`.
+ * Writes a fake `@playwright/test` into `<dir>/node_modules`, beside the
+ * `playwright-core` that carries the browser revision table.
  *
  * A real package layout, not a stub the resolver is taught to accept: the
- * production code uses Node's own `require.resolve`, so anything less than a
- * resolvable `package.json` + entry point would prove nothing.
+ * production code uses Node's own `require.resolve` and reads
+ * `playwright-core/browsers.json` exactly as `playwright install` does, so
+ * anything less than a resolvable pair would prove nothing.
  */
-async function installFakePlaywright(dir: string, version: string): Promise<string> {
-  const packageDir = join(dir, 'node_modules', PLAYWRIGHT_PACKAGE);
+async function installFakePlaywright(
+  dir: string,
+  version: string,
+  revision: string = FIXTURE_REVISION,
+): Promise<string> {
+  const modules = join(dir, 'node_modules');
+  const packageDir = join(modules, PLAYWRIGHT_PACKAGE);
   await mkdir(packageDir, { recursive: true });
   await writeFile(
     join(packageDir, 'package.json'),
@@ -62,12 +72,35 @@ async function installFakePlaywright(dir: string, version: string): Promise<stri
     'utf8',
   );
   await writeFile(join(packageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+
+  const coreDir = join(modules, 'playwright-core');
+  await mkdir(coreDir, { recursive: true });
+  await writeFile(
+    join(coreDir, 'package.json'),
+    JSON.stringify({ name: 'playwright-core', version, main: 'index.js' }),
+    'utf8',
+  );
+  await writeFile(join(coreDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+  await writeFile(
+    join(coreDir, 'browsers.json'),
+    JSON.stringify({
+      browsers: [
+        { name: 'chromium', revision, installByDefault: true },
+        { name: 'chromium-headless-shell', revision, installByDefault: true },
+        { name: 'firefox', revision: '9999', installByDefault: true },
+      ],
+    }),
+    'utf8',
+  );
   return packageDir;
 }
 
-/** A browser registry directory with one downloaded chromium bundle in it. */
-async function installFakeChromium(browsersPath: string): Promise<void> {
-  await mkdir(join(browsersPath, 'chromium-1200'), { recursive: true });
+/** A browser registry directory holding one downloaded chromium bundle. */
+async function installFakeChromium(
+  browsersPath: string,
+  revision: string = FIXTURE_REVISION,
+): Promise<void> {
+  await mkdir(join(browsersPath, `chromium-${revision}`), { recursive: true });
 }
 
 const LINUX: Pick<PlaywrightEnvironmentInputs, 'platform' | 'homeDir'> = {
@@ -348,8 +381,108 @@ describe('resolvePlaywrightEnvironment', () => {
       await rm(home, { recursive: true, force: true });
     }
   });
-});
 
+  /**
+   * REGRESSION — codex review of this branch, P1.
+   *
+   * Playwright's registry accumulates one directory per revision, so a
+   * developer machine routinely carries several at once (this one carried
+   * chromium-1208, -1217, -1228 and -1234 while the pinned Playwright required
+   * exactly 1234). A prefix match would call that registry ready, provisioning
+   * would skip the download it needed, and the failure would arrive later as
+   * Playwright's own missing-executable error — from a machine doctor had
+   * already reported green.
+   */
+  it('does not accept a chromium from a DIFFERENT Playwright revision', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.62.1', '1234');
+      // Three neighbours, none of them the one this Playwright needs.
+      await installFakeChromium(join(home, '.cache', 'ms-playwright'), '1208');
+      await installFakeChromium(join(home, '.cache', 'ms-playwright'), '1217');
+      await mkdir(join(home, '.cache', 'ms-playwright', 'chromium_headless_shell-1234'), {
+        recursive: true,
+      });
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      expect(env.source).toBe('project');
+      expect(env.browsersPresent).toBe(false);
+      expect(env.ready).toBe(false);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the registry once the required revision is there alongside the others', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      await installFakePlaywright(project, '1.62.1', '1234');
+      await installFakeChromium(join(home, '.cache', 'ms-playwright'), '1208');
+      await installFakeChromium(join(home, '.cache', 'ms-playwright'), '1234');
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      expect(env.browsersPresent).toBe(true);
+      expect(env.ready).toBe(true);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when the required revision cannot be read at all', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    try {
+      // A `@playwright/test` with no resolvable `playwright-core` beside it:
+      // an installation `playwright install` could not drive either. The honest
+      // answer is "not ready", never a prefix-matched guess that looks green.
+      const packageDir = join(project, 'node_modules', PLAYWRIGHT_PACKAGE);
+      await mkdir(packageDir, { recursive: true });
+      await writeFile(
+        join(packageDir, 'package.json'),
+        JSON.stringify({ name: PLAYWRIGHT_PACKAGE, version: '1.62.1', main: 'index.js' }),
+        'utf8',
+      );
+      await writeFile(join(packageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+      await installFakeChromium(join(home, '.cache', 'ms-playwright'));
+
+      const env = await resolvePlaywrightEnvironment(inputs(project, { homeDir: home }));
+
+      expect(env.source).toBe('project');
+      expect(env.version).toBe('1.62.1');
+      expect(env.browsersPresent).toBe(false);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * REGRESSION — codex review of this branch, P2.
+   *
+   * A relative `PLAYWRIGHT_BROWSERS_PATH` stored verbatim is read against THIS
+   * process's cwd during resolution and against the child's cwd inside
+   * `playwright install`, so a download can succeed into one directory while
+   * readiness is checked in another. It is absolutised once, at the parent's
+   * cwd, and the absolute value is what every child is given.
+   */
+  it('absolutises a relative PLAYWRIGHT_BROWSERS_PATH so parent and child cannot disagree', async () => {
+    const dir = specwitnessPlaywrightCacheDir({
+      env: { PLAYWRIGHT_BROWSERS_PATH: 'tmp/browsers' },
+      platform: 'linux',
+      homeDir: '/home/dev',
+    });
+
+    expect(isAbsolute(dir.browsersPath)).toBe(true);
+    expect(dir.browsersPath).toBe(resolve('tmp/browsers'));
+    expect(dir.browsersPathFromEnv).toBe(true);
+  });
+});
 /* ── provisioning ──────────────────────────────────────────────────────────── */
 
 interface RecordedRun {
