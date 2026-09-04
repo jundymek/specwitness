@@ -622,6 +622,11 @@ function adaptationLines(adaptation: RunAdaptation): string[] {
     '',
     ...adaptation.applied.flatMap(changeLines),
     ...discardedLines(adaptation),
+    // ⚠️ RENDERED ON THIS ARM TOO. A proposal that could not be EXECUTED appears in neither
+    // `applied` nor `discarded` — both of those mean it ran — so without this it would
+    // vanish from a run that also adapted something successfully, and the report would be
+    // silently less complete than the JSON beside it.
+    ...(adaptation.refusal === undefined ? [] : boundedLines('Note', adaptation.refusal, '  ')),
   ];
 }
 

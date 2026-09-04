@@ -146,6 +146,24 @@ describe('executed-then-discarded changes are shown, in both branches', () => {
   it('renders nothing extra when there is nothing discarded', () => {
     expect(render(APPLIED)).not.toMatch(/DISCARDED/);
   });
+
+  it('shows a note about an unexecutable proposal even on an ADAPTED run', () => {
+    // A proposal that could not be executed is in neither `applied` nor `discarded` —
+    // both of those mean it ran — so without this it would vanish from a run that also
+    // adapted something successfully, and the terminal report would be silently less
+    // complete than the JSON beside it.
+    const report = render({
+      ...APPLIED,
+      refusal: {
+        text: "some proposals could not be executed and were not applied: probe 'other'",
+        truncated: false,
+        totalBytes: 68,
+      },
+    });
+
+    expect(report).toContain('could not be executed');
+    expect(report).toContain('other');
+  });
 });
 
 describe('an unadapted run renders no block at all', () => {
