@@ -98,6 +98,10 @@ development_status:
   6-7-dogfooding-readiness-docs-packaging: backlog
   6-8-shared-prompt-assembly-helper: review
   6-9-browser-verification-in-ci: review
+  # Follow-up story written by the epic-6 supervisor during wave 2 (2026-09-04) with the
+  # owner's agreement; not in epics.md. UNASSIGNED and unscheduled - the row exists so that
+  # sprint-status.sh can see its key if the story is ever picked up and merged.
+  6-10-corpus-evidence-kind-expectations: backlog
   epic-6-retrospective: optional
 
   epic-7: backlog
