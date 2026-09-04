@@ -18,7 +18,7 @@
  * sandbox limitation, not a regression. Check whether a failing file binds a socket first.
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -84,6 +84,32 @@ describe('AC3 — the flag pair', () => {
     expect(stderr).toMatch(/mechanics-adapter/);
     // A config problem, never a product FAIL.
     expect(exitCode).toBe(3);
+  });
+});
+
+describe('the adapter is validated BEFORE any provider is spent', () => {
+  it('refuses --adapt with an unassigned role without compiling a plan first', async () => {
+    // THE ROUND-6 CODEX P2, and it is the invariant `verify.ts` states in its own words:
+    // "A NEW PRECONDITION THAT NEEDS NO PROVIDER GOES ABOVE HERE". Resolving the adapter is
+    // pure config work, and doing it after `resolvePlan` meant that `--adapt` with an
+    // unassigned role AND no plan on disk would compile a plan first — spending subscription
+    // quota and writing a file — before refusing with a configuration error.
+    //
+    // The fixture has a `plan-author` configured and NO plan on disk, which is exactly the
+    // path that would spend.
+    const project = await fixture({ fakePlanAuthor: true, plan: false });
+    const planPath = join(project.root, '.specwitness', 'plans', `${project.epic}.yaml`);
+    await expect(stat(planPath)).rejects.toThrow();
+
+    const { exitCode, stderr } = await runCli(['verify', project.epic, '--adapt'], {
+      cwd: project.root,
+    });
+
+    expect(exitCode).toBe(3);
+    expect(stderr).toMatch(/mechanics-adapter/);
+    // The load-bearing assertion: no plan was compiled, so no quota was spent and no file
+    // was written for a command that was always going to fail on configuration.
+    await expect(stat(planPath)).rejects.toThrow();
   });
 });
 

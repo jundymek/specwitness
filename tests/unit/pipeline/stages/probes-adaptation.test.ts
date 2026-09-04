@@ -17,7 +17,10 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { AdaptationDecision } from '../../../../src/domain/adaptation-port.js';
+import type {
+  AdaptationCandidate,
+  AdaptationDecision,
+} from '../../../../src/domain/adaptation-port.js';
 import type {
   ContractCriterionRef,
   ProbeAttempt,
@@ -151,11 +154,16 @@ function scripted(
 function proposeWorking(): {
   adapt: NonNullable<ProbesStageDeps['adapt']>;
   offered: string[][];
+  /** Every candidate object, so a test can assert what was actually SENT. */
+  seen: AdaptationCandidate[];
 } {
   const offered: string[][] = [];
+  const seen: AdaptationCandidate[] = [];
   return {
     offered,
+    seen,
     adapt: async (candidates): Promise<AdaptationDecision> => {
+      seen.push(...candidates);
       offered.push(candidates.map((candidate) => candidate.probeId));
       return {
         outcome: 'proposed',
@@ -611,6 +619,9 @@ describe('retries and adaptation, which are different things that can both be tr
 });
 
 describe('⚠️ multi-probe criteria — eligibility and acceptance are PER PROBE', () => {
+  /** The candidate objects the most recent `mixedCriterion()` adapter was handed. */
+  let capturedCandidates: AdaptationCandidate[] = [];
+
   /**
    * A criterion with TWO browser probes: one that could not find its step target (eligible),
    * and one that merely failed an assertion (an ordinary product failure, never eligible).
@@ -619,7 +630,8 @@ describe('⚠️ multi-probe criteria — eligibility and acceptance are PER PRO
    * `error` — which is exactly the shape that used to hide the eligible probe.
    */
   function mixedCriterion(): { deps: ProbesStageDeps; offered: string[][] } {
-    const { adapt, offered } = proposeWorking();
+    const { adapt, offered, seen } = proposeWorking();
+    capturedCandidates = seen;
     return {
       offered,
       deps: {
@@ -703,6 +715,26 @@ describe('⚠️ multi-probe criteria — eligibility and acceptance are PER PRO
     // The plain failure was never offered, so the product failure stays a product failure.
     expect(offered[0]).not.toContain('plain-failure');
     expect(context.run.criteria[0]?.status).toBe('fail');
+  });
+
+  it('sends the candidate its OWN diagnostics, never a sibling probe result', async () => {
+    // Found by re-reading `adaptationCandidates` after the round-5 review rather than by a
+    // reviewer, and it is the same mistake in a third place: `record.result` is the
+    // AGGREGATE, chosen by PROBE_PRECEDENCE. Here the aggregate is the PLAIN FAILURE's
+    // (`actual: 'Orders'`), because a fail outranks an error — so the candidate for
+    // `missing-target` would have described a different probe's product failure to the
+    // adapter, and leaked one probe's observed values into a prompt about another.
+    const { deps, offered } = mixedCriterion();
+
+    const { context } = await run(deps);
+
+    expect(offered).toEqual([['missing-target']]);
+    const candidate = capturedCandidates.at(-1);
+    expect(candidate?.probeId).toBe('missing-target');
+    // Its own execError, not the sibling's observed value.
+    expect(candidate?.actual).toContain('could not find its target');
+    expect(candidate?.actual).not.toContain('Orders');
+    expect(context.run.adaptation?.adapted).toBe(true);
   });
 
   it('keeps the adaptation that WORKED even though a sibling keeps the criterion failing', async () => {

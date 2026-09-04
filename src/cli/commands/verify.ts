@@ -292,6 +292,22 @@ async function verify(
 
   assertCouldEverAdjudicate(config, loaded);
 
+  // ⚠️ BUILT HERE, ABOVE `resolvePlan`, BECAUSE IT NEEDS NO PROVIDER — which is exactly the
+  // rule the block above states: "A NEW PRECONDITION THAT NEEDS NO PROVIDER GOES ABOVE
+  // HERE". Story 5.6, and it was the FOURTH review finding against that same line.
+  //
+  // Resolving and constructing the adapter is pure config work. Doing it after `resolvePlan`
+  // meant that `--adapt` with an unassigned role AND no plan on disk would compile a plan
+  // first — spending subscription quota and writing a file — and only then refuse with a
+  // configuration error. Raised as a P2 by the codex review of this branch.
+  //
+  // Built ONLY under `--adapt`, so `adapt` is `undefined` on every default run and the
+  // probes stage is handed no provider at all. It REFUSES rather than no-ops when the role
+  // is unassigned, for the reason the `--no-ai` clash is refused: an operator who asked for
+  // adaptation must be able to tell "nothing needed adapting" from "adaptation was never
+  // possible", and a silent no-op makes those two indistinguishable.
+  const adapt = options.adapt === true ? buildMechanicsAdapter(config, clock) : undefined;
+
   // The `--no-ai` refusal and the auto-compilation both have to happen while
   // there is still no run directory, no worktree and no process group in
   // existence — a refusal afterwards would leave a `result.json` on disk
@@ -311,12 +327,6 @@ async function verify(
 
   assertSomethingToAdjudicate(config, planning.plan);
 
-  // Story 5.6. Built ONLY under `--adapt`, so `adapt` below is `undefined` on every default
-  // run and the probes stage is handed no provider at all. Refused rather than no-oped when
-  // the role is unassigned, for the reason the `--no-ai` clash is refused: an operator who
-  // asked for adaptation must be able to tell "nothing needed adapting" from "adaptation
-  // was never possible", and a silent no-op makes those two indistinguishable.
-  const adapt = options.adapt === true ? buildMechanicsAdapter(config, clock) : undefined;
 
   // Creates the run directory and fsyncs its manifest BEFORE any resource is
   // acquired (AD-8), so a `kill -9` from here on still leaves a record that

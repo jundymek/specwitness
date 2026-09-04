@@ -420,7 +420,10 @@ interface ExecutedCriterion {
  * click may come to pass — and the run says loudly that it was adapted, and what changed.*
  * Nothing else moves.
  */
-function adaptationCandidates(executed: readonly ExecutedCriterion[]): AdaptationCandidate[] {
+function adaptationCandidates(
+  executed: readonly ExecutedCriterion[],
+  redaction: RedactionOptions | undefined,
+): AdaptationCandidate[] {
   const candidates: AdaptationCandidate[] = [];
 
   for (const record of executed) {
@@ -453,17 +456,33 @@ function adaptationCandidates(executed: readonly ExecutedCriterion[]): Adaptatio
         continue;
       }
 
+      // ⚠️ THIS PROBE'S OWN DIAGNOSTICS, NOT THE CRITERION'S.
+      //
+      // `record.result` is the AGGREGATE, chosen by `PROBE_PRECEDENCE` — so on a criterion
+      // where this probe missed its step target and a SIBLING merely failed, the aggregate
+      // carries the sibling's `expected`/`actual`. Sending those would describe a different
+      // probe's product failure to the adapter, and would leak one probe's observed values
+      // into a prompt about another. Found by re-reading this function after the round-5
+      // review, which was about the same aggregate-for-a-per-probe-question mistake in two
+      // other places.
+      //
+      // Derived rather than hand-built so the values are redacted and bounded by the SAME
+      // function that redacts everything else (AD-10). Nothing here re-reads an evidence
+      // file, and no trace or screenshot is opened — see `AdaptationCandidate` for why that
+      // absence is the point.
+      const diagnostics = deriveCriterionResult(record.criterion, record.attempts.get(probe.id) ?? [], {
+        ...redaction,
+        probeId: probe.id,
+      });
+
       candidates.push({
         criterionId: record.criterion.criterionId,
         statement: record.criterion.statement,
         probeId: probe.id,
         path: probe.mechanics.path,
         scenario: probe.mechanics.scenario,
-        // ALREADY REDACTED AND BOUNDED by `deriveCriterionResult` (AD-10). Nothing here
-        // re-reads an evidence file, and no trace or screenshot is opened — see
-        // `AdaptationCandidate` for why that absence is the point.
-        ...(record.result.expected === undefined ? {} : { expected: record.result.expected }),
-        ...(record.result.actual === undefined ? {} : { actual: record.result.actual }),
+        ...(diagnostics.expected === undefined ? {} : { expected: diagnostics.expected }),
+        ...(diagnostics.actual === undefined ? {} : { actual: diagnostics.actual }),
       });
     }
   }
@@ -546,7 +565,7 @@ async function adaptAndReExecute(
   executed: readonly ExecutedCriterion[],
   adapt: MechanicsAdapter,
 ): Promise<number> {
-  const candidates = adaptationCandidates(executed);
+  const candidates = adaptationCandidates(executed, deps.redaction);
   if (candidates.length === 0) {
     // Nothing was adaptable, so no provider is called and the run carries NO adaptation key
     // at all. "A run that did not adapt has no marker and no record" is assertable because
