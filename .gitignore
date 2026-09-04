@@ -9,6 +9,9 @@ dist/
 coverage/
 # vitest's JSON report, written by `pnpm test:ci` and read by the skipped-suite report.
 .vitest-report.json
+# The same report for the browser-only run (`pnpm test:browser`, story 6.9's CI job), which
+# is what proves those suites RAN rather than skipped.
+.vitest-browser-report.json
 
 # Environment / secrets
 .env
