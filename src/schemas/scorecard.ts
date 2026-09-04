@@ -74,6 +74,7 @@ import { STAGE_NAMES } from '../domain/stage.js';
 import type { StageName } from '../domain/stage.js';
 import { InfraErrorClassificationSchema, VerdictSchema } from './enums.js';
 import { IsoUtcTimestamp } from './manifest.js';
+import { unknownKeysOnly } from './unknown-keys.js';
 import { schemaVersionFor } from './versions.js';
 
 /** The record version, per line. See `SCHEMA_VERSIONS.scorecard`. */
@@ -531,38 +532,6 @@ export type ScorecardLineParse =
   | { readonly ok: false; readonly reason: ScorecardSkipReason; readonly message: string };
 
 /**
- * Every unrecognised key, dotted and nesting-qualified, when EVERY issue was an
- * unknown-key issue; `null` otherwise.
- *
- * **A PRIVATE COPY ON PURPOSE, and it has a shared home coming.** Story 6.3 owns
- * `src/schemas/unknown-keys.ts`, exporting `unknownKeysOnly(error): readonly string[] |
- * null` — the identical signature, agreed with its author before either branch was
- * written. It is not imported here because doing so would make this branch unbuildable
- * until that one merges, in a six-agent wave, from the one story that changes runtime
- * behaviour. **Converging is a one-line import once both are merged**, and it is
- * recorded in this story's Dev Agent Record so it is found rather than rediscovered.
- *
- * `null` for a non-unknown-key issue is what preserves the malformed-document path: if
- * this returned an empty array instead, a wrong TYPE would be reported as a version skew
- * and real corruption would hide behind a friendly upgrade hint.
- */
-function unknownKeysOnly(error: z.ZodError): readonly string[] | null {
-  const keys: string[] = [];
-
-  for (const issue of error.issues) {
-    if (issue.code !== 'unrecognized_keys') {
-      return null;
-    }
-    const prefix = issue.path.length > 0 ? `${issue.path.join('.')}.` : '';
-    for (const key of issue.keys) {
-      keys.push(`${prefix}${key}`);
-    }
-  }
-
-  return keys.length > 0 ? keys : null;
-}
-
-/**
  * Parses ONE line, and never throws.
  *
  * ADR-008 §5 in code. Three outcomes, and the distinction between the last two is the
@@ -629,6 +598,16 @@ export function parseScorecardLine(line: string, lineNumber: number, path: strin
     return { ok: true, record: parsed.data };
   }
 
+  // `unknownKeysOnly` is story 6.3's shared classifier (`src/schemas/unknown-keys.ts`),
+  // and this call site is the convergence its author and I agreed on before either branch
+  // was written. Three readers in this epic ask a `ZodError` the same question — 6.3's two
+  // and this one — and three hand-written copies of "was EVERY issue an unrecognised key"
+  // is how the second one quietly gets nested paths wrong.
+  //
+  // It CLASSIFIES and does not speak, which is what keeps it clear of the shared
+  // `assertSchemaVersion` helper ADR-008 rejected: what a mismatch MEANS stays
+  // artifact-specific, and this file still picks its own message and its own consequence
+  // — a skip that continues, where 6.3's readers refuse with exit 3 (ADR-008 §5).
   const unknown = unknownKeysOnly(parsed.error);
   if (unknown !== null) {
     return {
