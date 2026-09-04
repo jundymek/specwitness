@@ -40,7 +40,14 @@ export interface AdaptationCandidate {
   /** The contract's statement, from the verified contract. Never the plan's copy (AD-5). */
   readonly statement: string;
   readonly probeId: string;
-  /** The compiled mechanics, so the adapter can propose a change relative to them. */
+  /**
+   * The compiled mechanics, so the adapter can propose a change relative to them.
+   *
+   * ⚠️ **REDACTED AND BOUNDED BY THE CALLER, THOUGH THEY COME FROM THE PROJECT'S OWN PLAN.**
+   * Plan content is not automatically safe to send: a scenario can carry a literal a `fill`
+   * step types into a form, and a path can carry a query value. Everything in this object
+   * leaves the machine, so everything in it is scrubbed first.
+   */
   readonly path: string;
   readonly scenario: string;
   /** The failing assertion, ALREADY redacted and bounded by `deriveCriterionResult`. */

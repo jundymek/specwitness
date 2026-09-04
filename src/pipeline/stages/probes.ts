@@ -323,13 +323,7 @@ async function executePlan(
 
     // Story 5.6: remembered ONLY when an adapter is wired, so a default run allocates
     // nothing and the adaptation path is provably inert rather than merely unused.
-    executed?.push({
-      index: context.run.criteria.length,
-      entry,
-      criterion,
-      attempts,
-      result: select(perProbe),
-    });
+    executed?.push({ index: context.run.criteria.length, entry, criterion, attempts });
 
     context.run.criteria.push(select(perProbe));
   }
@@ -354,8 +348,22 @@ interface ExecutedCriterion {
   readonly entry: PlanCriterion;
   readonly criterion: ContractCriterionRef;
   readonly attempts: Map<string, ProbeAttempt[]>;
-  readonly result: DerivedCriterionResult;
 }
+
+/*
+ * ⚠️ THERE IS NO `result` FIELD HERE, AND THE ABSENCE IS LOAD-BEARING.
+ *
+ * It used to carry the criterion's aggregate `DerivedCriterionResult`, and THREE separate
+ * review findings came from reading it: eligibility, acceptance and the candidate's own
+ * diagnostics were all answered from a criterion-level value where the question was about
+ * ONE PROBE. `select` resolves a criterion by `PROBE_PRECEDENCE`, so the aggregate routinely
+ * belongs to a different probe than the one being asked about.
+ *
+ * Every one of those is now derived per probe from `attempts`, which makes the aggregate
+ * unused — so it is removed rather than left in place. A field that is present, plausible
+ * and wrong for this flow's questions is how the same mistake gets made a fourth time.
+ */
+
 
 /**
  * Which failing browser probes are worth adapting.
@@ -479,8 +487,24 @@ function adaptationCandidates(
         criterionId: record.criterion.criterionId,
         statement: record.criterion.statement,
         probeId: probe.id,
-        path: probe.mechanics.path,
-        scenario: probe.mechanics.scenario,
+        // ⚠️ REDACTED AND BOUNDED, THOUGH THEY COME FROM THE PROJECT'S OWN PLAN.
+        //
+        // It is tempting to treat plan content as safe because a human wrote it and
+        // committed it. It is not: a scenario can carry a literal a `fill` step types into a
+        // form — `fill "#password" "hunter2"` is a perfectly ordinary plan line — and a path
+        // can carry a query value. Copying those raw into a prompt sends them to a provider
+        // CLI, which is precisely the disclosure this flow claims not to make.
+        //
+        // This story already redacted the SAME two strings in the audit record
+        // (`AppliedMechanicsChange.from`, whose own doc says why) and did not redact the copy
+        // it sent to the provider. Raised as a P1 by the codex review, and it is the more
+        // dangerous half of the two: an audit record stays on the operator's disk, a prompt
+        // leaves the machine.
+        //
+        // Bounded as well as redacted: a scenario has no length limit in the plan schema, and
+        // an unbounded one would be a prompt nobody budgeted for.
+        path: boundedText(probe.mechanics.path, redaction).text,
+        scenario: boundedText(probe.mechanics.scenario, redaction).text,
         ...(diagnostics.expected === undefined ? {} : { expected: diagnostics.expected }),
         ...(diagnostics.actual === undefined ? {} : { actual: diagnostics.actual }),
       });

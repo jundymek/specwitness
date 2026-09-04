@@ -754,6 +754,78 @@ describe('⚠️ multi-probe criteria — eligibility and acceptance are PER PRO
   });
 });
 
+describe('⚠️ nothing unredacted reaches the provider', () => {
+  it('scrubs a secret out of the scenario before it becomes a candidate', async () => {
+    // THE ROUND-7 CODEX P1, and the most dangerous finding in the branch after the
+    // candidate-rule one, because it leaves the machine.
+    //
+    // Plan content is not automatically safe to send just because a human wrote it:
+    // `fill "#password" "..."` is an ordinary plan line. This story already redacted the
+    // SAME two strings in the audit record and did not redact the copy it sent to a
+    // provider — an audit record stays on the operator's disk, a prompt does not.
+    //
+    // ⚠️ Asserted as the secret being ABSENT, never as `[REDACTED]` being present (Epic 3
+    // retro section 7): a test that looks for the marker passes just as happily when the
+    // marker was added beside the secret rather than instead of it.
+    const secret = 'NOTAREALKEY-0123456789abcdefghij';
+    const probe: BrowserProbe = {
+      id: 'p1',
+      surface: 'browser',
+      mechanics: {
+        serviceId: 'backend',
+        path: `/login?token=${secret}`,
+        scenario: `fill "#password" "${secret}"\nclick "#create-company"`,
+      },
+      assertions: [
+        {
+          description: 'the organization page appears',
+          target: { source: 'title' },
+          comparison: 'equals',
+          expected: 'Organizations',
+        },
+      ],
+    };
+
+    const { adapt, seen } = proposeWorking();
+    const deps: ProbesStageDeps = {
+      criteria: [{ criterionId: 'E7-01', disposition: 'automated', probes: [probe] }],
+      data: NO_DATA,
+      // A config-declared extra pattern, which is how AD-10 lets a project name the shape
+      // of its own secrets (`RedactionOptions.extraPatterns`).
+      redaction: { extraPatterns: [new RegExp(secret, 'g')] },
+      dispatch: ({ probe: dispatched, attempt }): ProbeDispatch => ({
+        executor: {
+          surface: dispatched.surface,
+          execute: async (): Promise<ProbeAttempt> => ({
+            attempt,
+            observations: [],
+            assertionEvaluations: [],
+            evidence: [],
+            execError: {
+              message: 'the step could not find its target',
+              reason: 'step-target-missing',
+            },
+            durationMs: 1,
+          }),
+        },
+        params: { probe: dispatched },
+      }),
+      adapt,
+    };
+
+    await run(deps);
+
+    const candidate = seen.at(-1);
+    expect(candidate).toBeDefined();
+    // The secret is GONE from everything that leaves the machine.
+    expect(candidate?.scenario).not.toContain(secret);
+    expect(candidate?.path).not.toContain(secret);
+    expect(JSON.stringify(candidate)).not.toContain(secret);
+    // And the mechanics are still recognisable enough to adapt against.
+    expect(candidate?.scenario).toContain('#create-company');
+  });
+});
+
 describe('the codex findings', () => {
   it('offsets the adapted attempt past the first pass, so evidence cannot be overwritten', async () => {
     // P1. `src/surfaces/browser.ts` derives evidence filenames from criterion id, probe id
