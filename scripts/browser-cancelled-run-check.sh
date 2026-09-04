@@ -120,7 +120,18 @@ if [ "${launched}" != yes ]; then
   echo "ERROR: no browser process ever appeared, so there is nothing to say about what a cancelled run leaks" >&2
   echo "HINT: this check refuses to report a clean kill it did not observe. Look at ${work}/run.log — the suite may have skipped, or failed before its first launch." >&2
   tail -40 "${work}/run.log" >&2
-  kill -KILL "${runner_pid}" 2>/dev/null
+
+  # ⚠️ TEAR DOWN THE WHOLE TREE ON THE WAY OUT. Raised as a P2 by the Codex review of this
+  # branch, and it is this story's own defect class for the third time: the early-exit path
+  # killed only the background `pnpm` pid, so vitest workers and anything ProcessRunner had
+  # already detached survived — precisely when the cleanup check is the thing that is failing,
+  # and before any reaping pass could run. Kill every descendant, then let the scanner reap the
+  # detached groups by group id.
+  for pid in $(descendants "${runner_pid}"); do
+    kill -KILL "${pid}" 2>/dev/null
+  done
+  node "${leak_check_args[@]}" --baseline "${baseline}" --reap \
+    --label "after a check that never observed a browser launch" || true
   exit 1
 fi
 
@@ -156,19 +167,33 @@ echo "==> [3b/5] the fate of each spared orphan"
 if [ -z "${spared}" ]; then
   echo "    none were spared - nothing was detached into its own group at kill time"
 else
-  for entry in ${spared}; do
-    orphan="${entry%%:*}"
-    waited=0
-    while kill -0 "${orphan}" 2>/dev/null && [ ${waited} -lt "${WAIT_SECONDS}" ]; do
-      sleep 1
-      waited=$((waited + 1))
+  # ⚠️ ONE SHARED DEADLINE, NOT ONE PER ORPHAN. Raised as a P1 by the Codex review of this
+  # branch, and correct on both counts. Waiting up to WAIT_SECONDS separately for every pid
+  # makes the worst case N * 180s for a chromium tree that can hold many processes — minutes to
+  # tens of minutes, approaching the job timeout. And it corrupted the MEASUREMENT, which is
+  # what this step exists to produce: the second orphan's "exited after 0s" was counted from
+  # after the first orphan's wait had already elapsed, so it had been dying for 180s unobserved.
+  # All orphans are now polled together against one clock, and each reported time is measured
+  # from the kill.
+  pending="$(echo "${spared}" | tr ' ' '\n' | sed 's/:.*//' | grep -v '^$' | tr '\n' ' ')"
+  waited=0
+  while [ -n "$(echo "${pending}" | tr -d ' ')" ] && [ ${waited} -lt "${WAIT_SECONDS}" ]; do
+    still=""
+    for orphan in ${pending}; do
+      if kill -0 "${orphan}" 2>/dev/null; then
+        still="${still} ${orphan}"
+      else
+        echo "    orphan ${orphan}: exited on its own after ${waited}s"
+      fi
     done
-    if kill -0 "${orphan}" 2>/dev/null; then
-      echo "    orphan ${orphan}: STILL ALIVE after ${waited}s"
-      ps -o pid=,pgid=,etime=,args= -p "${orphan}" 2>/dev/null | cut -c1-160
-    else
-      echo "    orphan ${orphan}: exited on its own after ${waited}s"
-    fi
+    pending="$(echo "${still}" | tr -s ' ' | sed 's/^ //;s/ $//')"
+    [ -z "${pending}" ] && break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  for orphan in ${pending}; do
+    echo "    orphan ${orphan}: STILL ALIVE after ${waited}s"
+    ps -o pid=,pgid=,etime=,args= -p "${orphan}" 2>/dev/null | cut -c1-160
   done
 fi
 

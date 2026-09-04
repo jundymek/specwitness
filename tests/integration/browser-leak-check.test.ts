@@ -444,6 +444,34 @@ describe('the browser leak check', () => {
     expect(stdout).toContain('own');
   });
 
+  /**
+   * ⚠️ **A SAFETY GUARD THAT SWITCHES ITSELF OFF WHEN IT CANNOT ANSWER IS NOT A GUARD.**
+   * Raised as a P1 by the Codex review of this branch. `ownProcessGroup()` returns `null` when
+   * `ps` fails, and the own-group refusal was written as `own !== null && pgid === own` — so a
+   * failed `ps` disabled precisely the check that stops `kill(-pgid)` killing the checker and
+   * everything else in its group. Unknown must mean REFUSE, not proceed.
+   *
+   * Driven with a `PATH` that contains no `ps`, so the failure is real rather than simulated —
+   * no test seam in the script, and the listing still arrives through `--ps-file`.
+   */
+  it('refuses to reap at all when it cannot determine its own process group', async () => {
+    const psFile = await listing(
+      `   4210    4200    4198       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stdout, stderr } = await run(
+      ['--ps-file', psFile, '--browsers-path', BROWSERS_PATH, '--reap'],
+      { PATH: '/nonexistent-so-ps-cannot-be-found', HOME: process.env['HOME'] ?? '/tmp' } as Record<
+        string,
+        string
+      >,
+    );
+
+    expect(exitCode).toBe(1);
+    expect(`${stdout}${stderr}`).toContain('cannot determine its own process group');
+    expect(stdout).not.toContain('would signal process group');
+  });
+
   it('reaps nothing, and says so, when nothing survived', async () => {
     const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
 

@@ -430,6 +430,22 @@ function reapSurvivors() {
   const dryRun = psFile !== undefined;
   const own = ownProcessGroup();
   const groups = [...new Set(survivors.map((row) => row.pgid))];
+
+  // ⚠️ FAIL CLOSED WHEN WE DO NOT KNOW OUR OWN GROUP. Raised as a P1 by the Codex review of
+  // this branch. The own-group refusal was written as `own !== null && pgid === own`, which
+  // meant a failed `ps` DISABLED the very check that stops `kill(-pgid, ...)` killing this
+  // checker and every other process sharing its group. A safety guard that switches itself off
+  // when it cannot answer is not a guard — and `assertSignallableProcessGroup`
+  // (src/infra/process-runner.ts:364-376) refuses rather than guesses for the same reason.
+  // Reporting the leak is not affected: the exit code below is unchanged.
+  if (own === null) {
+    process.stdout.write(
+      `  REAPING REFUSED: the scanner cannot determine its own process group, so it will not\n` +
+        `    signal any group. ${groups.length} group(s) left running and reported above.\n`,
+    );
+    return;
+  }
+
   const lines = [`  REAPING ${groups.length} process group(s)${dryRun ? ' (dry run: the listing is a fixture, nothing is signalled)' : ''}`];
 
   const signallable = [];
@@ -438,7 +454,7 @@ function reapSurvivors() {
       lines.push(`    refusing to signal process group ${pgid}: must be an integer greater than 1`);
       continue;
     }
-    if (own !== null && pgid === own) {
+    if (pgid === own) {
       lines.push(`    refusing to signal process group ${pgid}: it is this process's own group`);
       continue;
     }
