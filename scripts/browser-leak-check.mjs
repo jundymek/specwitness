@@ -177,8 +177,37 @@ function readListing() {
   });
 }
 
+/** Wall-clock seconds, sampled once per scan so every row in it shares one reference point. */
+const nowSeconds = () => Math.floor(Date.now() / 1000);
+
+/** `ps` elapsed time — `[[dd-]hh:]mm:ss` — as seconds. Unparseable input reads as 0. */
+function elapsedToSeconds(elapsed) {
+  const [days, clock] = elapsed.includes('-') ? elapsed.split('-') : ['0', elapsed];
+  const parts = clock.split(':').map((part) => Number(part));
+  if (parts.some((part) => !Number.isFinite(part))) {
+    return 0;
+  }
+  const [hours, minutes, seconds] =
+    parts.length === 3 ? parts : parts.length === 2 ? [0, parts[0], parts[1]] : [0, 0, parts[0]];
+  return Number(days) * 86_400 + hours * 3_600 + minutes * 60 + seconds;
+}
+
+/**
+ * ⚠️ IDENTITY IS PID **PLUS START TIME**, NEVER PID ALONE. Raised as a P2 by the Codex review of
+ * this branch, and it is a false-clean hole in this script's principal guarantee: if a baseline
+ * browser exits and the OS hands its pid to a browser THIS job launches, matching on pid would
+ * subtract the new process and the scan would report clean while a real leak ran on.
+ *
+ * `ps` gives elapsed time rather than start time, and elapsed grows between the two scans — but
+ * a process seen at T with elapsed E started at T − E, and THAT instant is stable. Compared with
+ * a tolerance because `etime` has one-second resolution and the two samples are taken seconds
+ * apart.
+ */
+const START_TOLERANCE_SECONDS = 3;
+
 /** One process row. `args` keeps its internal spacing, because it is quoted as evidence. */
 function parse(listing) {
+  const sampledAt = nowSeconds();
   const rows = [];
   for (const line of listing.split('\n')) {
     const text = line.trim();
@@ -190,11 +219,15 @@ function parse(listing) {
       // The header, or anything else that is not a process row.
       continue;
     }
+    const elapsed = match[4];
     rows.push({
       pid: Number(match[1]),
       ppid: Number(match[2]),
       pgid: Number(match[3]),
-      elapsed: match[4],
+      elapsed,
+      // The instant this process STARTED, which is stable across scans while `elapsed` grows.
+      // See IDENTITY below for why a pid alone will not do.
+      startedAt: sampledAt - elapsedToSeconds(elapsed),
       args: match[5],
     });
   }
@@ -232,14 +265,14 @@ function isBrowser(row) {
  */
 function readBaseline() {
   if (baselineFile === undefined) {
-    return new Set();
+    return [];
   }
-  return new Set(
-    readFileSync(baselineFile, 'utf8')
-      .split('\n')
-      .map((line) => Number(line.trim()))
-      .filter((pid) => Number.isInteger(pid) && pid > 0),
-  );
+  return readFileSync(baselineFile, 'utf8')
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .filter((parts) => parts[0] !== undefined && parts[0] !== '')
+    .map((parts) => ({ pid: Number(parts[0]), startedAt: Number(parts[1] ?? Number.NaN) }))
+    .filter((entry) => Number.isInteger(entry.pid) && entry.pid > 0);
 }
 
 /** Every browser process, or a thrown error if the listing could not be believed. */
@@ -260,7 +293,15 @@ let baseline;
 
 try {
   baseline = readBaseline();
-  const notInBaseline = (row) => !baseline.has(row.pid);
+  const notInBaseline = (row) =>
+    !baseline.some(
+      (entry) =>
+        entry.pid === row.pid &&
+        // A baseline written by an older format carries no start time; fall back to pid-only
+        // rather than treating every baseline row as a mismatch.
+        (!Number.isFinite(entry.startedAt) ||
+          Math.abs(entry.startedAt - row.startedAt) <= START_TOLERANCE_SECONDS),
+    );
 
   survivors = scan().filter(notInBaseline);
 
@@ -291,7 +332,12 @@ try {
  */
 if (writeBaselineFile !== undefined) {
   const pids = survivors.map((row) => row.pid);
-  writeFileSync(writeBaselineFile, `${pids.join('\n')}\n`, 'utf8');
+  // pid AND start instant — see IDENTITY above.
+  writeFileSync(
+    writeBaselineFile,
+    `${survivors.map((row) => `${row.pid} ${row.startedAt}`).join('\n')}\n`,
+    'utf8',
+  );
   // Bounded: a CI runner has none of these, but a developer laptop has dozens and a wall of
   // Electron argv makes the rest of the job's log unreadable. Every pid is in the FILE; the
   // listing here is a sample.
@@ -341,7 +387,7 @@ lines.push(
 lines.push(
   baselineFile === undefined
     ? '  baseline: none; every matching process counts'
-    : `  baseline: ${baseline.size} process(es) already running before the run (${baselineFile})`,
+    : `  baseline: ${baseline.length} process(es) already running before the run (${baselineFile})`,
 );
 
 if (survivors.length === 0) {

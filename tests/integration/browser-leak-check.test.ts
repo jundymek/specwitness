@@ -361,6 +361,76 @@ describe('the browser leak check', () => {
     expect((await readFile(survivorsPath, 'utf8')).trim()).toBe('');
   });
 
+  /**
+   * ⚠️ **A BASELINE KEYED ON PID ALONE CAN EXCLUDE A REAL SURVIVOR.** Raised as a P2 by the
+   * Codex review of this branch. If a baseline browser exits and the OS hands its pid to a
+   * browser this job then launches, matching on pid would subtract the new process and the scan
+   * would report clean while a real leak ran on — a false clean in the check's principal
+   * guarantee, which is the same family of defect as everything else this story is about.
+   *
+   * Identity is therefore pid **plus start time**, derived from the `etime` column that is
+   * already parsed: a process seen at time T with elapsed E started at T − E, and that instant
+   * is stable across scans while `etime` itself grows.
+   *
+   * The two cases below are the two directions, and the second is the bug.
+   */
+  it('still excludes a baseline process whose elapsed time keeps growing', async () => {
+    const dir = await scratch();
+    const baselinePath = join(dir, 'baseline.txt');
+
+    const before = await listing(
+      `   9001    9000    9001       10:00 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+    await run(['--ps-file', before, '--browsers-path', BROWSERS_PATH, '--write-baseline', baselinePath]);
+
+    // The same process on a later scan. `elapsed` grows by exactly the wall-clock that passed
+    // between the two samples — which is what keeps the computed START instant fixed — so the
+    // fixture cannot grow it faster than the test itself takes to run. On a real job the two
+    // scans are minutes apart and elapsed grows by those minutes; the start stays put either way.
+    const after = await listing(
+      `   9001    9000    9001       10:01 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      after,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--baseline',
+      baselinePath,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('no surviving browser process');
+  });
+
+  it('reports a process that REUSED a baseline pid, instead of subtracting it', async () => {
+    const dir = await scratch();
+    const baselinePath = join(dir, 'baseline.txt');
+
+    const before = await listing(
+      `   9001    9000    9001    01:00:00 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+    await run(['--ps-file', before, '--browsers-path', BROWSERS_PATH, '--write-baseline', baselinePath]);
+
+    // The same PID, but only seconds old: the original exited and the pid was reused. This is a
+    // NEW browser and a real survivor, however familiar its pid looks.
+    const after = await listing(
+      `   9001    9000    9001       00:03 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      after,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--baseline',
+      baselinePath,
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('9001');
+    expect(stdout).not.toContain('no surviving browser process');
+  });
+
   /* ── reaping ──────────────────────────────────────────────────────────────────────── */
 
   /**
