@@ -1,0 +1,25 @@
+{
+  "expectedVersion": 1,
+  "fixture": "10-cross-story-integration-broken",
+  "why": "Brief section 7's headline example and section 50 class 10: two story modules, each individually correct, integrated wrongly - the approved versus approve class, verbatim. modules/checkout speaks the past participle (approved, declined) and modules/fulfilment speaks the imperative (approve, decline); app/server.cjs hands one vocabulary to the other, the transition table has no entry for approved, and the state machine correctly refuses to guess, so the order stays pending. WHY NO STORY-LEVEL GATE COULD HAVE CAUGHT IT, which is this fixture's claim and the reason the product exists: neither module contains a defect, so there is nothing for a reviewer of either PR to object to; there is no type error, because both vocabularies are plain strings; and BOTH MODULES PASS THEIR OWN TESTS, which E10-01 measures in this very run rather than asserting in prose. Story B's suite even covers the unknown-command branch the assembled system takes, and asserts the CORRECT behaviour for it - so the suite is not weak and not missing a case, and it still cannot catch this, because it tests the module against the vocabulary the module declares, which is the only vocabulary its author had. The defect exists only at the seam, and only the assembled system exhibits it. E10-02 is pinned as PASS because the checkout response is truthful about checkout: an http probe cannot see this. Only E10-03's observation of what was persisted can. The verdict is FAIL with exit 1 and NO gateFailed: the project's own test command, running both suites, exits 0 in this same run - every story-level gate green, the epic broken. Evidence kinds are pinned through the stderr report: gate, command, http and observation.",
+  "proves": ["AC1", "NFR-10", "AD-12", "AD-13", "AD-6", "FR-25", "FR-26", "FR-28", "ADR-002", "ADR-003", "SM-1"],
+  "command": ["verify", "epic-10", "--json"],
+  "exitCode": 1,
+  "outcome": { "verdict": "FAIL" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E10-01": "pass",
+      "E10-02": "pass",
+      "E10-03": "fail"
+    }
+  },
+  "stderrContains": [
+    "  gate tests (pass, exit 0): node gates/tests.cjs",
+    "  command module-tests (exit 0): node commands/module-tests.cjs",
+    "  http POST http://127.0.0.1:<PORT:app>/checkout -> 200",
+    "  observation orders",
+    "      expected: fulfilled",
+    "      actual:   pending"
+  ]
+}

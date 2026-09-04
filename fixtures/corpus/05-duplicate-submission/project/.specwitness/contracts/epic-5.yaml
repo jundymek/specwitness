@@ -1,0 +1,43 @@
+# Hand-written Verification Contract for the corpus fixture
+# `05-duplicate-submission`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-5 --freeze`; see `fixtures/corpus/README.md`.
+#
+# E5-01 IS ABOUT THE FIRST SUBMISSION AND E5-02 IS ABOUT THE SECOND, and the
+# split is the fixture. A specification that only had E5-01 would be satisfied
+# by this application. E5-02 says "answers successfully AND adds no new row",
+# because the defect is precisely that the first half stays true while the
+# second does not.
+spec:
+  epic: epic-5
+  version: 1
+  criteria:
+    - id: E5-01
+      statement: The first submission answers 201 and reports the order as accepted.
+      kind: behavioral
+      severity: normal
+      verifiability: automated
+    - id: E5-02
+      statement: Re-submitting an order with the same idempotency key answers successfully and adds no new order row.
+      kind: integration
+      severity: critical
+      verifiability: automated
+    - id: E5-03
+      statement: The submission module test suite passes.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 2e0453f9637e6afad93a7b201be3d69daa7b5acc6576922d2c918a930dd8f8c8
+  createdAt: 2026-09-04T09:00:00.000Z
+  frozenAt: 2026-09-04T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-04T09:00:00.000Z
+  history: []

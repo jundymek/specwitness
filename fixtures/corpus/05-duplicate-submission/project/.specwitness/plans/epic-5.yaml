@@ -1,0 +1,122 @@
+# Hand-written Verification Plan for the corpus fixture
+# `05-duplicate-submission`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18). The `contract.fingerprint` must match the frozen contract beside it.
+#
+# THE PLAN IS CORRECT. It probes for exactly what the contract requires; the APP
+# is what is wrong (`app/submissions.cjs` never persists the idempotency key its
+# own duplicate check looks for).
+#
+# ⚠️ THE SECOND REQUEST IS THE ONE THAT REVEALS THE DEFECT. E5-01 submits once
+# and is pinned as PASS. E5-02 submits AGAIN, with the same key, and its http
+# probe asserts only that the answer was a SUCCESS — a 2xx, expressed as two
+# numeric bounds rather than as a specific code. That is deliberate and it is
+# the difference between a fixture and a tautology: a correct implementation
+# would answer 200 (duplicate) and this one answers 201 (created), so pinning
+# either code would either assert the defect or fail on the fix. What both
+# worlds agree on is that the request succeeded — and that is exactly the point,
+# because every response-level check staying green is the defect class.
+plan:
+  epic: epic-5
+  contract:
+    version: 1
+    fingerprint: 2e0453f9637e6afad93a7b201be3d69daa7b5acc6576922d2c918a930dd8f8c8
+  data:
+    seed: corpusseed050001
+    bindings: []
+  criteria:
+    # THE FIRST SUBMISSION. Entirely correct.
+    - criterionId: E5-01
+      disposition: automated
+      probes:
+        - id: first-submission
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /orders
+            headers:
+              content-type: application/json
+              idempotency-key: fixture-key-1
+            body: '{"item":"widget","quantity":2}'
+          assertions:
+            - description: the first submission answers 201
+              target: { source: status }
+              comparison: equals
+              expected: "201"
+            - description: it reports the order as accepted
+              target: { source: jsonPath, path: $.status }
+              comparison: equals
+              expected: accepted
+
+    # THE SECOND SUBMISSION, with the SAME idempotency key.
+    #
+    # `orderIds` is asserted BEFORE the delta on purpose: it is the assertion
+    # whose diagnosis is rendered into the report, and a list makes the failure
+    # show the duplicate row itself rather than merely a count that moved.
+    - criterionId: E5-02
+      disposition: automated
+      probes:
+        - id: second-submission
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /orders
+            headers:
+              content-type: application/json
+              idempotency-key: fixture-key-1
+            body: '{"item":"widget","quantity":2}'
+          assertions:
+            - description: the re-submission is answered, not rejected
+              target: { source: status }
+              comparison: greaterThan
+              expected: "199"
+            - description: the re-submission answers successfully
+              target: { source: status }
+              comparison: lessThan
+              expected: "300"
+        - id: persisted-orders
+          surface: observation
+          mechanics:
+            commandId: orders
+            args: []
+            around: second-submission
+          assertions:
+            - description: the store still holds only the order the first submission created
+              target: { source: jsonPath, path: $.orderIds, phase: after }
+              comparison: equals
+              expected: '["order-1"]'
+            - description: the re-submission adds no new order row
+              target: { source: jsonPath, path: $.orderCount, phase: delta }
+              comparison: equals
+              expected: "0"
+
+    - criterionId: E5-03
+      disposition: automated
+      probes:
+        - id: module-suite
+          surface: shell
+          mechanics:
+            commandId: module-tests
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the module test suite exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: every module test passed
+              target: { source: stdout }
+              comparison: contains
+              expected: "submissions-module: 5 passed, 0 failed"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

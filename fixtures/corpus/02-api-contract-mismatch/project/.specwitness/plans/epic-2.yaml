@@ -1,0 +1,99 @@
+# Hand-written Verification Plan for the corpus fixture
+# `02-api-contract-mismatch`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18). The `contract.fingerprint` below must match the frozen contract
+# beside it; the runner does not patch it, so a re-freeze means this line is
+# re-copied by hand.
+#
+# THE PLAN IS CORRECT. It probes for exactly what the contract requires; the APP
+# is what is wrong (`app/order-response.cjs` omits the currency). A fixture
+# whose plan was wrong instead would fail too, and would prove nothing about the
+# defect class it claims to embody.
+plan:
+  epic: epic-2
+  contract:
+    version: 1
+    fingerprint: 761dcf5451e18dbfe2b7cd6b1df8d93b4f9611c0b3b3ef49cbf8aec12c7e4d0f
+  data:
+    seed: corpusseed020001
+    bindings: []
+  criteria:
+    # THE DEFECT. Three assertions, and only the third is unsatisfied: the
+    # endpoint answers, it answers 201, and the order it reports really is
+    # approved. A fixture that failed on the status code would be testing an
+    # outage, not an incomplete response contract.
+    - criterionId: E2-01
+      disposition: automated
+      probes:
+        - id: create-order
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /orders
+            headers:
+              content-type: application/json
+            body: '{"item":"widget","quantity":2}'
+          assertions:
+            - description: creating an order answers 201
+              target: { source: status }
+              comparison: equals
+              expected: "201"
+            - description: the response reports the approved status
+              target: { source: jsonPath, path: $.status }
+              comparison: equals
+              expected: approved
+            - description: the response carries the EUR currency the contract requires
+              target: { source: jsonPath, path: $.currency }
+              comparison: equals
+              expected: EUR
+
+    - criterionId: E2-02
+      disposition: automated
+      probes:
+        - id: health
+          surface: http
+          mechanics:
+            serviceId: app
+            method: GET
+            path: /health
+          assertions:
+            - description: the health endpoint answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+            - description: it reports the service as ok
+              target: { source: jsonPath, path: $.status }
+              comparison: equals
+              expected: ok
+
+    # THE FIXTURE'S OWN ARGUMENT, made mechanical: the module suite that a
+    # story-level gate would have run is green in this same run.
+    - criterionId: E2-03
+      disposition: automated
+      probes:
+        - id: module-suite
+          surface: shell
+          mechanics:
+            commandId: module-tests
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the module test suite exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: every module test passed
+              target: { source: stdout }
+              comparison: contains
+              expected: "orders-module: 4 passed, 0 failed"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

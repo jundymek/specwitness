@@ -90,7 +90,7 @@ development_status:
 
   epic-6: in-progress
   6-1-corpus-infrastructure-hermetic-e2e-runner: done
-  6-2-behavioral-corpus-fixtures: backlog
+  6-2-behavioral-corpus-fixtures: review
   6-3-classification-corpus-fixtures: review
   6-4-non-node-target-fixture: review
   6-5-scorecard-recording: backlog
@@ -118,8 +118,8 @@ action_items:
   - {id: e3-G, epic: 3, action: 'pre-registration empty-container window - follow-up or Epic 4 rider', owner: owner, status: 'investigated in story 6.1 and NOT fixed, deliberately - measured 1 empty container in 40 SIGKILL-at-random-point runs on macOS; the leftover holds no git registration, no process and no lock, clean correctly no-ops on it, and src/infra/vcs.ts:1056-1061 records why closing the last syscall would trade it for a predictable temp path. Recommendation and evidence in the 6.1 PR body'}
   - {id: e3-H, epic: 3, action: 'spec template: PR title becomes squash subject, must be conventional', owner: owner, status: 'applied to all eight Epic 6 specs'}
   - {id: e3-I, epic: 3, action: 'correct supervisor-brief 10 delta: docs/findings exists', owner: owner-harness, status: open}
-  - {id: e2-B3, epic: 2, action: 'addendum B stale line (carried from Epic 2)', owner: owner, status: 'scheduled as a rider on story 6.2'}
-  - {id: e2-5a-i, epic: 2, action: 'fenceMask closes on tagged inner fence (named follow-up, no ingest story yet)', owner: unassigned, status: 'scheduled as a rider on story 6.2 - its fixtures ingest real BMAD markdown'}
+  - {id: e2-B3, epic: 2, action: 'addendum B stale line (carried from Epic 2)', owner: owner, status: 'done in story 6.2 - the line now records --json-schema and states, with merged-source citations, that SpecWitness deliberately does not use it. Flagged as a deliberate edit to a finalized planning artifact, named by 6.2 Exact scope; no decision, FR or NFR changed'}
+  - {id: e2-5a-i, epic: 2, action: 'fenceMask closes on tagged inner fence (named follow-up, no ingest story yet)', owner: unassigned, status: 'done in story 6.2 - a closing fence may carry no info string (CommonMark 4.5); fix plus a regression test SEEN RED in tests/unit/ingest/fence-mask-tagged-inner-fence.test.ts. NOTE the scheduling premise was wrong: corpus fixtures ship precompiled plans, so verify never ingests BMAD markdown and no fixture can reach src/ingest; pinned at the unit boundary instead'}
   - {id: e5-A, epic: 5, action: 'follow-up story: one shared prompt-assembly helper (redact, bound, preserve the instruction tail)', owner: unassigned, status: 'scheduled as story 6.8, Epic 6 wave 2'}
   - {id: e5-B, epic: 5, action: 'give Epic 4 lesson 5 teeth - an agent quoting it still characterised a peer''s merged code from memory', owner: owner, status: 'answered in the Epic 6 spec template: every claim about a peer must cite path:line read this session'}
   - {id: e5-C, epic: 5, action: 'add a dependency-cruiser rule for src/authoring/** - four modules, no enforcement', owner: owner, status: 'done in story 6.1 - authoring-layer rule added and SEEN RED against a planted authoring -> infra import; three cases in tests/unit/dependency-rules.test.ts pin both directions'}

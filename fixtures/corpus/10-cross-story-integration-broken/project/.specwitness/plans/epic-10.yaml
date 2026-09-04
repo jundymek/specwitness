@@ -1,0 +1,113 @@
+# Hand-written Verification Plan for the corpus fixture
+# `10-cross-story-integration-broken`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18). The `contract.fingerprint` must match the frozen contract beside it.
+#
+# THE PLAN IS CORRECT AND SO IS EVERY MODULE. What is wrong is the SEAM — see
+# `app/server.cjs`, where checkout's `"approved"` is handed to a state machine
+# that listens for `"approve"`.
+#
+# E10-01 AND E10-02 MUST BOTH PASS, and that is the fixture rather than
+# decoration. E10-01 runs both story modules' own suites: if either were red,
+# this would be a fixture for a defect class story-level gates already catch,
+# and it would prove nothing. E10-02 probes the checkout response, which is
+# truthful about checkout: if it went red, the fixture would be testing a broken
+# endpoint. Only E10-03 — an observation of what was PERSISTED — can see the
+# seam.
+plan:
+  epic: epic-10
+  contract:
+    version: 1
+    fingerprint: 72421ae98ff23ae555fdcfc531579bb4e445eb849ca416604097d30ae32714c1
+  data:
+    seed: corpusseed100001
+    bindings: []
+  criteria:
+    # BOTH MODULES PASS THEIR OWN TESTS — measured, not claimed.
+    - criterionId: E10-01
+      disposition: automated
+      probes:
+        - id: module-suites
+          surface: shell
+          mechanics:
+            commandId: module-tests
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: both module suites exit zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: story A's checkout suite passes in full
+              target: { source: stdout }
+              comparison: contains
+              expected: "checkout: 3 passed, 0 failed"
+            - description: story B's fulfilment suite passes in full
+              target: { source: stdout }
+              comparison: contains
+              expected: "fulfilment: 3 passed, 0 failed"
+
+    # WHAT THE RESPONSE SAYS. Truthful about checkout, and therefore green.
+    - criterionId: E10-02
+      disposition: automated
+      probes:
+        - id: checkout-response
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /checkout
+          assertions:
+            - description: checking out answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+            - description: the response reports the approved decision
+              target: { source: jsonPath, path: $.decision }
+              comparison: equals
+              expected: approved
+
+    # WHAT THE SYSTEM DID. The only criterion that can see the seam.
+    #
+    # `lastOrderState` is asserted FIRST because its diagnosis is what the
+    # report renders: `expected: fulfilled` against `actual: pending` tells a
+    # reader in six months what the assembled system actually did.
+    - criterionId: E10-03
+      disposition: automated
+      probes:
+        - id: checkout-action
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /checkout
+          assertions:
+            - description: the checkout request answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+        - id: persisted-order-state
+          surface: observation
+          mechanics:
+            commandId: orders
+            args: []
+            around: checkout-action
+          assertions:
+            - description: the order the checkout created is fulfilled
+              target: { source: jsonPath, path: $.lastOrderState, phase: after }
+              comparison: equals
+              expected: fulfilled
+            - description: the checkout fulfils exactly one order
+              target: { source: jsonPath, path: $.fulfilledOrders, phase: delta }
+              comparison: equals
+              expected: "1"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
