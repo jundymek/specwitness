@@ -111,6 +111,21 @@ function isBrowserProbe(probe: ProbeSpec): probe is BrowserProbe {
 export function adaptCriteria(
   criteria: readonly PlanCriterion[],
   patches: readonly MechanicsPatch[],
+  /**
+   * Which criterion each patched probe id belongs to, when the caller already knows.
+   *
+   * ⚠️ **PROBE IDS ARE UNIQUE ONLY WITHIN A CRITERION** — 4.2's schema checks exactly that,
+   * and nothing more — so a perfectly valid plan may use `check-title` under three different
+   * criteria. Without this map the applier can only see that an id is ambiguous, and had to
+   * refuse; that made `--adapt` unusable on an entire class of legal plans. Raised as a P2 by
+   * the codex review of this branch.
+   *
+   * The probes stage passes the (criterion, probe) pairs it actually OFFERED, which resolves
+   * the ambiguity without adding anything to the payload: **a proposal still names a probe id
+   * and nothing else**, and there is still no key in the schema that could move a probe to
+   * another criterion. The scope is the CALLER's knowledge, never the provider's.
+   */
+  scope?: ReadonlyMap<string, string>,
 ): CriteriaAdaptation {
   // INDEXED FIRST, AND EVERY PATCH CHECKED, BEFORE ANYTHING IS BUILT. A patch that refuses
   // must refuse the WHOLE payload (AC2), so the validation pass completes before the
@@ -133,14 +148,20 @@ export function adaptCriteria(
     }
   }
 
+  /** Which criterion a patch is about: the caller's scope first, then the plan-wide index. */
+  const criterionFor = (probeId: string): string | undefined =>
+    scope?.get(probeId) ?? (located.get(probeId) === '' ? undefined : located.get(probeId));
+
   for (const patch of patches) {
-    const criterionId = located.get(patch.probeId);
-    if (criterionId === undefined) {
+    if (!located.has(patch.probeId)) {
       throw new AdaptationRefused(
         `proposal names probe '${patch.probeId}', which this plan does not carry`,
       );
     }
-    if (criterionId === '') {
+    if (criterionFor(patch.probeId) === undefined) {
+      // Ambiguous AND the caller did not say which one it meant. Refused rather than
+      // resolved by order: an adaptation must be unambiguous about what it changed, and
+      // guessing would make the audit record describe a probe nobody chose.
       throw new AdaptationRefused(
         `proposal names probe '${patch.probeId}', which more than one criterion declares — ` +
           'an adaptation must be unambiguous about what it changed',
@@ -153,7 +174,10 @@ export function adaptCriteria(
 
   const adaptProbe = (criterionId: string, probe: ProbeSpec): ProbeSpec => {
     const patch = byProbeId.get(probe.id);
-    if (patch === undefined) {
+    // A patch applies to the probe in ITS OWN criterion, never to a namesake elsewhere.
+    // Without this, an id reused across criteria would be patched in every one of them —
+    // silently changing probes nobody proposed anything for.
+    if (patch === undefined || criterionFor(probe.id) !== criterionId) {
       return probe;
     }
     if (!isBrowserProbe(probe)) {
@@ -231,7 +255,8 @@ export function adaptCriteria(
 export function applyAdaptation(
   plan: Plan,
   patches: readonly MechanicsPatch[],
+  scope?: ReadonlyMap<string, string>,
 ): AdaptationApplication {
-  const { criteria, changes } = adaptCriteria(plan.plan.criteria, patches);
+  const { criteria, changes } = adaptCriteria(plan.plan.criteria, patches, scope);
   return { plan: { ...plan, plan: { ...plan.plan, criteria } }, changes };
 }

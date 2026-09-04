@@ -826,6 +826,104 @@ describe('⚠️ nothing unredacted reaches the provider', () => {
   });
 });
 
+describe('probe ids reused across criteria', () => {
+  /** Two criteria, both declaring `shared-id`. Legal: ids are unique per criterion only. */
+  function reusedId(bothFail: boolean): { deps: ProbesStageDeps; offered: string[][] } {
+    const { adapt, offered } = proposeWorking();
+    return {
+      offered,
+      deps: {
+        criteria: [
+          { criterionId: 'E7-01', disposition: 'automated', probes: [browserProbe('shared-id')] },
+          {
+            criterionId: 'E7-02',
+            disposition: 'automated',
+            // When only ONE is meant to be a candidate, the other already works.
+            probes: [browserProbe('shared-id', bothFail ? BROKEN : WORKING)],
+          },
+        ],
+        data: NO_DATA,
+        dispatch: ({ probe, attempt }): ProbeDispatch => {
+          const scenario = (probe as BrowserProbe).mechanics.scenario;
+          return {
+            executor: {
+              surface: probe.surface,
+              execute: async (): Promise<ProbeAttempt> => {
+                if (scenario !== WORKING) {
+                  return {
+                    attempt,
+                    observations: [],
+                    assertionEvaluations: [],
+                    evidence: [],
+                    execError: {
+                      message: 'the step could not find its target',
+                      reason: 'step-target-missing',
+                    },
+                    durationMs: 1,
+                  };
+                }
+                return {
+                  attempt,
+                  observations: [],
+                  assertionEvaluations: [
+                    {
+                      description: 'the organization page appears',
+                      satisfied: true,
+                      expected: 'Organizations',
+                      actual: 'Organizations',
+                    },
+                  ],
+                  evidence: [],
+                  durationMs: 1,
+                };
+              },
+            },
+            params: { probe },
+          };
+        },
+        adapt,
+      },
+    };
+  }
+
+  it('adapts the one eligible namesake, and leaves the other criterion alone', async () => {
+    const { deps, offered } = reusedId(false);
+    const context = await (async () => {
+      const ctx = stageContext();
+      ctx.run.contractCriteria.push(CRITERION, { ...CRITERION, criterionId: 'E7-02' });
+      await createProbesStage(deps).run(ctx);
+      return ctx;
+    })();
+
+    expect(offered).toEqual([['shared-id']]);
+    expect(context.run.adaptation?.adapted).toBe(true);
+    // Applied to E7-01, the criterion that actually failed.
+    expect(context.run.adaptation?.applied[0]?.criterionId).toBe('E7-01');
+    expect(context.run.criteria[0]?.status).toBe('pass');
+    expect(context.run.criteria[1]?.status).toBe('pass');
+  });
+
+  it('offers NEITHER when both namesakes are eligible — a proposal could not say which', async () => {
+    // A proposal names an id and nothing else, so no scope can disambiguate this case.
+    // Dropped rather than guessed at: adapting the wrong probe because two share a name is
+    // worse than adapting neither, and the alternative would put a criterion id in the
+    // payload whose absence is part of this story's claim.
+    const { deps, offered } = reusedId(true);
+    const context = await (async () => {
+      const ctx = stageContext();
+      ctx.run.contractCriteria.push(CRITERION, { ...CRITERION, criterionId: 'E7-02' });
+      await createProbesStage(deps).run(ctx);
+      return ctx;
+    })();
+
+    expect(offered).toEqual([]);
+    expect(context.run.adaptation).toBeUndefined();
+    expect(context.run.providerUsage).toEqual([]);
+    expect(context.run.criteria[0]?.status).toBe('error');
+    expect(context.run.criteria[1]?.status).toBe('error');
+  });
+});
+
 describe('the codex findings', () => {
   it('offsets the adapted attempt past the first pass, so evidence cannot be overwritten', async () => {
     // P1. `src/surfaces/browser.ts` derives evidence filenames from criterion id, probe id

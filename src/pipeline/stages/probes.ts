@@ -511,7 +511,23 @@ function adaptationCandidates(
     }
   }
 
-  return candidates;
+  // ⚠️ AN ID THAT IS AMBIGUOUS AMONG THE CANDIDATES THEMSELVES IS NOT OFFERED.
+  //
+  // Probe ids are unique only WITHIN a criterion, so two criteria may both declare
+  // `check-title`. The applier is told which criterion each offered id belongs to (its
+  // `scope`), which resolves the ordinary case — but if BOTH namesakes are candidates in the
+  // same run, no scope can say which one a proposal meant, because a proposal names an id and
+  // nothing else.
+  //
+  // Dropped rather than guessed at. Adaptation is opt-in and bounded; adapting the wrong
+  // probe because two share a name is worse than adapting neither, and the alternative —
+  // adding a criterion id to the payload — would put a key in the schema whose absence is
+  // part of this story's claim.
+  const perId = new Map<string, number>();
+  for (const candidate of candidates) {
+    perId.set(candidate.probeId, (perId.get(candidate.probeId) ?? 0) + 1);
+  }
+  return candidates.filter((candidate) => perId.get(candidate.probeId) === 1);
 }
 
 /**
@@ -652,11 +668,17 @@ async function adaptAndReExecute(
   const byCriterionId = new Map<string, ExecutedCriterion>(
     executed.map((record) => [record.criterion.criterionId, record]),
   );
+  // WHICH CRITERION EACH OFFERED PROBE BELONGS TO. Built from the candidates rather than
+  // from the payload, so it is the CALLER's knowledge and never the provider's — a proposal
+  // still names a probe id and nothing else.
+  const scope = new Map(candidates.map((candidate) => [candidate.probeId, candidate.criterionId]));
+
   let adapted;
   try {
     adapted = adaptCriteria(
       executed.map((record) => record.entry),
       decision.patches,
+      scope,
     );
   } catch (error) {
     if (error instanceof AdaptationRefused) {

@@ -187,7 +187,42 @@ describe('refusals — nothing partially applies', () => {
     expect(serializePlan(basePlan)).toBe(before);
   });
 
-  it('refuses an ambiguous probe id declared by two criteria', () => {
+  it('patches ONLY the scoped criterion when an id is reused across criteria', () => {
+    // ⚠️ THE ROUND-9 CODEX P2. Probe ids are unique only WITHIN a criterion — 4.2's schema
+    // checks exactly that and nothing more — so a valid plan may declare `shared-id` under
+    // several criteria. Refusing every such payload made `--adapt` unusable on a whole class
+    // of legal plans.
+    //
+    // The caller says which one it meant (its `scope`), which resolves the ambiguity WITHOUT
+    // adding anything to the payload: a proposal still names a probe id and nothing else.
+    const plan = planWith([
+      { criterionId: 'E7-01', disposition: 'automated', probes: [browserProbe('shared-id')] },
+      { criterionId: 'E7-02', disposition: 'automated', probes: [browserProbe('shared-id')] },
+    ]);
+
+    const { plan: adapted, changes } = applyAdaptation(
+      plan,
+      [{ probeId: 'shared-id', scenario: 'click "#x"' }],
+      new Map([['shared-id', 'E7-02']]),
+    );
+
+    expect(changes).toEqual([
+      {
+        criterionId: 'E7-02',
+        probeId: 'shared-id',
+        field: 'scenario',
+        from: 'click "#create-company"',
+        to: 'click "#x"',
+      },
+    ]);
+    // ⚠️ The NAMESAKE under the other criterion is untouched, by reference. Patching every
+    // probe that happens to share a name would silently change probes nobody proposed
+    // anything for.
+    expect(probesOf(adapted, 0)?.[0]).toBe(probesOf(plan, 0)?.[0]);
+    expect(probesOf(adapted, 1)?.[0]?.mechanics.scenario).toBe('click "#x"');
+  });
+
+  it('refuses an ambiguous probe id when the caller gave no scope', () => {
     const plan = planWith([
       { criterionId: 'E7-01', disposition: 'automated', probes: [browserProbe('shared-id')] },
       { criterionId: 'E7-02', disposition: 'automated', probes: [browserProbe('shared-id')] },

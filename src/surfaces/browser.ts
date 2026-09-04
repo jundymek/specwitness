@@ -824,10 +824,12 @@ test('specwitness browser probe', async ({ page, context }) => {
   } catch (error) {
     outcome.ok = false;
     outcome.message = describe(error);
-    // The reason, when there is one, was set where it was ESTABLISHED - in the step loop
-    // above, before the action ran. Nothing is classified here: by the time an error
-    // reaches this catch, the page may have moved and any question asked of it would be
-    // about a different page from the one that failed.
+    // The reason, when there is one, was set where it was ESTABLISHED: inside the failing
+    // action's own catch in the step loop above. Nothing is classified HERE, and that is
+    // deliberate - by the time an error reaches this outer catch, later steps may have run
+    // and the page may have moved, so any question asked of it would be about a different
+    // page from the one that failed. It is also unset on every success path, because the
+    // only code that assigns it rethrows immediately.
   } finally {
     try {
       outcome.finalUrl = page.url();
