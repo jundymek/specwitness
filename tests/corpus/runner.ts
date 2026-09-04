@@ -180,6 +180,12 @@ export async function hashCorpusTree(root: string = CORPUS_ROOT): Promise<Map<st
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
       const full = join(directory, entry.name);
+      // The same refusal as `listFiles`, needed separately because this walk is its own: a
+      // symlink would hash as its TARGET's content, so the immutability guard could report
+      // a fixture unchanged while what actually runs had changed underneath it.
+      if (entry.isSymbolicLink()) {
+        refuseSymlink(full);
+      }
       if (entry.isDirectory()) {
         await walk(full);
         continue;
@@ -313,12 +319,42 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return result.stdout;
 }
 
-/** Every file under `directory`, as absolute paths. */
+/**
+ * Refuses a symbolic link inside a corpus fixture, naming it.
+ *
+ * A SYMLINK IS A HOLE THROUGH EVERY GUARD IN THIS FILE. `cp(..., { recursive: true })`
+ * preserves it into the executable project, while a `Dirent.isFile()` walk skips it — so a
+ * link would be RUN and never READ: no port substitution, no loopback scan, no
+ * fetching-tool scan, no credential-store scan, and no content in the tree hash. A fixture
+ * could point one at a credential file, or at a script full of fetching commands, and every
+ * assertion in this suite would stay green.
+ *
+ * Refused rather than resolved, and that is the cheaper answer as well as the safer one: a
+ * corpus fixture is a few dozen hand-written files that must mean the same thing on every
+ * machine, and a symlink's target is by definition a fact about the machine. Nothing a
+ * fixture legitimately needs requires one.
+ *
+ * Fail-closed at the walk, so EVERY caller inherits it — the scans, the tree hash and the
+ * materialiser — rather than each having to remember.
+ */
+function refuseSymlink(full: string): never {
+  throw new Error(
+    `corpus: ${full} is a symbolic link. A fixture may not contain one: it would be copied ` +
+      'into the executable project and skipped by every hermeticity scan, the port ' +
+      'substitution and the tree hash - running content that nothing ever reads. Replace it ' +
+      'with a real file.',
+  );
+}
+
+/** Every file under `directory`, as absolute paths. Throws on a symbolic link. */
 async function listFiles(directory: string): Promise<string[]> {
   const out: string[] = [];
   const walk = async (current: string): Promise<void> => {
     for (const entry of await readdir(current, { withFileTypes: true })) {
       const full = join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        refuseSymlink(full);
+      }
       if (entry.isDirectory()) {
         await walk(full);
       } else if (entry.isFile()) {
@@ -813,8 +849,21 @@ export function compareOutcome(
   // Only when `--json` was actually requested: a fixture that does not ask for the document
   // on stdout is not asserting anything about it. And only when the run persisted one: an
   // edge refusal writes neither, and empty stdout beside no file is consistent.
-  if (expected.command.includes('--json') && observed.storedResult !== null) {
-    if (observed.stdout !== observed.storedResult) {
+  if (expected.command.includes('--json')) {
+    if (observed.storedResult === null) {
+      // A run that PRINTED a document and persisted none. `storedResult === null` is
+      // legitimate only for an edge refusal, which prints nothing either — so the two states
+      // are told apart by whether stdout parsed. Without this arm, a regression that stopped
+      // writing `result.json` would sail through the corpus: the fixture's outcome still
+      // comes off stdout, and the byte comparison below would simply be skipped.
+      if (observed.documentSource === 'stdout') {
+        problems.push(
+          'the run printed a --json document but persisted NO result.json. FR-30/FR-31 make ' +
+            'the run directory the evidence that outlives the terminal; a verdict that ' +
+            'exists only in a pipe is a verdict nobody can go back and check.',
+        );
+      }
+    } else if (observed.stdout !== observed.storedResult) {
       problems.push(
         '--json output and the stored result.json are NOT the same bytes (AD-11, Q53). ' +
           `stdout is ${observed.stdout.length} bytes, ` +

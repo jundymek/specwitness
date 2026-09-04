@@ -14,7 +14,7 @@
  * asserts a THROW rather than an empty list.
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -141,6 +141,29 @@ describe('the fixture-immutability guard', () => {
     await writeFile(join(root, 'alpha', 'expected.json'), '"fail"\n', 'utf8');
 
     expect(describeTreeDrift(before, await hashCorpusTree(root))).toContain('modified:');
+  });
+});
+
+describe('a symbolic link inside a fixture is refused', () => {
+  // A symlink is copied into the executable project by `cp` and skipped by an `isFile()`
+  // walk, so it would be RUN and never READ: no port substitution, no loopback scan, no
+  // fetching-tool scan, no credential scan, and no content in the tree hash. It is the one
+  // shape that defeats every guard in the runner at once.
+  it('by the tree hash, so the immutability guard cannot be fooled by a link', async () => {
+    const root = await makeCorpus(['alpha']);
+    await symlink('/etc/hosts', join(root, 'alpha', 'project', 'link.txt'));
+
+    await expect(hashCorpusTree(root)).rejects.toThrow(/symbolic link/);
+  });
+
+  it('by every scanner, so nothing executable escapes them', async () => {
+    const root = await makeCorpus(['alpha']);
+    await symlink('/etc/hosts', join(root, 'alpha', 'project', 'link.txt'));
+    const projectDirectory = join(root, 'alpha', 'project');
+
+    await expect(nonLoopbackHosts(projectDirectory)).rejects.toThrow(/symbolic link/);
+    await expect(networkCapableCommands(projectDirectory)).rejects.toThrow(/symbolic link/);
+    await expect(machineStateReferences(projectDirectory)).rejects.toThrow(/symbolic link/);
   });
 });
 

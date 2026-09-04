@@ -47,7 +47,11 @@ function observation(overrides: Partial<ObservedOutcome> = {}): ObservedOutcome 
     stdout: '',
     stderr: '',
     document,
-    documentSource: 'stdout',
+    // `run-directory` by default, so cases that are NOT about AD-11 do not trip its rule.
+    // A real run that prints a `--json` document always persists one too; a synthetic
+    // observation claiming `stdout` with nothing stored is the regression shape, and the
+    // two tests that mean it say so explicitly.
+    documentSource: 'run-directory',
     runDirectory: '/tmp/ws/project/.specwitness/runs/run-20260904T134152Z-2of4',
     storedResult: null,
     ...overrides,
@@ -269,6 +273,45 @@ describe('AD-11: --json stdout and the stored result.json are the same bytes', (
     );
 
     expect(problems.join('\n')).toContain('NOT the same bytes');
+  });
+
+  it('FAILS when the run printed a document and persisted nothing', () => {
+    // The other half of the invariant, and the one a naive "compare when both exist" check
+    // skips: a regression that stopped writing `result.json` would sail through, because the
+    // outcome still comes off stdout. FR-30/FR-31 make the run directory the evidence that
+    // outlives the terminal.
+    const problems = compareOutcome(
+      expectation({ criteria: { assertion: 'subset', statuses: {} } }),
+      observation({ stdout: stored, storedResult: null, documentSource: 'stdout' }),
+      normalizer,
+    );
+
+    expect(problems.join('\n')).toContain('persisted NO result.json');
+  });
+
+  it('says nothing when the run persisted nothing AND printed nothing', () => {
+    // An edge refusal: empty stdout beside no file is consistent, and is how an infra
+    // refusal legitimately looks.
+    const problems = compareOutcome(
+      expectation({
+        exitCode: 3,
+        outcome: { infraError: 'integrity' },
+        criteria: { assertion: 'subset', statuses: {} },
+        stderrContains: ['the contract for epic-1 was edited after it was frozen'],
+      }),
+      observation({
+        exitCode: 3,
+        stdout: '',
+        stderr: 'ERROR: the contract for epic-1 was edited after it was frozen\n',
+        document: null,
+        documentSource: 'none',
+        runDirectory: null,
+        storedResult: null,
+      }),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
   });
 
   it('says nothing when the fixture did not ask for --json', () => {
