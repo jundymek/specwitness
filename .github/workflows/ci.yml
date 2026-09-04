@@ -307,17 +307,27 @@ jobs:
         #
         # A separate step, not a `globalSetup`, so its wall-clock is a number the promotion
         # decision can use.
+        #
+        # The duration is written whether or not provisioning SUCCEEDS. A cold download that
+        # times out is precisely the case where its wall-clock is the number somebody needs,
+        # and `set -e` would otherwise skip the export and leave the always-run summary saying
+        # `n/a` on exactly the failing runs. Status captured, duration written, status returned.
         run: |
           start=$(date +%s)
-          pnpm provision:browser
+          pnpm provision:browser || status=$?
           echo "PROVISION_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+          exit ${status:-0}
 
       - name: Run the browser-dependent suites
         id: suites
+        # Same as the step above: a failing suite still reports how long it ran, because the
+        # summary is `always()` and a run that lost its timing is a run whose cost nobody can
+        # weigh against the promotion criterion.
         run: |
           start=$(date +%s)
-          pnpm test:browser
+          pnpm test:browser || status=$?
           echo "SUITES_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+          exit ${status:-0}
 
       - name: Prove they RAN rather than skipped
         # ⚠️ THE ACCEPTANCE EVIDENCE, and it is deliberately story 6.1's script UNCHANGED.

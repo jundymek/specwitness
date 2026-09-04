@@ -164,6 +164,8 @@ wait "${runner_pid}" 2>/dev/null
 # exits on its own says the detached tree is self-limiting after all; one that is still there
 # says it is not, and names what has to be reaped.
 echo "==> [3b/5] the fate of each spared orphan"
+# Declared here so step 4 can subtract it from the shared deadline even when nothing was spared.
+waited=0
 if [ -z "${spared}" ]; then
   echo "    none were spared - nothing was detached into its own group at kill time"
 else
@@ -213,9 +215,19 @@ echo "==> [4/5] what survived, and reaping it"
 # Reaping runs after the report and does NOT change the exit code: a leak that had to be reaped
 # is still a leak, and still fails this check.
 survivors="${work}/survivors.txt"
+
+# ⚠️ THE REMAINING BUDGET, NOT A SECOND FULL ONE. Raised as a P2 by the Codex review of this
+# branch: step 3b has already polled the orphans for up to WAIT_SECONDS, and passing
+# WAIT_SECONDS again here made the worst case 360s with the configured 180 — and, worse, let the
+# check report success for a process that had survived well past the threshold it is supposed to
+# enforce. One deadline for the whole check, shared across both waits.
+remaining=$(( WAIT_SECONDS - waited ))
+[ ${remaining} -lt 0 ] && remaining=0
+echo "    ${waited}s of the ${WAIT_SECONDS}s budget already spent; ${remaining}s left for this scan"
+
 node "${leak_check_args[@]}" \
   --baseline "${baseline}" \
-  --wait-seconds "${WAIT_SECONDS}" \
+  --wait-seconds "${remaining}" \
   --write-survivors "${survivors}" \
   --reap \
   --label "after a run killed with SIGKILL (no afterEach ran)"
