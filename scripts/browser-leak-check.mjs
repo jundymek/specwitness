@@ -41,6 +41,7 @@
  * Usage:
  *   node scripts/browser-leak-check.mjs [--browsers-path <dir>]... [--ps-file <path>]
  *                                       [--baseline <path> | --write-baseline <path>]
+ *                                       [--write-survivors <path>]
  *                                       [--wait-seconds <n>] [--label <text>]
  *
  * Exit codes follow the house taxonomy where they apply: 0 clean, 1 survivors or a scan that
@@ -85,7 +86,7 @@ function usage(message) {
     `${message}\n` +
       'usage: node scripts/browser-leak-check.mjs [--browsers-path <dir>]... ' +
       '[--ps-file <path>] [--baseline <path> | --write-baseline <path>] ' +
-      '[--wait-seconds <n>] [--label <text>]\n',
+      '[--write-survivors <path>] [--wait-seconds <n>] [--label <text>]\n',
   );
   process.exit(64);
 }
@@ -96,6 +97,7 @@ const browsersPaths = [];
 let psFile;
 let baselineFile;
 let writeBaselineFile;
+let writeSurvivorsFile;
 let waitSeconds = 0;
 let label = 'after the run';
 
@@ -123,6 +125,11 @@ for (let index = 0; index < argv.length; index += 1) {
     case '--write-baseline':
       if (value === undefined) usage(`ERROR: ${flag} needs a value`);
       writeBaselineFile = value;
+      index += 1;
+      break;
+    case '--write-survivors':
+      if (value === undefined) usage(`ERROR: ${flag} needs a value`);
+      writeSurvivorsFile = value;
       index += 1;
       break;
     case '--wait-seconds':
@@ -293,6 +300,27 @@ if (writeBaselineFile !== undefined) {
 }
 
 const waitedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+
+/**
+ * ⚠️ SO THE CALLER CAN REAP WHAT THIS FOUND — raised as a P1 by the Codex review of this
+ * branch, and right: `browser-cancelled-run-check.sh` deliberately CREATES an orphan, so a
+ * survivor merely printed is a browser tree this job put on a shared runner and walked away
+ * from. Detecting a leak and leaving it running is not a check; it is a leak.
+ *
+ * The PGID is written beside the pid because a browser is a TREE, and
+ * `src/infra/process-runner.ts` reaps one with `kill(-pgid, ...)` for exactly that reason —
+ * reaping the pid alone would leave the renderers and the crashpad handler behind.
+ *
+ * Written whether or not anything survived: an EMPTY file and a MISSING file mean different
+ * things to the reaper — "nothing survived" versus "the scan never got this far".
+ */
+if (writeSurvivorsFile !== undefined) {
+  writeFileSync(
+    writeSurvivorsFile,
+    survivors.map((row) => `${row.pid} ${row.pgid}`).join('\n') + (survivors.length > 0 ? '\n' : ''),
+    'utf8',
+  );
+}
 
 /* ── the report ──────────────────────────────────────────────────────────────────────── */
 

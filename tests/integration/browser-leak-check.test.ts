@@ -309,6 +309,57 @@ describe('the browser leak check', () => {
     expect(stderr).toContain('ERROR:');
   });
 
+  /**
+   * ⚠️ **DETECTING A LEAK AND LEAVING IT RUNNING IS NOT A CHECK, IT IS A LEAK.** Raised as a P1
+   * by the Codex review of this branch, and correct: `browser-cancelled-run-check.sh`
+   * deliberately CREATES an orphan, so a survivor it merely printed would be a browser tree this
+   * job put on a shared runner and walked away from — the exact condition AC4 exists to
+   * prevent, caused by the thing checking for it.
+   *
+   * The script records survivors so the caller can reap them AFTER the evidence is captured.
+   * The pgid is what gets written, not just the pid, because a browser is a TREE and
+   * `src/infra/process-runner.ts` reaps it with `kill(-pgid, ...)` for exactly that reason.
+   */
+  it('records surviving processes with their process group, so the caller can reap them', async () => {
+    const dir = await scratch();
+    const survivorsPath = join(dir, 'survivors.txt');
+    const psFile = await listing(
+      `   4210    4200    4198       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--write-survivors',
+      survivorsPath,
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect((await readFile(survivorsPath, 'utf8')).trim()).toBe('4210 4198');
+  });
+
+  it('writes an empty survivor list when nothing survived, rather than no file at all', async () => {
+    const dir = await scratch();
+    const survivorsPath = join(dir, 'survivors.txt');
+    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
+
+    const { exitCode } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--write-survivors',
+      survivorsPath,
+    ]);
+
+    // A missing file and an empty one mean different things to the reaper: "nothing survived"
+    // versus "the scan never got that far".
+    expect(exitCode).toBe(0);
+    expect((await readFile(survivorsPath, 'utf8')).trim()).toBe('');
+  });
+
   it('exits 64 on an unknown flag', async () => {
     const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
 

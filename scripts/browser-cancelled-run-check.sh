@@ -20,6 +20,11 @@
 # not evidence about browser leaks, and a check that quietly passes when its premise did not
 # hold is the shape of defect this whole story exists to remove.
 #
+# ⚠️ AND IT CLEANS UP AFTER ITSELF. Because it deliberately creates an orphan, a survivor it
+# merely reported would be a browser tree this job left on a shared runner. Step 5 reaps what
+# step 4 found — after the evidence is captured, and without changing the exit code, so a leak
+# that had to be reaped still fails the step.
+#
 # ⚠️ WHAT IS DELIBERATELY *NOT* KILLED, AND WHY THE FIRST VERSION OF THIS SCRIPT WAS WRONG.
 #
 # `src/infra/process-runner.ts` spawns `detached: true` (line ~523), so Playwright and the
@@ -63,13 +68,13 @@ if [ -n "${BROWSERS_PATH}" ]; then
   leak_check_args+=(--browsers-path "${BROWSERS_PATH}")
 fi
 
-echo "==> [1/4] recording what is already running"
+echo "==> [1/5] recording what is already running"
 node "${leak_check_args[@]}" --write-baseline "${baseline}" --label "before the cancelled run" || {
   echo "ERROR: could not record a baseline; the cancelled-run check cannot interpret anything without one" >&2
   exit 1
 }
 
-echo "==> [2/4] starting ${SUITE} and waiting for a real browser"
+echo "==> [2/5] starting ${SUITE} and waiting for a real browser"
 pnpm exec vitest run "${SUITE}" >"${work}/run.log" 2>&1 &
 runner_pid=$!
 
@@ -118,7 +123,7 @@ if [ "${launched}" != yes ]; then
   exit 1
 fi
 
-echo "==> [3/4] a browser is up; SIGKILLing the runner's process GROUP"
+echo "==> [3/5] a browser is up; SIGKILLing the runner's process GROUP"
 # SIGKILL, not SIGTERM: a cancelled run must execute NO cleanup at all — that is Epic 4 retro
 # §2 observation 8's fact, and the whole premise of this check.
 runner_pgid="$(ps -o pgid= -p "${runner_pid}" | tr -d ' ')"
@@ -146,7 +151,7 @@ wait "${runner_pid}" 2>/dev/null
 # PR body has to carry: "how long does a cancelled browser run leak for?" A spared process that
 # exits on its own says the detached tree is self-limiting after all; one that is still there
 # says it is not, and names what has to be reaped.
-echo "==> [3b/4] the fate of each spared orphan"
+echo "==> [3b/5] the fate of each spared orphan"
 if [ -z "${spared}" ]; then
   echo "    none were spared - nothing was detached into its own group at kill time"
 else
@@ -166,12 +171,61 @@ else
   done
 fi
 
-echo "==> [4/4] what survived?"
+echo "==> [4/5] what survived?"
+survivors="${work}/survivors.txt"
 node "${leak_check_args[@]}" \
   --baseline "${baseline}" \
   --wait-seconds "${WAIT_SECONDS}" \
+  --write-survivors "${survivors}" \
   --label "after a run killed with SIGKILL (no afterEach ran)"
 result=$?
+
+# ⚠️ REAP WHAT WE FOUND — raised as a P1 by the Codex review of this branch, and correct.
+#
+# This script DELIBERATELY CREATES an orphan. Detecting one and walking away would leave a
+# browser tree running on a shared runner — the exact condition AC4 exists to prevent, caused
+# by the check for it. `browser-fixture.ts`: "A leaked browser tree is the worst leak this
+# product can produce, and it lives until reboot."
+#
+# Ordered AFTER the scan on purpose: the evidence is printed and written first, so reaping can
+# never erase the finding. The exit code is captured before this runs and is NOT changed by it —
+# a leak that had to be reaped is still a leak, and still fails the step.
+#
+# SIGTERM to the GROUP, a grace period, then SIGKILL to the GROUP: the same shape as
+# `terminateProcessGroup` in src/infra/process-runner.ts, and to the group rather than the pid
+# because a browser is a tree.
+echo "==> [5/5] reaping anything that survived"
+if [ ! -s "${survivors}" ]; then
+  echo "    nothing to reap"
+else
+  own_pgid="$(ps -o pgid= -p $$ | tr -d ' ')"
+  reaped=""
+  while read -r pid pgid; do
+    [ -z "${pid:-}" ] && continue
+    # Never signal our own group: `kill -<own pgid>` would kill this script mid-reap.
+    if [ "${pgid}" = "${own_pgid}" ]; then
+      echo "    refusing to signal process group ${pgid}: it is this script's own"
+      continue
+    fi
+    case " ${reaped} " in *" ${pgid} "*) continue ;; esac
+    reaped="${reaped} ${pgid}"
+    echo "    kill -TERM -${pgid}"
+    kill -TERM "-${pgid}" 2>/dev/null
+  done < "${survivors}"
+
+  sleep 2
+
+  for pgid in ${reaped}; do
+    if kill -0 "-${pgid}" 2>/dev/null; then
+      echo "    still there; kill -KILL -${pgid}"
+      kill -KILL "-${pgid}" 2>/dev/null
+    fi
+  done
+
+  echo "    re-scanning after the reap"
+  node "${leak_check_args[@]}" --baseline "${baseline}" \
+    --label "after reaping the leak this check created" || true
+fi
 
 rm -rf "${work}"
 exit ${result}

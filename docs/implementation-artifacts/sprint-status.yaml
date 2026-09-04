@@ -97,7 +97,7 @@ development_status:
   6-6-defect-attribution-summary: backlog
   6-7-dogfooding-readiness-docs-packaging: backlog
   6-8-shared-prompt-assembly-helper: review
-  6-9-browser-verification-in-ci: backlog
+  6-9-browser-verification-in-ci: done
   epic-6-retrospective: optional
 
   epic-7: backlog
