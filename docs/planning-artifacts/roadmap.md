@@ -174,33 +174,52 @@ Exit criteria:
 EPIC 6 — Trust: Golden Corpus & Dogfooding Scorecard
 
 Purpose:
-SpecWitness's own proof: hermetic e2e corpus with hand-written expected outcomes pinning every verdict/classification (including non-Node), plus the local scorecard and attribution needed to measure product value.
+SpecWitness's own proof: hermetic e2e corpus with hand-written expected outcomes pinning every verdict/classification (including non-Node), plus the local scorecard and attribution needed to measure product value. This is the first epic that VERIFIES the assembled product rather than adding a stage to it, and the first that runs on Linux.
 
 Stories:
-- 6.1 Corpus infrastructure & hermetic e2e runner
-- 6.2 Behavioral corpus fixtures (PASS/FAIL classes)
-- 6.3 Classification corpus fixtures
+- 6.1 Corpus infrastructure & hermetic e2e runner  (+ riders: e5-C depcruise rule for src/authoring/**, e3-G pre-registration window, loud reporting of skipped suites in CI)
+- 6.2 Behavioral corpus fixtures (PASS/FAIL classes)  (+ riders: e2-5a-i fenceMask, e2-B3 addendum §B)
+- 6.3 Classification corpus fixtures  (+ riders: e3-D gateFailed prose, e3-F SIGINT messaging, ADR-008 reader branch)
 - 6.4 Non-Node target fixture
-- 6.5 Scorecard recording
+- 6.5 Scorecard recording  (bound by ADR-008)
 - 6.6 Defect attribution & summary
-- 6.7 Dogfooding readiness — docs & packaging
+- 6.7 Dogfooding readiness — docs & packaging  (+ rider: e5-E `report --explain` decision)
+- 6.8 Shared prompt-assembly helper  (retires e5-A)
+- 6.9 Browser verification in CI  (non-blocking; added 2026-09-04)
 
 Dependencies:
-Epics 1–5 (corpus exercises the full pipeline).
+Epics 1–5 (corpus exercises the full pipeline). ADR-008 (persisted-envelope strictness) is decided BEFORE wave 1 and binds 6.5.
+
+Execution shape (owner decision 2026-09-04, following Epic 5's proven rhythm):
+THREE WAVES against one long-lived epic branch `epic/6-golden-corpus-and-scorecard`, with `--supervisor-stage 4` (a supervisor that may merge story PRs into the epic). Epic 5 answered e4-A affirmatively: merge latency fell from ~7h43m of dead critical path to under a minute across six merges, at a reporting cost the supervisor must carry deliberately.
+
+  wave 1: 6.1 alone                      — the runner contract every fixture plugs into, + CI wiring
+  wave 2: 6.2, 6.3, 6.4, 6.5, 6.8, 6.9   — six agents, disjoint ownership
+  wave 3: 6.6, 6.7                       — closes the epic (retro + integration PR)
 
 Can run in parallel:
-Wave B: 6.2 + 6.3 + 6.4 (fixture directories — fully disjoint) + 6.5 (scorecard module).
+Wave 2's six stories own disjoint trees: three fixture directories under fixtures/corpus/ (6.2, 6.3, 6.4), the scorecard module under src/pipeline + src/schemas + src/cli/commands (6.5), src/authoring/** (6.8), and one additive CI job (6.9). The single shared file is .github/workflows/ci.yml — 6.1 wires it in wave 1, 6.9 adds a job to it, and 6.4 may add a runtime line; all three changes are additive and announced at intent-sync.
 
 Must run sequentially:
-6.1 first (runner contract fixtures plug into) → wave B → 6.6 (needs 6.5) + 6.7 (docs reflect final behavior).
+6.1 first — it defines `expected.json`, the hermetic runner and the CI job that every wave-2 fixture plugs into. Then wave 2. Then 6.6 (needs 6.5's record shape) + 6.7 (docs must reflect final behaviour, and 6.7 is the last word on the packaged tarball).
 
 Shared contracts that must already be stable:
-result.json schema (frozen by snapshot tests), exit codes, corpus `expected.json` format (6.1's merge), scorecard.jsonl record shape.
+result.json schema (frozen by snapshot tests), exit codes, corpus `expected.json` format (6.1's merge), scorecard.jsonl record shape (6.5's merge, under ADR-008).
+
+CI — CHANGED THIS EPIC:
+CI executes for the first time in the project's life (commit `fa2647b`, 2026-09-04: Node floor raised to 22.13, triggers restored; the repository became public so Actions minutes no longer apply). This ANSWERS action item e3-E after five epics. Consequences for Epic 6:
+- Corpus e2e becomes a REQUIRED check (6.1's AC), on ubuntu-latest and macos-latest.
+- Linux runs the process-group, worktree and pipeline code for the first time. Expect findings; they are the point.
+- Fixtures stay hermetic: localhost only, FakeAgentProvider or checked-in artifacts, ZERO real `claude`/`codex` invocations and no network. Real-provider verification remains Epic 7's dogfooding job.
+- CI's green does NOT currently mean everything ran: five merged browser suites self-skip on every runner (`describeWithBrowser`, because `@playwright/test` is an optional peer and nothing downloads chromium). 6.1 makes that visible; 6.9 fixes it with a NON-BLOCKING chromium job on Linux, carrying a written promotion criterion the owner flips later. This also gives story 5.1's provisioning path its first real execution.
+- Every spec's "no CI has ever run" paragraph is deleted and inverted. An agent reporting CI as pending-owner in this epic is reporting a stale fact.
 
 Exit criteria:
-- All corpus fixtures produce their hand-written expected outcomes in CI (SM-5: zero misclassifications); infra-error fixture never reports FAIL.
-- `scorecard summary` computes the north-star metric from local records only.
-- README + harness integration guide complete; `npm publish --dry-run` tarball verified.
+- All corpus fixtures produce their hand-written expected outcomes in CI on both platforms (SM-5: zero misclassifications); the infra-error fixture never reports FAIL and the gate-failure fixture never reports InfraError.
+- `scorecard summary` computes the north-star metric from local records only, and reports its skipped-record count (ADR-008 §5).
+- README + harness integration guide complete; `npm publish --dry-run` tarball verified and `npx specwitness --help` works from it.
+- The five browser suites execute in CI on Linux rather than skipping, in a non-blocking job with a proposed promotion criterion.
+- Every Epic 5 action item is either retired, scheduled, or explicitly carried with a reason recorded in the retrospective.
 
 EPIC 7 — Real Dogfooding & Value Measurement
 

@@ -79,7 +79,7 @@ development_status:
   4-7-ai-free-behavioral-verify-end-to-end: done
   epic-4-retrospective: done
 
-  epic-5: in-progress
+  epic-5: done
   5-1-playwright-integration-environment-resolution: done
   5-2-browser-probe-executor-with-trace-evidence: done
   5-3-human-judgment-criteria-flow: done
@@ -96,6 +96,8 @@ development_status:
   6-5-scorecard-recording: backlog
   6-6-defect-attribution-summary: backlog
   6-7-dogfooding-readiness-docs-packaging: backlog
+  6-8-shared-prompt-assembly-helper: backlog
+  6-9-browser-verification-in-ci: backlog
   epic-6-retrospective: optional
 
   epic-7: backlog
@@ -110,19 +112,19 @@ action_items:
   - {id: e3-A, epic: 3, action: 'fix auto-review classifier (content-based; report and log one artefact)', owner: owner-harness, status: open}
   - {id: e3-B, epic: 3, action: 'run review suite in a throwaway worktree copy (H-8)', owner: owner-harness, status: open}
   - {id: e3-C, epic: 3, action: 'cohort strategy for subscription limits (3 freezes, ~7.5h)', owner: owner, status: open}
-  - {id: e3-D, epic: 3, action: 'ADR-003 prose to gateFailed?: string (carried A3)', owner: owner, status: open}
-  - {id: e3-E, epic: 3, action: 'CI restore-or-retire decision (carried A1, three epics)', owner: owner, status: open}
-  - {id: e3-F, epic: 3, action: 'SIGINT/Ctrl+C messaging on verify path - ADR or Epic 4 story', owner: owner, status: open}
-  - {id: e3-G, epic: 3, action: 'pre-registration empty-container window - follow-up or Epic 4 rider', owner: owner, status: open}
-  - {id: e3-H, epic: 3, action: 'spec template: PR title becomes squash subject, must be conventional', owner: owner, status: open}
+  - {id: e3-D, epic: 3, action: 'ADR-003 prose to gateFailed?: string (carried A3)', owner: owner, status: 'scheduled as a rider on story 6.3'}
+  - {id: e3-E, epic: 3, action: 'CI restore-or-retire decision (carried A1, three epics)', owner: owner, status: 'answered 2026-09-04 by fa2647b - Node floor 22.13, triggers restored, repo public; Epic 6 makes corpus e2e a required check'}
+  - {id: e3-F, epic: 3, action: 'SIGINT/Ctrl+C messaging on verify path - ADR or Epic 4 story', owner: owner, status: 'scheduled as a rider on story 6.3'}
+  - {id: e3-G, epic: 3, action: 'pre-registration empty-container window - follow-up or Epic 4 rider', owner: owner, status: 'scheduled as a rider on story 6.1'}
+  - {id: e3-H, epic: 3, action: 'spec template: PR title becomes squash subject, must be conventional', owner: owner, status: 'applied to all eight Epic 6 specs'}
   - {id: e3-I, epic: 3, action: 'correct supervisor-brief 10 delta: docs/findings exists', owner: owner-harness, status: open}
-  - {id: e2-B3, epic: 2, action: 'addendum B stale line (carried from Epic 2)', owner: owner, status: open}
-  - {id: e2-5a-i, epic: 2, action: 'fenceMask closes on tagged inner fence (named follow-up, no ingest story yet)', owner: unassigned, status: open}
-  - {id: e5-A, epic: 5, action: 'follow-up story: one shared prompt-assembly helper (redact, bound, preserve the instruction tail)', owner: unassigned, status: open}
-  - {id: e5-B, epic: 5, action: 'give Epic 4 lesson 5 teeth - an agent quoting it still characterised a peer''s merged code from memory', owner: owner, status: open}
-  - {id: e5-C, epic: 5, action: 'add a dependency-cruiser rule for src/authoring/** - four modules, no enforcement', owner: owner, status: open}
-  - {id: e5-D, epic: 5, action: 'ADR: .strict() persisted envelope vs additive optional keys, across all four registry keys', owner: owner, status: open}
-  - {id: e5-E, epic: 5, action: 'decide report --explain: narrow the Q52 guard, or amend the 5.5 spec clarification', owner: owner, status: open}
-  - {id: e5-F, epic: 5, action: 'decide whether FR-18 narrowed coverage (step-target miss only) is the intended scope, and record it', owner: owner, status: open}
+  - {id: e2-B3, epic: 2, action: 'addendum B stale line (carried from Epic 2)', owner: owner, status: 'scheduled as a rider on story 6.2'}
+  - {id: e2-5a-i, epic: 2, action: 'fenceMask closes on tagged inner fence (named follow-up, no ingest story yet)', owner: unassigned, status: 'scheduled as a rider on story 6.2 - its fixtures ingest real BMAD markdown'}
+  - {id: e5-A, epic: 5, action: 'follow-up story: one shared prompt-assembly helper (redact, bound, preserve the instruction tail)', owner: unassigned, status: 'scheduled as story 6.8, Epic 6 wave 2'}
+  - {id: e5-B, epic: 5, action: 'give Epic 4 lesson 5 teeth - an agent quoting it still characterised a peer''s merged code from memory', owner: owner, status: 'answered in the Epic 6 spec template: every claim about a peer must cite path:line read this session'}
+  - {id: e5-C, epic: 5, action: 'add a dependency-cruiser rule for src/authoring/** - four modules, no enforcement', owner: owner, status: 'scheduled as a rider on story 6.1, Epic 6 wave 1'}
+  - {id: e5-D, epic: 5, action: 'ADR: .strict() persisted envelope vs additive optional keys, across all four registry keys', owner: owner, status: 'answered 2026-09-04 by ADR-008; binds story 6.5, reader branch scheduled in 6.3'}
+  - {id: e5-E, epic: 5, action: 'decide report --explain: narrow the Q52 guard, or amend the 5.5 spec clarification', owner: owner, status: 'scheduled as a rider on story 6.7 - the README forces the answer'}
+  - {id: e5-F, epic: 5, action: 'decide whether FR-18 narrowed coverage (step-target miss only) is the intended scope, and record it', owner: owner, status: 'scheduled as a rider on story 6.3 - a classification fixture pins the real scope'}
   - {id: e5-G, epic: 5, action: 'harness: push block claims deleted-on-merge for a branch never pushed', owner: owner-harness, status: open}
   - {id: e5-H, epic: 5, action: 'harness: block-loops.sh has no run boundaries; a fresh supervisor inherits the previous wave blocks', owner: owner-harness, status: open}

@@ -946,6 +946,52 @@ So that SpecWitness can gate a real epic in the author's harness next (UJ-4; add
 **When** run in CI
 **Then** the tarball contains the built CLI and templates only (no fixtures/tests), `npx specwitness --help` works from the packed tarball, and the version is semver with a `next` dist-tag plan documented.
 
+### Story 6.8: Shared prompt-assembly helper
+
+As the layer that composes every provider call,
+I want one helper that redacts, bounds and preserves the instruction tail of every provider-facing prompt,
+So that two modules cannot independently derive the same prompt defect twice (retires action item **e5-A**; AD-10, FR-29).
+
+**Acceptance Criteria:**
+
+**Given** the provider-facing modules under `src/authoring/**` (plan authoring, explanation, mechanics adaptation)
+**When** any of them assembles a prompt
+**Then** it does so through one shared helper that redacts untrusted text with the run's `RedactionOptions`, bounds the payload, and **keeps the instruction tail intact when bounding truncates** — so the response-shape and valid-ids rules can never be the part that is cut.
+
+**Given** the contract `statement`, which travels verbatim from the frozen contract
+**When** it enters any prompt
+**Then** it passes the same redaction boundary as every other untrusted field, with the behaviour identical across all call sites.
+
+**Given** the helper
+**When** a new provider-facing module is added
+**Then** the `src/authoring/**` dependency-cruiser rule (added in 6.1) keeps it inside the layer, and assembling a prompt without the helper is visible in review.
+
+### Story 6.9: Browser verification in CI
+
+As the surface with the widest gap between what is tested and what is verified,
+I want the merged browser suites to run in CI against a real chromium on Linux,
+So that Epic 5's browser executor, its security guards and story 5.1's provisioning path are proven somewhere other than one laptop (FR-24; Epic 5 retro §9).
+
+*Added by owner decision 2026-09-04 during Epic 6 preparation, after finding that five merged browser suites self-skip on every CI runner because `@playwright/test` is an optional peer and nothing downloads chromium.*
+
+**Acceptance Criteria:**
+
+**Given** a CI job that installs a real chromium
+**When** the suite runs on `ubuntu-latest`
+**Then** the five merged browser suites execute rather than skip, demonstrated by comparison against story 6.1's skipped-suite report.
+
+**Given** that job
+**When** it fails
+**Then** it does not block the required checks — non-blocking on introduction — with a written promotion criterion proposed for making it required.
+
+**Given** story 5.1's provisioning path
+**When** the job prepares its environment
+**Then** either it exercises SpecWitness's own provisioning (its first real run) or the PR body states plainly that it does not, naming what remains unproven.
+
+**Given** a browser process tree on Linux
+**When** the job completes or is killed
+**Then** no browser process survives the run, with evidence stated rather than assumed.
+
 ---
 
 ## Epic 7: Real Dogfooding & Value Measurement
