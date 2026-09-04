@@ -100,12 +100,15 @@ function scripted(
       const executor: SurfaceExecutor = {
         surface: probe.surface,
         execute: async (): Promise<ProbeAttempt> => {
-          // The execError is a consequence of the STALE scenario, exactly as it is in
-          // production: a step misses its target because the locator is out of date. An
-          // adapted probe looking for the right thing therefore does not error, which is
-          // what makes the step-target-miss case adaptable end to end rather than in
-          // principle only.
-          const reason = scenario === WORKING ? undefined : execErrorFor[probe.id];
+          // A STALE SCENARIO IS A STEP-TARGET MISS, which is what it is in production and
+          // what the (now narrowed) candidate rule keys on: the probe was told to click a
+          // control that is not there. `execErrorFor` overrides it per probe so the
+          // NON-adaptable reasons can be tested too.
+          //
+          // An adapted probe looking for the right thing finds it, so it does not error —
+          // which is what makes the case adaptable end to end rather than in principle.
+          const reason =
+            scenario === WORKING ? undefined : (execErrorFor[probe.id] ?? 'step-target-missing');
           if (reason !== undefined) {
             return {
               attempt,
@@ -188,7 +191,8 @@ describe('AC3 — nothing happens without an adapter', () => {
 
     const { context } = await run(deps);
 
-    expect(context.run.criteria[0]?.status).toBe('fail');
+    // A stale scenario is a step-target miss, so the criterion errors rather than fails.
+    expect(context.run.criteria[0]?.status).toBe('error');
     // No key at all, so "an unadapted run carries no marker and no record" is structural.
     expect(context.run.adaptation).toBeUndefined();
     expect(context.run.providerUsage).toEqual([]);
@@ -285,7 +289,7 @@ describe('AC2 — a refused or unhelpful proposal changes nothing', () => {
 
     const { context } = await run(deps);
 
-    expect(context.run.criteria[0]?.status).toBe('fail');
+    expect(context.run.criteria[0]?.status).toBe('error');
     // Recorded, so a hostile provider is distinguishable from an absent one — but NOT
     // marked adapted, because nothing was.
     expect(context.run.adaptation?.adapted).toBe(false);
@@ -309,7 +313,7 @@ describe('AC2 — a refused or unhelpful proposal changes nothing', () => {
 
     const { context } = await run(deps);
 
-    expect(context.run.criteria[0]?.status).toBe('fail');
+    expect(context.run.criteria[0]?.status).toBe('error');
     expect(context.run.adaptation?.adapted).toBe(false);
     expect(context.run.adaptation?.refusal?.text).toMatch(/not offered for adaptation/);
   });
@@ -370,7 +374,7 @@ describe('AC2 — a refused or unhelpful proposal changes nothing', () => {
 
     // It WAS re-executed — and it still did not pass, so the original result stands.
     expect(dispatched).toHaveLength(2);
-    expect(context.run.criteria[0]?.status).toBe('fail');
+    expect(context.run.criteria[0]?.status).toBe('error');
     expect(context.run.adaptation?.adapted).toBe(false);
     expect(context.run.adaptation?.applied).toEqual([]);
   });
@@ -427,6 +431,56 @@ describe('D12, closed by owner decision — which execErrors are adaptable', () 
   });
 });
 
+describe('⚠️ an ordinary product failure is NEVER adapted', () => {
+  it('does not offer a probe whose assertion read an existing but WRONG value', async () => {
+    // THE ROUND-4 CODEX P1, and the most important negative case in the story.
+    //
+    // The probe LOOKED and saw `Orders` where the contract requires `Organizations`. The
+    // system under verification is wrong. Offering that to an adapter would invite a
+    // provider to rewrite where the probe looks until the unchanged assertion passes
+    // somewhere else — the payload schema cannot stop that, because nothing about WHAT MUST
+    // BE TRUE is being changed. Only the candidate rule can.
+    let called = 0;
+    const deps: ProbesStageDeps = {
+      criteria: [automated([browserProbe('p1')])],
+      data: NO_DATA,
+      dispatch: ({ probe, attempt }): ProbeDispatch => ({
+        executor: {
+          surface: probe.surface,
+          execute: async (): Promise<ProbeAttempt> => ({
+            attempt,
+            observations: [{ name: 'title', value: 'Orders' }],
+            // Present, read successfully, and simply not what the contract requires.
+            assertionEvaluations: [
+              {
+                description: 'the organization page appears',
+                satisfied: false,
+                expected: 'Organizations',
+                actual: 'Orders',
+              },
+            ],
+            evidence: [],
+            durationMs: 1,
+          }),
+        },
+        params: { probe },
+      }),
+      adapt: async () => {
+        called += 1;
+        return { outcome: 'refused', reason: 'unreachable' };
+      },
+    };
+
+    const { context } = await run(deps);
+
+    expect(context.run.criteria[0]?.status).toBe('fail');
+    // Never offered: no provider call, no quota, no marker.
+    expect(called).toBe(0);
+    expect(context.run.adaptation).toBeUndefined();
+    expect(context.run.providerUsage).toEqual([]);
+  });
+});
+
 describe('the invariant, re-stated after the D12 widening', () => {
   it('never lets an adaptation make a verdict WORSE', async () => {
     // An adapted probe whose re-execution errors must leave the original result standing.
@@ -451,7 +505,7 @@ describe('the invariant, re-stated after the D12 widening', () => {
     const { context } = await run(deps);
 
     expect(secondPass).toBe(true);
-    expect(context.run.criteria[0]?.status).toBe('fail');
+    expect(context.run.criteria[0]?.status).toBe('error');
     expect(context.run.adaptation?.adapted).toBe(false);
   });
 });
@@ -475,13 +529,25 @@ describe('retries and adaptation, which are different things that can both be tr
           executor: {
             surface: probe.surface,
             execute: async (): Promise<ProbeAttempt> => {
-              // The ADAPTED probe is intermittent: first adapted attempt fails, second
-              // passes. The original probe fails every time.
-              let satisfied = false;
-              if (scenario === WORKING) {
-                adaptedAttempts += 1;
-                satisfied = adaptedAttempts > 1;
+              // The ORIGINAL probe cannot find its step target every time — the signal
+              // that makes it a candidate at all.
+              if (scenario !== WORKING) {
+                return {
+                  attempt,
+                  observations: [],
+                  assertionEvaluations: [],
+                  evidence: [],
+                  execError: {
+                    message: 'the step could not find its target',
+                    reason: 'step-target-missing',
+                  },
+                  durationMs: 1,
+                };
               }
+              // The ADAPTED probe is INTERMITTENT: its first attempt fails, its second
+              // passes. Same mechanics across both, so this really is 5.4 flake.
+              adaptedAttempts += 1;
+              const satisfied = adaptedAttempts > 1;
               return {
                 attempt,
                 observations: [],
@@ -565,16 +631,28 @@ describe('the codex findings', () => {
           executor: {
             surface: probe.surface,
             execute: async (): Promise<ProbeAttempt> => {
-              const satisfied = scenario === WORKING;
+              if (scenario !== WORKING) {
+                return {
+                  attempt,
+                  observations: [],
+                  assertionEvaluations: [],
+                  evidence: [],
+                  execError: {
+                    message: 'the step could not find its target',
+                    reason: 'step-target-missing',
+                  },
+                  durationMs: 1,
+                };
+              }
               return {
                 attempt,
                 observations: [],
                 assertionEvaluations: [
                   {
                     description: 'the organization page appears',
-                    satisfied,
+                    satisfied: true,
                     expected: 'Organizations',
-                    actual: satisfied ? 'Organizations' : 'Orders',
+                    actual: 'Organizations',
                   },
                 ],
                 evidence: [],
@@ -634,6 +712,6 @@ describe('the codex findings', () => {
       'unfixable',
     ]);
     // And the criterion it belonged to kept its original failure.
-    expect(context.run.criteria[1]?.status).toBe('fail');
+    expect(context.run.criteria[1]?.status).toBe('error');
   });
 });

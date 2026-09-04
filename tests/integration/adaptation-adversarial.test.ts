@@ -142,16 +142,31 @@ function stageWith(adapt: ProbesStageDeps['adapt']): ProbesStageDeps {
       const executor: SurfaceExecutor = {
         surface: probe.surface,
         execute: async (): Promise<ProbeAttempt> => {
-          const satisfied = scenario === WORKING;
+          if (scenario !== WORKING) {
+            // THE ONE ADAPTABLE SIGNAL: the probe was told to click a control that is not
+            // there. An assertion that read an existing but wrong value is an ordinary
+            // product failure and is never offered — asserted in the stage suite.
+            return {
+              attempt,
+              observations: [],
+              assertionEvaluations: [],
+              evidence: [],
+              execError: {
+                message: 'the step could not find its target',
+                reason: 'step-target-missing',
+              },
+              durationMs: 1,
+            };
+          }
           return {
             attempt,
-            observations: [{ name: 'title', value: satisfied ? 'Organizations' : 'Orders' }],
+            observations: [{ name: 'title', value: 'Organizations' }],
             assertionEvaluations: [
               {
                 description: 'the organizations page is reached',
-                satisfied,
+                satisfied: true,
                 expected: 'Organizations',
-                actual: satisfied ? 'Organizations' : 'Orders',
+                actual: 'Organizations',
               },
             ],
             evidence: [],
@@ -190,11 +205,10 @@ describe('AC2 — a hostile provider gets nothing', () => {
   it.each(HOSTILE)('%s: %s', async (fixture) => {
     const context = await runWith(fixture);
 
-    // 1. The criterion keeps its ORIGINAL failure.
+    // 1. The criterion keeps its ORIGINAL failure, with its original diagnostics.
     expect(context.run.criteria).toHaveLength(1);
-    expect(context.run.criteria[0]?.status).toBe('fail');
-    // Its original evidence, too — expected/actual are the first pass's.
-    expect(context.run.criteria[0]?.actual).toBe('Orders');
+    expect(context.run.criteria[0]?.status).toBe('error');
+    expect(context.run.criteria[0]?.actual).toContain('could not find its target');
 
     // 2. The run is NOT marked adapted. Marking a refused proposal would be a lie in the
     //    one direction that matters.
@@ -219,7 +233,7 @@ describe('AC2 — a hostile provider gets nothing', () => {
     // probe. If anything salvaged the legal half, this criterion would PASS.
     const context = await runWith('adapt-mixed');
 
-    expect(context.run.criteria[0]?.status).toBe('fail');
+    expect(context.run.criteria[0]?.status).toBe('error');
     expect(context.run.adaptation?.adapted).toBe(false);
     expect(context.run.adaptation?.applied).toEqual([]);
   });
@@ -231,7 +245,7 @@ describe('AC2 — a hostile provider gets nothing', () => {
     // is the second lock, and this is the first.
     const context = await runWith('adapt-unknown-probe');
 
-    expect(context.run.criteria[0]?.status).toBe('fail');
+    expect(context.run.criteria[0]?.status).toBe('error');
     expect(context.run.adaptation?.adapted).toBe(false);
     expect(context.run.adaptation?.refusal?.text).toMatch(/not offered for adaptation/);
   });

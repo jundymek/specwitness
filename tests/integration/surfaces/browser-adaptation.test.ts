@@ -10,40 +10,31 @@
  *   ⇒  re-execution through 5.2's OWN path  ⇒  a recorded, marked outcome
  *
  * ============================================================================
- * ⚠️ WHICH FAILURES ARE ADAPTABLE — MEASURED HERE, NOT ASSUMED
+ * ⚠️ WHICH FAILURES THE FLOW ACTUALLY OFFERS — NARROWER THAN THIS FILE EXERCISES
  * ============================================================================
  *
- * AC1 says "failing on element-not-found" and forbids adapting an `execError`. Those two
- * sentences do not partition the space as cleanly as they look, and this file is where the
- * seam was found — by running it, not by reading it. A MISSING ELEMENT produces two
- * different outcomes depending on WHERE it is missing:
+ * AC1 says "failing on element-not-found". Getting that predicate right took two rounds of
+ * review, and the answer is ONE signal:
  *
- *   an ASSERTION reads a selector that matches nothing  =>  unsatisfied assertion  =>  `fail`
- *   a SCENARIO STEP cannot find its target              =>  `execError`            =>  `error`
+ *     a SCENARIO STEP could not find its target  =>  execError, reason 'step-target-missing'
  *
- * The second is the one that surprises. `click "#create-company"` against a page that
- * renamed the control times out as a STEP failure, and 5.2 built one `execError` for it
- * that was shaped identically to the one a mid-run browser CRASH produces.
+ * and nothing else. In particular an UNSATISFIED ASSERTION is never offered, even though a
+ * missing element produces one: an assertion that read an existing but wrong value is an
+ * ordinary PRODUCT FAILURE, and offering it would invite a provider to rewrite where the
+ * probe looks until the unchanged assertion passes somewhere else. The payload schema cannot
+ * stop that — nothing about WHAT MUST BE TRUE would be changing — so the candidate rule is
+ * the only thing that can. See `pipeline/stages/probes.ts`'s adaptation section.
  *
- * That gap was originally carried as DECISIONS.md D12 and reported as pending-owner,
- * because telling the two apart meant matching Playwright's prose — the technique this
- * codebase rejects. **The owner ruled it closed rather than carried**, so
- * `ProbeExecError.reason` is now a structured field that 5.2's driver establishes by ASKING
- * THE PAGE whether the selector matched. All four cases below are therefore live:
+ * ⚠️ **SO TWO TESTS BELOW EXERCISE A CHAIN THE FLOW WOULD NOT INITIATE, AND SAY SO IN THEIR
+ * OWN NAMES.** `applyAdaptation` really does apply a `scenario` or a `path` change and the
+ * re-executed probe really does pass — that is worth proving against a real browser, because
+ * it is the machinery every accepted proposal uses. But the STAGE would never offer those
+ * two criteria, because both failed on an assertion that read a real value. Only the third
+ * case — a clicked control that is gone — is one the flow itself would reach end to end.
  *
- *   - a stale SCENARIO whose control still exists but leads elsewhere  =>  `fail`, adapted
- *   - a stale PATH, the route renamed                                  =>  `fail`, adapted
- *   - a stale SCENARIO whose control is GONE                           =>  `error`
- *                                       `reason: 'step-target-missing'`, adapted
- *   - a browser that could not answer at all                           =>  never adapted
- *
- * The last is asserted at the stage level (`tests/unit/pipeline/stages/probes-adaptation.test.ts`)
- * rather than here, and that placement is deliberate rather than a gap: killing a real
- * chromium mid-run reproducibly, on an ephemeral port, inside a suite the review sandbox
- * cannot even bind a socket in, would be a flaky test defending a rule a deterministic one
- * already defends four ways. What IS proved here is the half only a real browser can prove:
- * that Playwright really does report the missing target as a step failure, and that the
- * driver really does classify it.
+ * Keeping them is deliberate rather than tidy: they are the only place the apply-and-
+ * re-execute machinery meets a real chromium, and mislabelling them as "the flow adapts
+ * this" is exactly the kind of claim two review rounds already caught me making.
  *
  * ⚠️ **AN ADAPTED SCENARIO TRAVELS 5.2'S VALIDATION PATH WITH NO SHORTCUT.** The adapted
  * probe goes through the SAME `createProbeDispatcher` the original did, so its scenario is
@@ -238,11 +229,17 @@ async function execute(probe: BrowserProbe, label: string) {
 
 describeWithBrowser('5.6 — adapting a real failing browser probe', () => {
   it(
-    'adapts a SCENARIO: the stale control still exists but now leads to the wrong page',
+    'applies a SCENARIO change end to end (a chain the flow reaches only via a step miss)',
     async () => {
       // The compiled probe clicks `#create-company`, which the page still has — so every
       // STEP succeeds and the probe genuinely LOOKED. What it saw was the deprecation page,
-      // so the assertion is unsatisfied: `fail`, not `error`. Cosmetic drift, adaptable.
+      // so the assertion is unsatisfied: `fail`.
+      //
+      // ⚠️ THE STAGE WOULD NOT OFFER THIS. A `fail` means the probe looked and saw something
+      // wrong, which is a fact about the product. What this test proves is the MACHINERY —
+      // that a scenario change really applies to a plan copy and the re-executed probe
+      // really passes, against a real browser. The flow reaches that machinery only through
+      // a step-target miss, which the third test covers.
       const plan = planWith(browserProbe('/orders', 'click "#create-company"'));
       const planBytes = serializePlan(plan);
 
@@ -293,10 +290,14 @@ describeWithBrowser('5.6 — adapting a real failing browser probe', () => {
   );
 
   it(
-    'adapts a PATH: the route was renamed and the probe still starts at the old one',
+    'applies a PATH change end to end (same: the machinery, not a case the flow offers)',
     async () => {
       // No interaction at all — the probe navigates and reads. `/companies` serves the
       // deprecation page, so the assertion is unsatisfied and the criterion fails.
+      //
+      // ⚠️ Same as above: the stage would not offer this, and this test is about the
+      // machinery rather than the trigger. A renamed route is indistinguishable, from the
+      // evidence a run holds, from a page that is simply wrong.
       const plan = planWith(browserProbe('/companies', '# navigate and look'));
       const planBytes = serializePlan(plan);
 
@@ -319,7 +320,7 @@ describeWithBrowser('5.6 — adapting a real failing browser probe', () => {
   );
 
   it(
-    'adapts a CLICKED control that is gone — the execError carries a structured reason',
+    'THE case the flow offers: a clicked control that is gone, end to end',
     async () => {
       // ⚠️ THE TEST THAT USED TO MEASURE A LIMITATION NOW MEASURES ITS FIX, and it is kept
       // rather than replaced so the change is visible in one place. `#gone` is not on the

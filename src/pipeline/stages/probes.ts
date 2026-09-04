@@ -360,58 +360,72 @@ interface ExecutedCriterion {
 /**
  * Which failing browser probes are worth adapting.
  *
- * ⚠️ **TWO KINDS OF FAILURE ARE ADAPTABLE, AND ONE KIND OF `execError` IS NOT.**
+ * ⚠️ **EXACTLY ONE SIGNAL IS ADAPTABLE: A SCENARIO STEP THAT COULD NOT FIND ITS TARGET.**
  *
  * AC1 scopes adaptation to a probe *failing on element-not-found* — a COSMETIC DRIFT signal.
- * The subtlety, and the thing this function exists to get right, is that a missing element
- * reaches this stage as TWO different statuses depending on where it was missing:
+ * Getting that predicate right turned out to be the hardest judgement in this story, and it
+ * was narrowed twice by review. The rule now is one line, and everything else falls out:
  *
- *   an ASSERTION reads a selector matching nothing  =>  unsatisfied assertion  =>  `fail`
- *   a SCENARIO STEP cannot find its target          =>  `execError`            =>  `error`
+ *     last.execError?.reason === 'step-target-missing'
  *
- * Both are the same fact about the world — the page answered, and the answer was that
- * nothing matched — so both are adaptable. The second was originally excluded (DECISIONS.md
- * D12) because `execError` also covers a browser that DIED, and the two were
- * indistinguishable without reading Playwright's prose. **The owner ruled that gap closed
- * rather than carried**, so 5.2's driver now records `ProbeExecError.reason` structurally,
- * established by ASKING THE PAGE whether the selector matched rather than by parsing a
- * message. This function branches on that field and on nothing else.
+ * WHY NOT "ANY UNSATISFIED ASSERTION ON A BROWSER PROBE", which is what this used to say.
+ * ⚠️ **That was a hole big enough to defeat the whole story, and it was found by review
+ * rather than by me.** An assertion that READ AN EXISTING VALUE which merely differs — the
+ * title says `Orders` where the contract requires `Organizations` — is an ordinary PRODUCT
+ * FAILURE. The system under verification is wrong. Offering that to an adapter invites a
+ * provider to rewrite where the probe looks until the assertion passes SOMEWHERE ELSE, on a
+ * genuine behavioural regression.
  *
- * WHAT IS STILL NEVER ADAPTED, and why:
+ * The payload schema stops a provider changing WHAT MUST BE TRUE. It cannot stop a provider
+ * being asked to find a page where an unchanged assertion happens to hold. **That is the
+ * same laundering by a different door**, and the candidate rule is the only thing standing
+ * in it.
  *
- *   - `reason: 'unreachable'` — the page could not answer at all. The browser crashed,
- *     closed or never launched. Proposing a locator here is guessing at a selector while
- *     the browser is on fire.
- *   - `reason: 'other'` — it could not look, for a reason nobody established as a target
- *     miss.
- *   - **`reason` ABSENT** — an executor that did not say. Absence is never adaptable: a
- *     reader that needs this distinction must find it stated, never assume it. That is what
- *     keeps every non-browser surface, and any future one, excluded by default.
+ * AND AN ABSENT ASSERTION TARGET IS NOT THE EXCEPTION IT LOOKS LIKE. A selector that matches
+ * nothing is also an unsatisfied assertion, and it is genuinely "element not found" — but
+ * the assertion's target is part of `assertions`, which adaptation may NEVER change. So the
+ * only way mechanics could "fix" it is by navigating somewhere the selector does exist,
+ * which is precisely the laundering above. It is excluded for the same reason, not by
+ * oversight. (It is also not separable in the data: `browser.ts` renders an absent read as
+ * PROSE in `actual`, so telling it from a wrong value would mean matching an adapter's
+ * message — the technique this codebase rejects.)
+ *
+ * WHY A STEP TARGET IS DIFFERENT, and it is a difference in kind rather than degree. A step
+ * is the probe's own INSTRUCTIONS for getting somewhere — HOW to look. When
+ * `click "#create-company"` finds nothing, what is stale is the probe's script, not the
+ * product: the control was renamed, and FR-18's worked example is exactly this. Nothing
+ * about WHAT MUST BE TRUE has been observed yet, so nothing about it can be laundered.
+ *
+ * That signal is structured rather than inferred (`ProbeExecErrorReason`, DECISIONS.md D12),
+ * established by 5.2's driver asking the page before it acts. Everything else is excluded:
+ *
+ *   - `unreachable` — the page could not answer. A dead browser, not drift.
+ *   - `other` — it could not look, for a reason nobody established as a target miss.
+ *   - **`reason` ABSENT** — an executor that did not say. Absence is never adaptable, which
+ *     keeps every other surface and any future one excluded by default.
+ *   - **every `fail`**, including one whose assertion target was missing. See above.
  *   - `needs_human`, `skipped`, `pass`.
  *
  * ============================================================================
- * THE INVARIANT, RE-STATED BECAUSE THIS WIDENING CHANGES IT
+ * THE INVARIANT
  * ============================================================================
  *
- * It used to read "an adaptation may only ever turn a `fail` into a `pass`". An `error` can
- * now become a `pass` too. **The property that survives — and the one that matters — is
- * that AN ADAPTED RUN'S VERDICT CAN ONLY EVER IMPROVE, NEVER DEGRADE.** The replacement is
+ * **AN ADAPTED RUN'S VERDICT CAN ONLY EVER IMPROVE, NEVER DEGRADE.** The replacement is
  * taken only when the re-derived criterion is `pass`; anything else leaves the ORIGINAL
  * result standing, with its original status and its original evidence, exactly as AC2
- * requires for the new class as much as the old.
+ * requires.
  *
- * So the blast radius is now: *a criterion that was failing, or that errored for ONE
- * specific structurally-identified reason, may come to pass — and the run says loudly that
- * it was adapted, and what changed.* Nothing else moves.
+ * So the blast radius is: *a criterion whose probe could not find a control it was told to
+ * click may come to pass — and the run says loudly that it was adapted, and what changed.*
+ * Nothing else moves.
  */
 function adaptationCandidates(executed: readonly ExecutedCriterion[]): AdaptationCandidate[] {
   const candidates: AdaptationCandidate[] = [];
 
   for (const record of executed) {
-    if (
-      (record.result.status !== 'fail' && record.result.status !== 'error') ||
-      record.entry.disposition !== 'automated'
-    ) {
+    // `error` only. A `fail` means the probe LOOKED and saw something wrong, which is a fact
+    // about the product and never this flow's business — see the section above.
+    if (record.result.status !== 'error' || record.entry.disposition !== 'automated') {
       continue;
     }
 
@@ -419,23 +433,11 @@ function adaptationCandidates(executed: readonly ExecutedCriterion[]): Adaptatio
       if (probe.surface !== 'browser') {
         continue;
       }
-      const probeAttempts = record.attempts.get(probe.id) ?? [];
-      const last = probeAttempts.at(-1);
-      if (last === undefined) {
-        continue;
-      }
+      const last = (record.attempts.get(probe.id) ?? []).at(-1);
 
-      // THE TWO ADAPTABLE SHAPES, and nothing else. Both mean "the page answered and
-      // nothing matched"; they differ only in whether an assertion or a step did the
-      // looking. Everything else — a dead browser, an unestablished reason, an executor
-      // that said nothing — falls through.
-      const unsatisfied = probeAttempts
-        .flatMap((attempt) => attempt.assertionEvaluations)
-        .find((assertion) => !assertion.satisfied);
-      const missedAnAssertion = last.execError === undefined && unsatisfied !== undefined;
-      const missedAStepTarget = last.execError?.reason === 'step-target-missing';
-
-      if (!missedAnAssertion && !missedAStepTarget) {
+      // THE ONE ADAPTABLE SIGNAL. Structured, established before the action by 5.2's driver,
+      // and about the probe's own instructions rather than about what it observed.
+      if (last?.execError?.reason !== 'step-target-missing') {
         continue;
       }
 
