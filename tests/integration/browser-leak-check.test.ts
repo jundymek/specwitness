@@ -693,13 +693,25 @@ describe('the browser leak check', () => {
   });
 
   /**
-   * `--owned-pgid` is the tighter bound the cancelled-run check can give, because it KNOWS which
-   * groups it spared. Registry ownership alone would still be safe; this makes it exact.
+   * ⚠️ **THE TWO OWNERSHIP SIGNALS ARE A UNION, NOT AN INTERSECTION** — and this assertion used
+   * to say the opposite, which was MY error rather than the code's.
+   *
+   * I first wrote `--owned-pgid` as a NARROWING filter: the caller's list restricts what the
+   * registry heuristic already allowed. That is wrong in the direction this whole story is about.
+   * A registry-owned group the caller did not happen to name is still this run's browser — it was
+   * launched out of the registry this job was given — so refusing to reap it is "detect the leak
+   * and walk away" a fourth time.
+   *
+   * Each signal answers "is this mine?" independently, and either one is enough. The list adds
+   * groups the heuristic cannot see (a Playwright runner with no registry path in its argv); it
+   * never subtracts ones it can.
    */
-  it('honours an explicit owned-group list when the caller knows one', async () => {
+  it('treats registry ownership and the caller list as a union, not an intersection', async () => {
     const psFile = await listing(
       `   8400    8000    8400       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
       `   8500    8000    8500       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+      '   8600    8000    8600       00:05 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/pw.mjs',
+      '   8700    8000    8700       00:05 /Applications/Vivaldi.app/Contents/MacOS/Vivaldi Helper --type=renderer',
     );
 
     const { exitCode, stdout } = await run([
@@ -709,13 +721,74 @@ describe('the browser leak check', () => {
       BROWSERS_PATH,
       '--reap',
       '--owned-pgid',
-      '8400',
+      '8600',
     ]);
 
     expect(exitCode).toBe(1);
+    // Registry-owned, and not in the caller's list: still ours, still reaped.
     expect(stdout).toContain('would signal process group 8400');
-    expect(stdout).not.toContain('would signal process group 8500');
+    expect(stdout).toContain('would signal process group 8500');
+    // Claimed by the caller, invisible to the registry heuristic: reaped because it was claimed.
+    expect(stdout).toContain('would signal process group 8600');
+    // Neither signal: the operator's own browser, reported and left alone.
+    expect(stdout).not.toContain('would signal process group 8700');
     expect(stdout).toContain('not owned by this run');
+  });
+
+  /**
+   * ⚠️ **AN EXPLICIT OWNED PGID IS SUFFICIENT OWNERSHIP ON ITS OWN.** Raised as a P1 by the
+   * Codex review of this branch, and it was a regression introduced by the PREVIOUS fix: the two
+   * ownership bounds were composed as AND, so a caller that KNEW a group was its own still had
+   * the registry heuristic veto it.
+   *
+   * The case that exposes it is the one the cancelled-run check exists for. When chromium has
+   * exited but its detached `@playwright/test/cli.js` runner has not, the runner is correctly
+   * reported as a survivor — but its argv names no registry path, so registry ownership is empty
+   * and reaping refused, leaving behind precisely the process the check was cleaning up.
+   *
+   * The caller knows more than the heuristic. Either signal is now enough.
+   */
+  it('reaps a Playwright-only group when the caller supplied its pgid', async () => {
+    const psFile = await listing(
+      '   6001    6000    6001       00:20 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/playwright.config.mjs',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-pgid',
+      '6001',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('would signal process group 6001');
+  });
+
+  /**
+   * The other half, unchanged and deliberately conservative: with no explicit list and no
+   * registry match, ownership is not established, so the survivor is reported and left running.
+   * On a CI runner every Playwright process is this job's — but this script also runs on a
+   * developer machine where it is not, and an unprovable kill is the destructive direction.
+   */
+  it('still refuses a Playwright-only group when nobody claimed it', async () => {
+    const psFile = await listing(
+      '   6001    6000    6001       00:20 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/playwright.config.mjs',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('not owned by this run');
+    expect(stdout).not.toContain('would signal process group 6001');
   });
 
   it('reaps nothing, and says so, when nothing survived', async () => {
@@ -732,6 +805,39 @@ describe('the browser leak check', () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain('no surviving browser process');
     expect(stdout).not.toContain('would signal');
+  });
+
+  /**
+   * ⚠️ **A FLAG THAT SILENTLY EATS THE NEXT FLAG IS HOW A CALLER'S BUG BECOMES THIS SCRIPT'S
+   * BUG.** A caller emitted `--owned-pgid` with an empty value; the parser consumed the
+   * following `--label` as its value, the label text then read as a bare argument, and the step
+   * failed with a usage error that pointed at the wrong thing entirely. The caller was fixed —
+   * and so is this, because "the caller should not do that" is not a parser.
+   *
+   * Real CI failure: run 33913171525, `browser (ubuntu-latest)`, exit 64.
+   */
+  it('rejects a flag value that is another flag, instead of swallowing it', async () => {
+    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
+
+    const { exitCode, stderr } = await run([
+      '--ps-file',
+      psFile,
+      '--owned-pgid',
+      '--label',
+      'a label that should never be consumed as a pgid',
+    ]);
+
+    expect(exitCode).toBe(64);
+    expect(stderr).toContain('--owned-pgid');
+  });
+
+  it('rejects a non-numeric owned pgid', async () => {
+    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
+
+    const { exitCode, stderr } = await run(['--ps-file', psFile, '--owned-pgid', 'not-a-number']);
+
+    expect(exitCode).toBe(64);
+    expect(stderr).toContain('--owned-pgid');
   });
 
   it('exits 64 on an unknown flag', async () => {

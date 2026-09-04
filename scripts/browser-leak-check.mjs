@@ -158,11 +158,22 @@ for (let index = 0; index < argv.length; index += 1) {
       browsersOnly = true;
       break;
     // The tighter ownership bound, for a caller that KNOWS which groups it spawned.
-    case '--owned-pgid':
+    //
+    // ⚠️ VALIDATED, because an unvalidated value flag swallows the next FLAG. A caller emitted
+    // `--owned-pgid` with an empty value, this parser took the following `--label` as its
+    // value, and the step died with a usage error naming the label text — a caller bug wearing
+    // this script's face (CI run 33913171525, exit 64). "The caller should not do that" is not
+    // a parser.
+    case '--owned-pgid': {
       if (value === undefined) usage(`ERROR: ${flag} needs a value`);
-      ownedPgids.push(Number(value));
+      const pgid = Number(value);
+      if (value.startsWith('-') || !Number.isInteger(pgid) || pgid <= 1) {
+        usage(`ERROR: ${flag} needs a process group id greater than 1, got '${value}'`);
+      }
+      ownedPgids.push(pgid);
       index += 1;
       break;
+    }
     case '--wait-seconds':
       if (value === undefined) usage(`ERROR: ${flag} needs a value`);
       waitSeconds = Number(value);
@@ -564,17 +575,17 @@ function reapSurvivors() {
       lines.push(`    refusing to signal process group ${pgid}: it is this process's own group`);
       continue;
     }
-    if (!ownedGroups.has(pgid)) {
+    // ⚠️ EITHER SIGNAL IS SUFFICIENT, AND COMPOSING THEM AS *AND* WAS A P1 ON THIS BRANCH.
+    // The previous version required BOTH, so a caller that KNEW a group was its own still had
+    // the registry heuristic veto it. The case that exposed it is the one the cancelled-run
+    // check exists for: when chromium has exited but its detached `@playwright/test/cli.js`
+    // runner has not, the runner is a survivor whose argv names no registry path — so registry
+    // ownership is empty, reaping was refused, and the check left behind exactly the process it
+    // was cleaning up. The caller knows more than the heuristic.
+    if (!ownedGroups.has(pgid) && !ownedPgids.includes(pgid)) {
       lines.push(
         `    NOT reaped, reported only: process group ${pgid} is not owned by this run ` +
-          '(no member came from the browsers registry given)',
-      );
-      continue;
-    }
-    if (ownedPgids.length > 0 && !ownedPgids.includes(pgid)) {
-      lines.push(
-        `    NOT reaped, reported only: process group ${pgid} is not owned by this run ` +
-          '(not in the caller\'s --owned-pgid list)',
+          '(no member came from the browsers registry given, and no caller claimed it)',
       );
       continue;
     }

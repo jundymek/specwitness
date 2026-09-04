@@ -168,8 +168,20 @@ echo "==> [3/5] a browser is up; SIGKILLing the runner's process GROUP"
 runner_pgid="$(ps -o pgid= -p "${runner_pid}" | tr -d ' ')"
 killed=""
 spared=""
+vanished=""
 for pid in $(descendants "${runner_pid}"); do
   pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d ' ')"
+  # ⚠️ AN EMPTY PGID MEANS THE PROCESS IS ALREADY GONE, NOT THAT IT WAS DETACHED.
+  # The descendant walk and this lookup are separate `ps` calls, so a short-lived child can
+  # exit between them. Counting those as SPARED made the orphan evidence wrong in the
+  # direction that flatters it - CI run 33913171525 reported eight orphans of which seven
+  # "exited on their own after 0s", because seven of them had already exited before the kill.
+  # It also emitted `--owned-pgid` with no value, which swallowed the following `--label` and
+  # failed the step with exit 64. Both halves came from the same missing branch.
+  if [ -z "${pgid}" ]; then
+    vanished="${vanished} ${pid}"
+    continue
+  fi
   if [ "${pgid}" = "${runner_pgid}" ]; then
     killed="${killed} ${pid}"
     kill -KILL "${pid}" 2>/dev/null
@@ -184,6 +196,7 @@ for pid in $(descendants "${runner_pid}"); do
 done
 echo "    killed (same group, pgid ${runner_pgid}):${killed:- none}"
 echo "    SPARED, as pid:pgid (detached into their own group, as a real cancellation would):${spared:- none}"
+echo "    already gone before the kill (no pgid to read; NOT orphans):${vanished:- none}"
 wait "${runner_pid}" 2>/dev/null
 
 # What actually became of each orphan, measured rather than inferred. This is the number the
@@ -258,7 +271,13 @@ echo "    ${waited}s of the ${WAIT_SECONDS}s budget already spent; ${remaining}s
 # documented as runnable locally, where an unowned kill would hit the operator own browser.
 owned_args=""
 for entry in ${spared}; do
-  owned_args="${owned_args} --owned-pgid ${entry#*:}"
+  entry_pgid="${entry#*:}"
+  # Defensive: never emit a valueless flag. An empty pgid here would consume the next
+  # argument as its value - which is exactly how this step failed with exit 64.
+  case "${entry_pgid}" in
+    ''|*[!0-9]*) continue ;;
+  esac
+  owned_args="${owned_args} --owned-pgid ${entry_pgid}"
 done
 
 node "${leak_check_args[@]}" \
