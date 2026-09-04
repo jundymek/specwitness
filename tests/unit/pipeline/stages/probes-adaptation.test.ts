@@ -1022,6 +1022,22 @@ describe('probe ids reused across criteria', () => {
 });
 
 describe('⚠️ an adapted probe that cannot be EXECUTED is a refused adaptation', () => {
+  it('never lets the ADAPTER ITSELF throwing become exit 3', async () => {
+    // Written proactively after the finding below taught the shape. The shipped adapter
+    // never throws — every provider route ends in `refused` — but the PORT permits it and
+    // this stage is what would turn one into exit 3.
+    const { deps } = scripted([automated([browserProbe('p1')])], async () => {
+      throw new Error('the adapter blew up');
+    });
+
+    const { context, result } = await run(deps);
+
+    expect(result.status).toBe('ok');
+    expect(context.run.criteria[0]?.status).toBe('error');
+    expect(context.run.adaptation?.adapted).toBe(false);
+    expect(context.run.adaptation?.refusal?.text).toMatch(/could not be consulted/);
+  });
+
   it('never lets 5.2 refusing an adapted scenario become exit 3', async () => {
     // THE ROUND-11 CODEX P1, and a direct AC2 violation.
     //
@@ -1082,8 +1098,84 @@ describe('⚠️ an adapted probe that cannot be EXECUTED is a refused adaptatio
     // Not adapted, and the audit says the proposal was executed nowhere.
     expect(context.run.adaptation?.adapted).toBe(false);
     expect(context.run.adaptation?.applied).toEqual([]);
-    expect(context.run.adaptation?.discarded?.map((change) => change.probeId)).toEqual(['p1']);
+    // ⚠️ NOT in `discarded` either: that list means executed-and-not-kept, and this never
+    // executed. The refusal note is what carries it, and it names the probe.
+    expect(context.run.adaptation?.discarded).toBeUndefined();
     expect(context.run.adaptation?.refusal?.text).toMatch(/could not be executed/);
+    expect(context.run.adaptation?.refusal?.text).toContain('p1');
+  });
+
+  it('records only the probes that RAN when one of several cannot be executed', async () => {
+    // THE ROUND-12 CODEX P1, and a second-order consequence of the fix above: executing a
+    // criterion's adapted probes together meant a throw partway through recorded EVERY
+    // change for that criterion as "executed, then discarded" — while the probes after the
+    // failing one had never run at all. An audit whose whole value is saying what was
+    // executed must not claim executions that did not happen.
+    //
+    // `good` adapts and passes; `bad` cannot be executed at all.
+    const deps: ProbesStageDeps = {
+      criteria: [
+        {
+          criterionId: 'E7-01',
+          disposition: 'automated',
+          probes: [browserProbe('good'), browserProbe('bad')],
+        },
+      ],
+      data: NO_DATA,
+      dispatch: ({ probe, attempt }): ProbeDispatch => {
+        const scenario = (probe as BrowserProbe).mechanics.scenario;
+        if (scenario === WORKING && probe.id === 'bad') {
+          throw new InfraError('the scenario line is not a recognised directive', 'one per line');
+        }
+        return {
+          executor: {
+            surface: probe.surface,
+            execute: async (): Promise<ProbeAttempt> => {
+              if (scenario !== WORKING) {
+                return {
+                  attempt,
+                  observations: [],
+                  assertionEvaluations: [],
+                  evidence: [],
+                  execError: {
+                    message: 'the step could not find its target',
+                    reason: 'step-target-missing',
+                  },
+                  durationMs: 1,
+                };
+              }
+              return {
+                attempt,
+                observations: [],
+                assertionEvaluations: [
+                  {
+                    description: 'the organization page appears',
+                    satisfied: true,
+                    expected: 'Organizations',
+                    actual: 'Organizations',
+                  },
+                ],
+                evidence: [],
+                durationMs: 1,
+              };
+            },
+          },
+          params: { probe },
+        };
+      },
+      adapt: proposeWorking().adapt,
+    };
+
+    const { context, result } = await run(deps);
+
+    expect(result.status).toBe('ok');
+    // `good` really ran and really passed, so it is recorded as applied.
+    expect(context.run.adaptation?.applied.map((change) => change.probeId)).toEqual(['good']);
+    // `bad` never ran, so it is in NEITHER list — the note names it instead.
+    expect(context.run.adaptation?.discarded).toBeUndefined();
+    expect(context.run.adaptation?.refusal?.text).toContain('bad');
+    // And the criterion still reflects `bad` failing, because it was never fixed.
+    expect(context.run.criteria[0]?.status).toBe('error');
   });
 });
 

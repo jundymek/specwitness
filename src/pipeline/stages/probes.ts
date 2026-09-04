@@ -97,7 +97,11 @@
 
 import { deriveCriterionResult } from '../../domain/criterion-result.js';
 import type { AppliedMechanicsChange } from '../../domain/adaptation.js';
-import type { AdaptationCandidate, MechanicsAdapter } from '../../domain/adaptation-port.js';
+import type {
+  AdaptationCandidate,
+  AdaptationDecision,
+  MechanicsAdapter,
+} from '../../domain/adaptation-port.js';
 import { adaptCriteria, AdaptationRefused } from '../../domain/adaptation-apply.js';
 import type {
   ContractCriterionRef,
@@ -613,16 +617,6 @@ async function adaptAndReExecute(
     return 0;
   }
 
-  const decision = await adapt(candidates);
-
-  // FR-15 / Q65 / AD-4: EVERY provider invocation is recorded, including one whose payload
-  // was thrown away. A run that spent subscription quota while `providerUsage` stayed empty
-  // would make FR-18's whole guarantee unauditable — which is the reason `verify.ts` gives
-  // for recording plan compilation, and it applies identically here.
-  if (decision.usage !== undefined) {
-    context.run.providerUsage.push(decision.usage);
-  }
-
   const refuse = (reason: string): number => {
     // RECORDED, not swallowed. A reader must be able to tell a hostile provider from an
     // absent one. `adapted` stays false and every criterion keeps its original result.
@@ -633,6 +627,34 @@ async function adaptAndReExecute(
     };
     return 0;
   };
+
+  // ⚠️ THE ADAPTER ITSELF IS NOT ALLOWED TO END THE RUN EITHER.
+  //
+  // The shipped `createMechanicsAdapter` never throws — every provider route, including an
+  // exhausted retry budget and a CLI that could not be reached, ends in `refused`, which is
+  // the property `authoring/adaptation.ts` is built around and tests. But the PORT permits a
+  // throw and this stage is what would turn one into exit 3, which is the same shape the
+  // codex review found one layer down for the adapted re-execution: an adaptation must never
+  // change the verdict or the exit code (AC2).
+  //
+  // Written proactively rather than in response to a finding, because the finding below it
+  // taught the shape. A future adapter implementation cannot reintroduce the hazard.
+  let decision: AdaptationDecision;
+  try {
+    decision = await adapt(candidates);
+  } catch (error) {
+    return refuse(
+      `the mechanics adapter could not be consulted: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  // FR-15 / Q65 / AD-4: EVERY provider invocation is recorded, including one whose payload
+  // was thrown away. A run that spent subscription quota while `providerUsage` stayed empty
+  // would make FR-18's whole guarantee unauditable — which is the reason `verify.ts` gives
+  // for recording plan compilation, and it applies identically here.
+  if (decision.usage !== undefined) {
+    context.run.providerUsage.push(decision.usage);
+  }
 
   if (decision.outcome === 'refused') {
     return refuse(decision.reason);
@@ -742,54 +764,46 @@ async function adaptAndReExecute(
     //
     // The wave-2 pattern once more: *the criterion was preserved* and *its evidence was
     // preserved* are two different claims, and only the first had a test.
-    // ⚠️ A FAILURE TO EXECUTE THE ADAPTED PROBE IS A REFUSED ADAPTATION, NOT A RUN FAILURE.
+    // ⚠️ EACH ADAPTED PROBE IS EXECUTED INDEPENDENTLY, AND THE AUDIT RECORDS ONLY WHAT RAN.
     //
-    // The payload schema types `scenario` as free prose — exactly as the merged plan schema
-    // does — so a schema-VALID proposal can still be something 5.2's parser refuses: "log in,
-    // then click Submit", or a `goto` at an absolute URL. 5.2 refuses those with an
-    // `InfraError` before any I/O, which is correct and is its job.
+    // Two properties, and the second was a codex P1 against the first version of the first:
     //
-    // What was wrong was what happened next: that throw propagated out of the stage and
-    // became exit 3. A provider returning unparseable prose could therefore turn a product
-    // FAIL into an INFRASTRUCTURE ERROR — changing the verdict and the exit code, which AC2
-    // forbids in terms and which this module's own invariant ("a verdict can only ever
-    // improve") claims is impossible. Raised as a P1 by the codex review.
+    // 1. A FAILURE TO EXECUTE AN ADAPTED PROBE IS A REFUSED ADAPTATION, NOT A RUN FAILURE.
+    //    The payload schema types `scenario` as free prose - exactly as the merged plan
+    //    schema does - so a schema-VALID proposal can still be something 5.2 refuses: an
+    //    unparseable directive, or a `goto` at an absolute URL. 5.2 raises an `InfraError`
+    //    for those before any I/O, which is correct and is its job. Letting it propagate
+    //    turned a product FAIL into an INFRASTRUCTURE ERROR - changing the verdict and the
+    //    exit code, which AC2 forbids and which this module's invariant calls impossible.
     //
-    // I had a test proving 5.2 throws for such a scenario and none asking what the STAGE did
-    // with the throw: the same two-halves-of-a-distinction shape that runs through this
-    // whole branch.
+    // 2. ONE CALL PER PROBE, so a throw on one cannot misattribute the others. Executing a
+    //    criterion's adapted probes together meant a throw partway through recorded EVERY
+    //    change for that criterion as "executed, then discarded" - while the probes after
+    //    the failing one had never run at all. An audit whose whole value is saying what
+    //    was executed must not claim executions that did not happen, and `probesRun` lost
+    //    the ones that did.
     //
-    // Caught HERE and nowhere wider: only the adapted re-execution is inside the try, so a
-    // genuine infrastructure failure on any OTHER path still surfaces normally. The original
-    // result already stands — the first pass observed what it observed — so keeping it is
-    // both safe and the honest answer.
-    let fresh;
-    try {
-      fresh = await executeCriterion(
-        deps,
-        context,
-        cwd,
-        entry.criterionId,
-        adaptedProbes,
-        (probeId) => record.attempts.get(probeId)?.length ?? 0,
-      );
-    } catch (error) {
-      unexecutable.push(error instanceof Error ? error.message : String(error));
-      for (const change of adapted.changes) {
-        if (change.criterionId !== entry.criterionId) {
-          continue;
+    // The catch is around ONE probe's execution and nothing wider, so a genuine
+    // infrastructure failure on any other path still surfaces normally.
+    const freshByProbe = new Map<string, ProbeAttempt[]>();
+    for (const probe of adaptedProbes) {
+      try {
+        const fresh = await executeCriterion(deps, context, cwd, entry.criterionId, [probe], (probeId) =>
+          record.attempts.get(probeId)?.length ?? 0,
+        );
+        probesRun += fresh.size;
+        const attempts = fresh.get(probe.id);
+        if (attempts !== undefined) {
+          freshByProbe.set(probe.id, attempts);
         }
-        discarded.push({
-          criterionId: change.criterionId,
-          probeId: change.probeId,
-          field: change.field,
-          from: boundedText(change.from, deps.redaction),
-          to: boundedText(change.to, deps.redaction),
-        });
+      } catch (error) {
+        // NOT recorded as discarded: it was applied to the plan copy and never executed, and
+        // `discarded` means executed-and-not-kept. The refusal note carries it instead.
+        unexecutable.push(
+          `probe '${probe.id}': ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-      continue;
     }
-    probesRun += fresh.size;
 
     const options: DerivationOptions = { ...deps.redaction };
 
@@ -818,7 +832,12 @@ async function adaptAndReExecute(
       }
       // The adapted probe's OWN fresh list — never merged with the first pass's, which is
       // what keeps 5.4's flake vocabulary intact (see the section above).
-      const adaptedResult = deriveCriterionResult(record.criterion, fresh.get(probe.id) ?? [], {
+      const freshAttempts = freshByProbe.get(probe.id);
+      if (freshAttempts === undefined) {
+        // Applied to the plan copy but never executed (see above). The original stands.
+        return original;
+      }
+      const adaptedResult = deriveCriterionResult(record.criterion, freshAttempts, {
         ...options,
         probeId: probe.id,
       });
@@ -838,6 +857,10 @@ async function adaptAndReExecute(
     // describes what was kept, and these two lists describe what was done.
     for (const change of adapted.changes) {
       if (change.criterionId !== entry.criterionId) {
+        continue;
+      }
+      if (!freshByProbe.has(change.probeId)) {
+        // Never executed, so it belongs in neither list — the refusal note names it.
         continue;
       }
       (keptProbeIds.has(change.probeId) ? applied : discarded).push({
@@ -863,13 +886,26 @@ async function adaptAndReExecute(
           refusal: boundedText(
             unexecutable.length === 0
               ? 'the proposal was valid and was applied to a plan copy, but no re-executed probe passed — every criterion kept its original outcome and its original evidence'
-              : `the proposal was valid but the adapted probe could not be executed, so every criterion kept its original outcome and its original evidence: ${unexecutable[0] ?? ''}`,
+              : `the proposal was valid but the adapted probe could not be executed, so every criterion kept its original outcome and its original evidence: ${unexecutable.join('; ')}`,
             deps.redaction,
           ),
         }
-      : { adapted: true, applied, ...discardedRecord };
-  // NOTE: an `unexecutable` proposal is recorded in `discarded` above, so it is visible in
-  // the audit whether or not anything else was applied.
+      : {
+          adapted: true,
+          applied,
+          ...discardedRecord,
+          // ⚠️ CARRIED ON THE ADAPTED ARM TOO. A proposal that could not be EXECUTED appears
+          // in neither `applied` nor `discarded` — both of those mean it ran — so without
+          // this it would vanish from a run that also adapted something successfully.
+          ...(unexecutable.length === 0
+            ? {}
+            : {
+                refusal: boundedText(
+                  `some proposals could not be executed and were not applied: ${unexecutable.join('; ')}`,
+                  deps.redaction,
+                ),
+              }),
+        };
 
   return probesRun;
 }
