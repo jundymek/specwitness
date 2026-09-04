@@ -192,6 +192,43 @@ module.exports = {
       },
     },
     {
+      name: 'authoring-layer',
+      comment:
+        'AD-1: src/authoring/** is application-layer — the contract and plan authoring ' +
+        'services (generate, freeze, amend, compile, explain, and 5.6\'s mechanics ' +
+        'adaptation). The spine\'s layer graph gives it AUTH -> DOM (domain + schemas), ' +
+        'AUTH -> ING and AUTH -> PROV, so it may import domain, schemas, its own ' +
+        'siblings, ingest, providers and npm. What it may NOT import is an adapter that ' +
+        'is not `providers` (config, infra, surfaces), another application layer ' +
+        '(pipeline, report) or the edge (cli). ' +
+        'THE HALF WITH TEETH IS `infra`. Authoring reads and writes contract and plan ' +
+        'FILES with `node:fs` directly (contract-file.ts, plan-file.ts), which is ' +
+        'allowed — built-ins are not a layer. But reaching `src/infra/run-store.ts` or ' +
+        '`src/infra/vcs.ts` from here would let an authoring service touch run evidence ' +
+        'or the repository, and the spine puts both of those behind the pipeline; the ' +
+        'CLI edge orchestrates authoring before and outside the pipeline, and the ' +
+        'pipeline never authors. `providers` is permitted because AD-2 routes every ' +
+        'provider call through the ONE shared invoke gate in src/providers/invoke.ts, ' +
+        'which authoring is the principal caller of; `ingest` is permitted because the ' +
+        'spine draws that edge, even though nothing under src/authoring uses it today — ' +
+        'narrowing a rule below the binding graph would be a redesign made by a lint ' +
+        'file rather than by an ADR. ' +
+        'This rule is Epic 5 action item e5-C. Its three siblings (`ingest-core-only`, ' +
+        '`pipeline-layer`, `report-layer`) existed while `authoring` appeared only ' +
+        'inside their prose, so the layer that holds plan.ts, amend.ts, explain.ts and ' +
+        'the adaptation modules was fenced by nothing at all: an Epic 5 agent planted ' +
+        '`authoring -> infra` and watched depcruise pass, and that is what proved the ' +
+        'rule missing. `tests/unit/dependency-rules.test.ts` pins both directions.',
+      severity: 'error',
+      // `cli` is absent from the permit list rather than called out separately, exactly as
+      // `ingest-core-only` and `pipeline-layer` leave it: `nothing-imports-cli` also fires.
+      from: { path: '^src/authoring/' },
+      to: {
+        path: '^src/',
+        pathNot: ['^src/(domain|schemas|authoring|ingest|providers)/'],
+      },
+    },
+    {
       name: 'report-layer',
       comment:
         'AD-11/AD-1: src/report/** is application-layer and the STRICTEST of them — the ' +
