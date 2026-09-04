@@ -749,48 +749,57 @@ test('specwitness browser probe', async ({ page, context }) => {
       outcome.phase = 'step ' + (index + 1) + ' (' + step.verb + ')';
       const locator = step.selector === undefined ? null : page.locator(step.selector).first();
 
-      // WHY THE PROBE COULD NOT LOOK, ESTABLISHED BEFORE ACTING RATHER THAN INFERRED
-      // AFTERWARDS (story 5.6, closing D12).
-      //
-      // Waiting for the target is its OWN operation, so "the element is not there" is a
-      // fact this driver LEARNED rather than a guess made once the page has already moved.
-      // Only this wait failing is a target miss; every later failure - a refused click, a
-      // blocked navigation, an origin violation, a read that dies - leaves the reason
-      // unset, and unset is never adaptable.
-      //
-      // The earlier version asked "does this selector still match?" in the catch, and it
-      // could not tell "never there" from "there, clicked, and the page moved" - both
-      // answer no. Raised by the codex re-review; the fix is to ask earlier, not to
-      // remember harder.
-      //
-      // The attached state rather than visible: presence is what a LOCATOR question is
-      // about. A present-but-unclickable element is not locator drift, so the action below
-      // is left to fail on its own terms with no reason set.
-      if (locator !== null) {
-        try {
-          await locator.waitFor({ state: 'attached' });
-        } catch (missing) {
+      // WHERE THE PAGE WAS BEFORE THIS ACTION. Read only by the classifier below, and free:
+      // a synchronous property, not an operation with a timeout of its own.
+      const urlBeforeStep = page.url();
+
+      try {
+        if (step.verb === 'goto') {
+          await page.goto(step.url, { waitUntil: 'load' });
+        } else if (step.verb === 'click') {
+          await locator.click();
+        } else if (step.verb === 'fill') {
+          await locator.fill(step.value);
+        } else if (step.verb === 'waitFor') {
+          await locator.waitFor({ state: 'visible' });
+        } else {
+          throw new Error('the payload carried a verb this driver does not implement');
+        }
+      } catch (stepError) {
+        // WHY THE PROBE COULD NOT LOOK, established HERE - inside the failing action's own
+        // catch - rather than remembered for later or inferred from the message text (story
+        // 5.6, closing D12). Three things make this the right place and they were each
+        // learned from a review finding:
+        //
+        //  1. SCOPE. Only THIS action's failure reaches this handler, so a later origin
+        //     violation, blocked navigation or failed read can never inherit a classification
+        //     that was about a step. Nothing is remembered between steps, so nothing can go
+        //     stale.
+        //  2. NO ADDED TIMEOUT BUDGET. An earlier version waited for the target as a separate
+        //     bounded operation before acting, which doubled the worst case for every
+        //     selector step while #bounds still budgeted one - so honest slow work could
+        //     exceed the aggregate and be killed. That is the same arithmetic bug this module
+        //     already fixed once; see #bounds. count() and url() resolve immediately
+        //     and wait for nothing, so the operation count is unchanged.
+        //  3. TWO FACTS THE PAGE REPORTS, not one. A target miss requires that the page did
+        //     NOT move AND that the selector matches nothing. Checking only the selector
+        //     would misread a click that succeeded far enough to navigate and then failed:
+        //     its target is legitimately gone, and calling that a locator miss would invite
+        //     an adaptation for a failure that had nothing to do with the locator.
+        //
+        // A page that cannot answer at all is a dead browser, never a target miss.
+        if (step.selector !== undefined) {
           try {
+            const moved = page.url() !== urlBeforeStep;
             outcome.reason =
-              (await page.locator(step.selector).count()) === 0 ? 'step-target-missing' : 'other';
+              !moved && (await page.locator(step.selector).count()) === 0
+                ? 'step-target-missing'
+                : 'other';
           } catch (unreachable) {
-            // The page could not answer at all, so the browser is gone rather than the
-            // element. Never adaptable.
             outcome.reason = 'unreachable';
           }
-          throw missing;
         }
-      }
-      if (step.verb === 'goto') {
-        await page.goto(step.url, { waitUntil: 'load' });
-      } else if (step.verb === 'click') {
-        await locator.click();
-      } else if (step.verb === 'fill') {
-        await locator.fill(step.value);
-      } else if (step.verb === 'waitFor') {
-        await locator.waitFor({ state: 'visible' });
-      } else {
-        throw new Error('the payload carried a verb this driver does not implement');
+        throw stepError;
       }
       // After EVERY step, not only after a goto: a click is the one that can leave. The
       // interception above already refused to SEND it; this is what turns a refused

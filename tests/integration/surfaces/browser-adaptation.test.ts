@@ -449,10 +449,14 @@ describeWithBrowser('5.6 — adapting a real failing browser probe', () => {
       // No remembered selector anywhere: the whole class of staleness is deleted rather
       // than managed. If a future change reintroduces one, this goes red.
       expect(spec).not.toContain('failingSelector');
-      // The reason is set inside the pre-action wait, which is what makes it a fact the
-      // driver learned rather than a guess made after the page moved.
-      expect(spec).toContain("waitFor({ state: 'attached' })");
+      // The classification lives inside the failing ACTION's own catch, so only that step's
+      // failure can reach it, and it costs no extra bounded operation (see `#bounds` — an
+      // earlier version added a separate full-timeout wait and broke the arithmetic).
+      expect(spec).toContain('const urlBeforeStep = page.url()');
       expect(spec).toContain("outcome.reason = 'unreachable'");
+      // Both facts, not one: a target miss requires that the page did not move AND that the
+      // selector matches nothing.
+      expect(spec).toContain('!moved');
     },
     TEST_TIMEOUT_MS,
   );
