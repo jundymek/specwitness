@@ -483,12 +483,31 @@ function adaptationCandidates(executed: readonly ExecutedCriterion[]): Adaptatio
  * the probe was rewritten — the one way this story could launder a real failure into noise.
  *
  * **SO THE RE-EXECUTION COLLECTS INTO A FRESH MAP** (`executeCriterion` builds its own) and
- * the replacement result is derived from THAT list alone. It therefore has exactly one
- * attempt, so `flaky` is structurally false and the per-attempt record is structurally
- * absent — never constructed, rather than constructed and filtered out. Do not "simplify"
- * this by merging the two maps.
+ * the replacement result is derived from THAT list alone. The mixed pair is therefore never
+ * constructed, rather than constructed and filtered out. Do not "simplify" this by merging
+ * the two maps.
  *
  * Raised by the epic-5 supervisor from the merged code before any run had shown it.
+ *
+ * ⚠️ **AND A PRECISION THAT AN EARLIER VERSION OF THIS COMMENT GOT WRONG.** It used to say
+ * the fresh list "has exactly one attempt, so `flaky` is structurally false". That is true
+ * only with `retries.browser` at its default of 0. A project that configures browser retries
+ * (5.4's feature) gives the adapted execution its cycles too, so the fresh list CAN hold
+ * several attempts and `flaky` CAN be true. Raised by the codex review of this branch, which
+ * was right about the claim.
+ *
+ * **The behaviour is deliberate and is not the defect; the overclaim was.** Flake WITHIN the
+ * adapted execution is genuine 5.4 flake: those attempts ran the SAME (adapted) probe, so
+ * repetition is exactly what they are, and reporting it is honest. What must never happen is
+ * the CROSS-MECHANICS comparison — the original failure combining with the adapted pass —
+ * and that is what the fresh map prevents, at any retry setting.
+ *
+ * The suggested fix was to force a single attempt on this path. It is declined, and stated
+ * rather than silently not done: a project that configured retries did so because its
+ * browser is intermittent, and that is precisely the environment where adaptation matters
+ * most. Silently withholding the operator's own tolerance here would make one unlucky
+ * adapted attempt discard a proposal that works, on the runs most likely to need it. Both
+ * semantics are pinned by test.
  *
  * ============================================================================
  * AN ADAPTATION MAY ONLY EVER TURN A `fail` INTO A `pass`

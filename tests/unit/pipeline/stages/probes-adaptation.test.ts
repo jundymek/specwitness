@@ -456,6 +456,94 @@ describe('the invariant, re-stated after the D12 widening', () => {
   });
 });
 
+describe('retries and adaptation, which are different things that can both be true', () => {
+  /**
+   * A stage whose adapted probe is INTERMITTENT: it fails its first adapted attempt and
+   * passes its second. Retries are configured, as a project may.
+   */
+  function flakyAfterAdaptation(): ProbesStageDeps {
+    const { adapt } = proposeWorking();
+    let adaptedAttempts = 0;
+    return {
+      criteria: [automated([browserProbe('p1')])],
+      data: NO_DATA,
+      // 5.4's feature, on. One extra attempt for a browser probe.
+      retries: (surface) => (surface === 'browser' ? 1 : 0),
+      dispatch: ({ probe, attempt }): ProbeDispatch => {
+        const scenario = (probe as BrowserProbe).mechanics.scenario;
+        return {
+          executor: {
+            surface: probe.surface,
+            execute: async (): Promise<ProbeAttempt> => {
+              // The ADAPTED probe is intermittent: first adapted attempt fails, second
+              // passes. The original probe fails every time.
+              let satisfied = false;
+              if (scenario === WORKING) {
+                adaptedAttempts += 1;
+                satisfied = adaptedAttempts > 1;
+              }
+              return {
+                attempt,
+                observations: [],
+                assertionEvaluations: [
+                  {
+                    description: 'the organization page appears',
+                    satisfied,
+                    expected: 'Organizations',
+                    actual: satisfied ? 'Organizations' : 'Orders',
+                  },
+                ],
+                evidence: [],
+                durationMs: 1,
+              };
+            },
+          },
+          params: { probe },
+        };
+      },
+      adapt,
+    };
+  }
+
+  it('reports flake WITHIN an adapted execution, because that really is flake', async () => {
+    // Those attempts ran the SAME (adapted) probe, so repetition is exactly what they are.
+    // 5.4's vocabulary means repetition of an unchanged probe, and here the probe did not
+    // change between them. Reporting it is honest; suppressing it would hide a genuinely
+    // intermittent adapted probe.
+    const { context } = await run(flakyAfterAdaptation());
+
+    expect(context.run.criteria[0]?.status).toBe('pass');
+    expect(context.run.adaptation?.adapted).toBe(true);
+    expect(context.run.criteria[0]?.flaky).toBe(true);
+  });
+
+  it('never builds the CROSS-MECHANICS pair, at any retry setting', async () => {
+    // The property the supervisor's finding is actually about, and the one that must hold
+    // whatever `retries` says: the ORIGINAL failure never joins the adapted attempt list.
+    // Every attempt recorded on the criterion comes from the adapted execution, so the
+    // earliest of them is numbered past the first pass rather than being attempt 1.
+    const { context } = await run(flakyAfterAdaptation());
+
+    const attempts = context.run.criteria[0]?.attempts ?? [];
+    expect(attempts.length).toBeGreaterThan(0);
+    // The first pass took one attempt (numbered 1); every attempt here is later than that.
+    expect(Math.min(...attempts.map((record) => record.attempt))).toBeGreaterThan(1);
+  });
+
+  it('with retries OFF, an adapted pass carries no flake at all', async () => {
+    // The default, and the case the supervisor's instruction named.
+    const { adapt } = proposeWorking();
+    const { deps } = scripted([automated([browserProbe('p1')])], adapt);
+
+    const { context } = await run(deps);
+
+    expect(context.run.criteria[0]?.status).toBe('pass');
+    expect(context.run.criteria[0]?.flaky).toBeUndefined();
+    expect(context.run.criteria[0]?.attempts).toBeUndefined();
+    expect(summarizeFlakiness(context.run.criteria)).toMatchObject({ flakyCriteria: 0 });
+  });
+});
+
 describe('the codex findings', () => {
   it('offsets the adapted attempt past the first pass, so evidence cannot be overwritten', async () => {
     // P1. `src/surfaces/browser.ts` derives evidence filenames from criterion id, probe id
