@@ -251,6 +251,9 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     providerUsage: accumulator.providerUsage,
     environment: accumulator.environment,
     ...(accumulator.contract === undefined ? {} : { contract: accumulator.contract }),
+    // Spread for the same reason `contract` is: an unadapted run leaves the key out
+    // entirely rather than emitting an `undefined` for JSON.stringify to drop (story 5.6).
+    ...(accumulator.adaptation === undefined ? {} : { adaptation: accumulator.adaptation }),
   });
 
   const context: StageContext = {

@@ -490,6 +490,53 @@ export interface RunResultDocumentOnlyFields {
   readonly flakiness?: z.infer<typeof FlakinessCountsSchema>;
 }
 
+/* -- the mechanics adaptation (story 5.6) ----------------------------------------------- */
+
+/**
+ * The mirror of `domain/adaptation.ts`.
+ *
+ * `.strict()` like everything else here: an unknown key means a newer writer added
+ * something this build does not understand, and acting on a partial view of it would be
+ * exactly the silent drift `RunResultDocumentSchema` fails closed against.
+ *
+ * `from` and `to` are `BoundedTextSchema` -- the SAME inline-content shape evidence and
+ * 5.3's reviewer guidance use, not a second one. `to` is provider-authored text that was
+ * applied to an executable artifact, so it is persisted through the one bounded, redacted
+ * channel this file already has.
+ */
+const AppliedMechanicsChangeSchema = z
+  .object({
+    criterionId: z.string().min(1),
+    probeId: z.string().min(1),
+    field: z.enum(['path', 'scenario']),
+    from: BoundedTextSchema,
+    to: BoundedTextSchema,
+  })
+  .strict();
+
+/**
+ * AC1's run-level marker plus its audit record.
+ *
+ * `adapted` is a boolean rather than a `z.literal(true)` BECAUSE a refused proposal is
+ * recorded here with `adapted: false`. Recording the refusal is what keeps a hostile
+ * provider distinguishable from an absent one; making the marker a literal would force
+ * that fact to be thrown away to keep the shape legal.
+ */
+const RunAdaptationSchema = z
+  .object({
+    adapted: z.boolean(),
+    applied: z.array(AppliedMechanicsChangeSchema),
+    /** Executed, then thrown away because the criterion did not improve. See the domain type. */
+    discarded: z.array(AppliedMechanicsChangeSchema).optional(),
+    refusal: BoundedTextSchema.optional(),
+  })
+  .strict()
+  .refine((value) => !value.adapted || value.applied.length > 0, {
+    message:
+      "a run marked adapted must record what was applied -- an announced adaptation with no record is not auditable",
+    path: ['applied'],
+  });
+
 /**
  * The persisted shape.
  *
@@ -532,6 +579,16 @@ export const RunResultDocumentSchema = z
      * this change still parses (asserted in `tests/unit/schemas/result-explanation.test.ts`).
      */
     explanations: z.array(CriterionExplanationSchema).readonly().optional(),
+    /**
+     * OPTIONAL on read, and ABSENT on any run that did not adapt (story 5.6).
+     *
+     * `SCHEMA_VERSIONS.jsonReport` does NOT move for this key, following `flakiness`
+     * (5.4) and `needsHumanReason`/`reviewerGuidance` (5.3): a `result.json` stored
+     * before 5.6 does not carry it, and `.strict()` would refuse such a document if this
+     * key were required -- which is precisely the "a stored run from last week must stay
+     * readable" rule `schemas/versions.ts` states.
+     */
+    adaptation: RunAdaptationSchema.optional(),
   })
   .strict();
 
@@ -586,6 +643,29 @@ export function toRunResultDocument(result: RunResult): RunResultDocument {
     // default: `JSON.stringify` drops an `undefined`-valued key entirely, so an
     // unexplained run's document is byte-for-byte what it was before this story.
     ...(result.explanations === undefined ? {} : { explanations: result.explanations }),
+    // Same spread, same reason (story 5.6). THIS KEY IS LAST ON PURPOSE: the key order of
+    // this literal is the byte order of every stored document, so appending is the only
+    // change that leaves existing runs' prefixes identical.
+    ...(result.adaptation === undefined
+      ? {}
+      : {
+          // `applied` is spread for the reason `criteria` and `gates` are: the model's
+          // arrays are `readonly` and the document's are not. Copying here rather than
+          // widening either type keeps the domain immutable where it should be.
+          // Built explicitly rather than spread: the model's arrays are `readonly` and the
+          // document's are not, so a spread would carry the readonly type through. Same
+          // reason `criteria` and `gates` are copied above.
+          adaptation: {
+            adapted: result.adaptation.adapted,
+            applied: [...result.adaptation.applied],
+            ...(result.adaptation.discarded === undefined
+              ? {}
+              : { discarded: [...result.adaptation.discarded] }),
+            ...(result.adaptation.refusal === undefined
+              ? {}
+              : { refusal: result.adaptation.refusal }),
+          },
+        }),
   };
 }
 

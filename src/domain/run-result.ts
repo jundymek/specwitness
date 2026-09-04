@@ -22,6 +22,7 @@
  * AD-1: pure. Imports only sibling domain modules.
  */
 
+import type { RunAdaptation } from './adaptation.js';
 import type { DerivedCriterionResult } from './criterion-result.js';
 import type { Evidence } from './evidence.js';
 import type { GateResult } from './result.js';
@@ -212,4 +213,13 @@ export interface RunResult {
    * `exitCodeForOutcome`.
    */
   readonly explanations?: readonly CriterionExplanation[];
+  /**
+   * FR-18 / story 5.6 — the mechanics adaptation this run performed, if any.
+   *
+   * ABSENT unless `--adapt` was passed AND something was adaptable, which is what makes
+   * "a default run carries no marker and no record" a structural property rather than a
+   * value a reader has to interpret. See `domain/adaptation.ts` for why a REFUSED proposal
+   * is recorded here with `adapted: false` rather than not recorded at all.
+   */
+  readonly adaptation?: RunAdaptation;
 }

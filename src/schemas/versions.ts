@@ -12,6 +12,7 @@
  *   - story 1.6 adds `runManifest`
  *   - Epic 2 adds `contract` and `plan`
  *   - Epic 3 adds `jsonReport` (story 3.5 — done)
+ *   - Epic 5 adds `explanation` (story 5.5) and `adaptation` (story 5.6)
  *
  * Deliberately NOT here: any assert/validate-and-throw helper. What a version
  * MISMATCH means is artifact-specific — a run manifest wants "a newer
@@ -110,6 +111,23 @@ export const SCHEMA_VERSIONS = Object.freeze({
    * `reviewerGuidance`, and story 5.4's `flakiness`; none of them bumped it either.
    */
   explanation: 1,
+
+  /**
+   * The mechanics-adaptation payload a provider returns under `--adapt`
+   * (`src/schemas/adaptation.ts`), story 5.6.
+   *
+   * NOT a persisted artifact: nothing writes an adaptation payload to disk, and
+   * the adapted plan is an in-memory COPY that is deliberately never written
+   * back (`.specwitness/plans/<epic>.yaml` stays byte-identical across an
+   * adapted run). It is registered here anyway for the reason `epicSpec` is —
+   * the seam is versioned from day one, because the day the permitted mechanics
+   * surface changes, the shape must already be identifiable.
+   *
+   * Version 1 accepts `path` and `scenario` and NOTHING else. Widening it is a
+   * change to what a provider may alter at runtime, which is an ADR and an
+   * AD-2 conversation, never a routine bump.
+   */
+  adaptation: 1,
 } as const satisfies Record<string, number>);
 
 /** Keys of the registry. Derived — never hand-maintained. */

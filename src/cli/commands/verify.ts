@@ -68,8 +68,10 @@ import {
   resolvePlanPath,
   writePlanFileAtomically,
 } from '../../authoring/plan-file.js';
+import { createMechanicsAdapter } from '../../authoring/adaptation.js';
 import { compilePlan } from '../../authoring/plan.js';
 import { loadConfig, resolveRoleProvider, type SpecwitnessConfig } from '../../config/index.js';
+import type { MechanicsAdapter } from '../../domain/adaptation-port.js';
 import { ConfigError, InfraError, UsageError } from '../../domain/errors.js';
 import { normalizeEpicId } from '../../domain/ids.js';
 import type { Plan } from '../../domain/plan.js';
@@ -116,6 +118,7 @@ interface VerifyOptions {
   readonly json?: boolean;
   readonly ai?: boolean;
   readonly explain?: boolean;
+  readonly adapt?: boolean;
 }
 
 export function register(program: Command): void {
@@ -137,6 +140,14 @@ export function register(program: Command): void {
     // untouched by the flag's existence. What it buys is a NON-AUTHORITATIVE hypothesis
     // beside each failed criterion; it can change no status, no verdict and no exit code.
     .option('--explain', 'ask the explainer role for a non-authoritative failure hypothesis (FR-11)')
+    // Story 5.6. OPT-IN, and the default is silence: without it no adapter is wired into
+    // the probes stage at all, so there is no provider in scope on the probe path and a
+    // default run cannot spend quota (FR-18, Q66, AD-9's "determinism is the default").
+    .option(
+      '--adapt',
+      'let a provider propose new probe MECHANICS for a browser probe that failed on ' +
+        'element-not-found; assertions and expected values can never be changed (FR-18)',
+    )
     .action(async (epic: string, options: VerifyOptions) => {
       // Recording is the LAST act, per `cli/exit.ts`: anything that throws
       // before this point is classified by main's catch instead.
@@ -161,6 +172,26 @@ async function verify(
   // can never be mistaken for a verdict (ADR-002).
   const epic = normalizeEpicId(epicArgument);
   assertExplainIsCompatible(options);
+
+  // ⚠️ `--no-ai --adapt` IS REFUSED, NOT SILENTLY NO-OPED. Story 5.6, and it is a
+  // `UsageError` (exit 64) raised before anything is read, spawned or created — the same
+  // treatment a malformed epic id gets, and for the same reason: 64 sits outside 0-3 so a
+  // flag mistake can never be mistaken for a verdict (ADR-002).
+  //
+  // The alternative was letting `--no-ai` win and quietly dropping `--adapt`. A flag pair
+  // whose combination silently discards one of them is a flag pair people misread, and the
+  // one being discarded here is the one that spends subscription quota and changes what
+  // gets executed. An operator who typed both wants to be told, not guessed at. 5.5 reached
+  // the same answer independently for `--no-ai --explain`.
+  if (options.ai === false && options.adapt === true) {
+    throw new UsageError(
+      '--no-ai and --adapt cannot be combined',
+      'adaptation asks a provider to propose new probe mechanics, which is exactly what ' +
+        '--no-ai refuses. Drop --adapt for a zero-provider-call run, or drop --no-ai to ' +
+        'allow the one invocation adaptation costs',
+    );
+  }
+
   const explicitRoot = requireFlagValue('--root', options.root);
   const baseFlag = requireFlagValue('--base', options.base);
   const headFlag = requireFlagValue('--head', options.head);
@@ -261,6 +292,22 @@ async function verify(
 
   assertCouldEverAdjudicate(config, loaded);
 
+  // ⚠️ BUILT HERE, ABOVE `resolvePlan`, BECAUSE IT NEEDS NO PROVIDER — which is exactly the
+  // rule the block above states: "A NEW PRECONDITION THAT NEEDS NO PROVIDER GOES ABOVE
+  // HERE". Story 5.6, and it was the FOURTH review finding against that same line.
+  //
+  // Resolving and constructing the adapter is pure config work. Doing it after `resolvePlan`
+  // meant that `--adapt` with an unassigned role AND no plan on disk would compile a plan
+  // first — spending subscription quota and writing a file — and only then refuse with a
+  // configuration error. Raised as a P2 by the codex review of this branch.
+  //
+  // Built ONLY under `--adapt`, so `adapt` is `undefined` on every default run and the
+  // probes stage is handed no provider at all. It REFUSES rather than no-ops when the role
+  // is unassigned, for the reason the `--no-ai` clash is refused: an operator who asked for
+  // adaptation must be able to tell "nothing needed adapting" from "adaptation was never
+  // possible", and a silent no-op makes those two indistinguishable.
+  const adapt = options.adapt === true ? buildMechanicsAdapter(config, clock) : undefined;
+
   // The `--no-ai` refusal and the auto-compilation both have to happen while
   // there is still no run directory, no worktree and no process group in
   // existence — a refusal afterwards would leave a `result.json` on disk
@@ -279,6 +326,7 @@ async function verify(
   });
 
   assertSomethingToAdjudicate(config, planning.plan);
+
 
   // Creates the run directory and fsyncs its manifest BEFORE any resource is
   // acquired (AD-8), so a `kill -9` from here on still leaves a record that
@@ -416,6 +464,10 @@ async function verify(
               // Story 5.4. Zero for every surface unless the project declared otherwise,
               // so a run stays deterministic unless somebody asked for repetition (AD-9).
               retries: createRetryPolicy(config),
+              // Story 5.6. Spread, so a default run's `ProbesStageDeps` has NO `adapt` key
+              // rather than an explicit `undefined` — the difference is what makes "no
+              // provider is in scope on the probe path" true of the object itself.
+              ...(adapt === undefined ? {} : { adapt }),
             },
           }),
       // Write 1 of two: the crash-durable snapshot, at position 10 of 11. It is
@@ -679,6 +731,46 @@ interface PlanResolution {
  * silently rewrites a committed, reviewed artifact — `specwitness plan` is where that
  * decision is made, and its own four overwrite rules are written for it.
  */
+/**
+ * Builds the mechanics adapter for `--adapt` (story 5.6).
+ *
+ * SEPARATE FROM THE PLAN-AUTHOR RESOLUTION ABOVE, deliberately. They are different roles
+ * with different authority: a plan-author drafts an artifact a human reviews and commits,
+ * while this one changes what is executed inside a run that is already under way. A project
+ * that assigned one has not thereby assigned the other, and conflating them would let
+ * `ai.roles.plan-author` silently grant a permission nobody asked for.
+ *
+ * REFUSES rather than warning-and-continuing when the role is unassigned. The precedent
+ * above warns for a missing `plan-author` because that path has a legitimate degraded mode
+ * (gates-only, every criterion `skipped`). There is no degraded mode here: `--adapt` was
+ * typed, so the operator is waiting for adaptation, and a run that quietly did none would
+ * be indistinguishable from a run where nothing needed adapting.
+ */
+function buildMechanicsAdapter(config: SpecwitnessConfig, clock: Clock): MechanicsAdapter {
+  const resolved = resolveRoleProvider(config, 'mechanics-adapter');
+  if (resolved === undefined) {
+    throw new ConfigError(
+      'no provider is assigned to the "mechanics-adapter" role, so --adapt cannot propose anything',
+      "assign one under 'ai.roles.mechanics-adapter' in .specwitness/config.yaml, or drop " +
+        '--adapt to run the plan exactly as compiled',
+    );
+  }
+
+  const provider = providerForRole(resolved, {
+    processRunner: createProcessRunner(clock),
+    clock,
+    warn: (message: string) => process.stderr.write(`${message}\n`),
+  });
+  if (provider === undefined) {
+    throw new ConfigError(
+      `the "mechanics-adapter" role names provider "${resolved.name}", which could not be built`,
+      "check 'ai.providers' in .specwitness/config.yaml",
+    );
+  }
+
+  return createMechanicsAdapter({ provider, clock });
+}
+
 async function resolvePlan(input: {
   readonly projectRoot: string;
   readonly epic: string;

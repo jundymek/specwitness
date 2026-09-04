@@ -1,0 +1,3 @@
+[
+  "{\"proposals\": [{\"probeId\": \"submit-order\", \"mechanics\": {\"scenario\": \"click \\\"#x\\\"\", \"assertions\": [{\"description\": \"anything at all\", \"target\": {\"source\": \"title\"}, \"comparison\": \"equals\", \"expected\": \"whatever makes this pass\"}]}}]}"
+]

@@ -748,16 +748,84 @@ test('specwitness browser probe', async ({ page, context }) => {
       const step = payload.steps[index];
       outcome.phase = 'step ' + (index + 1) + ' (' + step.verb + ')';
       const locator = step.selector === undefined ? null : page.locator(step.selector).first();
-      if (step.verb === 'goto') {
-        await page.goto(step.url, { waitUntil: 'load' });
-      } else if (step.verb === 'click') {
-        await locator.click();
-      } else if (step.verb === 'fill') {
-        await locator.fill(step.value);
-      } else if (step.verb === 'waitFor') {
-        await locator.waitFor({ state: 'visible' });
-      } else {
-        throw new Error('the payload carried a verb this driver does not implement');
+
+      // WAS THE TARGET THERE BEFORE WE ACTED? Read only by the classifier below.
+      //
+      // count() resolves immediately and waits for nothing, so this is NOT a second bounded
+      // operation and the aggregate test-timeout arithmetic in #bounds is untouched - which
+      // an earlier version of this classifier got wrong by waiting here.
+      //
+      // A page that cannot answer defaults to TRUE, meaning "not a target miss": the safe
+      // direction, since the only thing this value can do is make a probe eligible for
+      // provider-driven adaptation.
+      let targetPresentBeforeStep = true;
+      if (step.selector !== undefined) {
+        try {
+          targetPresentBeforeStep = (await page.locator(step.selector).count()) > 0;
+        } catch (unknown) {
+          targetPresentBeforeStep = true;
+        }
+      }
+
+      try {
+        if (step.verb === 'goto') {
+          await page.goto(step.url, { waitUntil: 'load' });
+        } else if (step.verb === 'click') {
+          await locator.click();
+        } else if (step.verb === 'fill') {
+          await locator.fill(step.value);
+        } else if (step.verb === 'waitFor') {
+          await locator.waitFor({ state: 'visible' });
+        } else {
+          throw new Error('the payload carried a verb this driver does not implement');
+        }
+      } catch (stepError) {
+        // WHY THE PROBE COULD NOT LOOK, established HERE - inside the failing action's own
+        // catch - rather than remembered for later or inferred from the message text (story
+        // 5.6, closing D12). Three things make this the right place and they were each
+        // learned from a review finding:
+        //
+        //  1. SCOPE. Only THIS action's failure reaches this handler, so a later origin
+        //     violation, blocked navigation or failed read can never inherit a classification
+        //     that was about a step. Nothing is remembered between steps, so nothing can go
+        //     stale.
+        //  2. NO ADDED TIMEOUT BUDGET. An earlier version waited for the target as a separate
+        //     bounded operation before acting, which doubled the worst case for every
+        //     selector step while #bounds still budgeted one - so honest slow work could
+        //     exceed the aggregate and be killed. That is the same arithmetic bug this module
+        //     already fixed once; see #bounds. count() and url() resolve immediately
+        //     and wait for nothing, so the operation count is unchanged.
+        //  3. THE QUESTION IS ASKED OF THE PAGE BEFORE AND AFTER, not of the URL. A target
+        //     miss means the selector matched NOTHING BEFORE WE ACTED and still matches
+        //     nothing. Checking only afterwards would misread a click that succeeded far
+        //     enough to navigate and then failed - its target is legitimately gone - and
+        //     calling that a locator miss would invite an adaptation for a failure that had
+        //     nothing to do with the locator.
+        //
+        //     An earlier version compared page.url() before and after to detect that
+        //     navigation. It missed a SAME-URL navigation - a reload, or a click that
+        //     re-navigates to the same address - which leaves the URL identical while the
+        //     clicked element is legitimately gone. Raised by the codex review. Asking
+        //     before we act needs no navigation detection at all.
+        //
+        // A page that cannot answer at all is a dead browser, never a target miss.
+        if (step.selector !== undefined) {
+          if (targetPresentBeforeStep) {
+            // The selector matched before we acted, so whatever went wrong was not the
+            // locator being stale. Never adaptable.
+            outcome.reason = 'other';
+          } else {
+            try {
+              outcome.reason =
+                (await page.locator(step.selector).count()) === 0 ? 'step-target-missing' : 'other';
+            } catch (unreachable) {
+              // The page could not answer at all, so the browser is gone rather than the
+              // element. Never adaptable.
+              outcome.reason = 'unreachable';
+            }
+          }
+        }
+        throw stepError;
       }
       // After EVERY step, not only after a goto: a click is the one that can leave. The
       // interception above already refused to SEND it; this is what turns a refused
@@ -782,6 +850,12 @@ test('specwitness browser probe', async ({ page, context }) => {
   } catch (error) {
     outcome.ok = false;
     outcome.message = describe(error);
+    // The reason, when there is one, was set where it was ESTABLISHED: inside the failing
+    // action's own catch in the step loop above. Nothing is classified HERE, and that is
+    // deliberate - by the time an error reaches this outer catch, later steps may have run
+    // and the page may have moved, so any question asked of it would be about a different
+    // page from the one that failed. It is also unset on every success path, because the
+    // only code that assigns it rethrows immediately.
   } finally {
     try {
       outcome.finalUrl = page.url();
@@ -978,6 +1052,8 @@ interface ScenarioPayload {
 interface DriverOutcome {
   readonly ok: boolean;
   readonly phase?: string;
+  /** Story 5.6: why the probe could not look, when the driver could establish it. */
+  readonly reason?: string;
   readonly message?: string;
   readonly finalUrl?: string | null;
   readonly reads?: Readonly<Record<string, { present: boolean; value?: string; why?: string }>>;
@@ -2146,7 +2222,21 @@ function classifyFailure(
 
   // The driver ran and reported a failure of its own: a navigation that never completed, a
   // step whose element never appeared, or a crash mid-run. `phase` names which.
+  //
+  // Story 5.6: `reason` is the STRUCTURED half of the same answer, established by the driver
+  // by asking the page rather than by anyone reading this message. It is validated against
+  // the closed set here because `outcome` is parsed from a file on disk and is therefore
+  // untrusted — an unrecognised value is dropped rather than passed through, so a hand-edited
+  // driver result cannot invent an adaptable reason.
+  const reason =
+    outcome.reason === 'step-target-missing' ||
+    outcome.reason === 'unreachable' ||
+    outcome.reason === 'other'
+      ? outcome.reason
+      : undefined;
+
   return {
+    ...(reason === undefined ? {} : { reason }),
     message: redact(
       `the browser probe against ${safeUrl} failed during ${outcome.phase ?? 'execution'}: ` +
         `${outcome.message ?? 'no reason was reported'}`,

@@ -45,6 +45,7 @@ import {
   GATE_STATUSES,
   type NeedsHumanReason,
 } from '../domain/result.js';
+import type { AppliedMechanicsChange, RunAdaptation } from '../domain/adaptation.js';
 import type { CriterionExplanation, RunResult } from '../domain/run-result.js';
 import type { StageTimelineEntry } from '../domain/stage.js';
 import { MARK_WIDTH, criterionMark, gateMark, stageMark, verdictLine } from './format.js';
@@ -543,6 +544,93 @@ function pointerLines(texts: readonly BoundedText[], indent: string): string[] {
 }
 
 /**
+ * The mechanics-adaptation block (story 5.6, AC1).
+ *
+ * ⚠️ **AN ADAPTED PASS MUST NEVER READ AS AN ORDINARY PASS**, and this block is the only
+ * thing standing between the two in the human report. A criterion that passed after its
+ * probe was rewritten renders in the Criteria section exactly like one that passed as
+ * compiled — there is no per-criterion marker, deliberately, because `DerivedCriterionResult`
+ * is produced by one function this story does not touch. So the run-level block has to
+ * carry the whole message, and it says what changed, at which probe, and from what to what.
+ *
+ * RENDERED FOR A REFUSAL TOO. "A provider proposed something illegal and was refused" is a
+ * fact a reviewer should see; printing nothing would make a hostile provider look exactly
+ * like an absent one. The heading says which case it is, so the two are never confused.
+ *
+ * BOUNDED (FR-29): every value is a `BoundedText` that was redacted and capped at capture,
+ * and `boundedLines` prints it as-is with the one truncation marker. Nothing here
+ * re-redacts, re-truncates or opens a file (AD-10, AD-11).
+ *
+ * VOCABULARY, agreed with 5.5 at wave-3 intent-sync so the report does not use one word for
+ * two things: this block says "adapted", "proposed" and "applied", and never "retry" or
+ * "flaky" (5.4's, meaning repetition of an UNCHANGED probe) and never "explanation" or
+ * "hypothesis" (5.5's, meaning text that changed nothing).
+ */
+function changeLines(change: AppliedMechanicsChange): string[] {
+  return [
+    `  ${change.criterionId} · probe ${change.probeId} · ${change.field}`,
+    ...boundedLines('was', change.from, '    '),
+    ...boundedLines('now', change.to, '    '),
+  ];
+}
+
+/**
+ * What was EXECUTED and then thrown away because the criterion did not improve.
+ *
+ * ⚠️ Rendered in BOTH branches, and that is the point. Raised as a P2 by the codex
+ * re-review: the JSON audit carried these and the terminal did not, so a human reading the
+ * report could not see mechanics a browser had genuinely run. Worse, the unadapted branch
+ * said the results were "exactly what the compiled plan produced" — true of the RESULTS and
+ * false about what was executed.
+ *
+ * "Not kept" and "not executed" are different facts and the report now distinguishes them.
+ */
+function discardedLines(adaptation: RunAdaptation): string[] {
+  const discarded = adaptation.discarded ?? [];
+  if (discarded.length === 0) {
+    return [];
+  }
+
+  return [
+    '',
+    `  ${plural(discarded.length, 'change was', 'changes were')} executed and then DISCARDED,`,
+    '  because the re-executed probe did not pass. The criterion kept its original outcome',
+    '  and its original evidence; these ran and changed nothing:',
+    '',
+    ...discarded.flatMap(changeLines),
+  ];
+}
+
+function adaptationLines(adaptation: RunAdaptation): string[] {
+  if (!adaptation.adapted) {
+    return [
+      '  No adaptation was applied, and every criterion kept its original outcome and its',
+      '  original evidence.',
+      ...(adaptation.refusal === undefined
+        ? []
+        : boundedLines('Reason', adaptation.refusal, '  ')),
+      ...discardedLines(adaptation),
+    ];
+  }
+
+  return [
+    `  ${plural(adaptation.applied.length, 'probe mechanic was', 'probe mechanics were')} changed`,
+    '  during this run. A criterion below may therefore have passed by looking in a',
+    '  DIFFERENT place from the one the committed plan describes.',
+    '',
+    '  The plan file on disk was NOT modified.',
+    '',
+    ...adaptation.applied.flatMap(changeLines),
+    ...discardedLines(adaptation),
+    // ⚠️ RENDERED ON THIS ARM TOO. A proposal that could not be EXECUTED appears in neither
+    // `applied` nor `discarded` — both of those mean it ran — so without this it would
+    // vanish from a run that also adapted something successfully, and the report would be
+    // silently less complete than the JSON beside it.
+    ...(adaptation.refusal === undefined ? [] : boundedLines('Note', adaptation.refusal, '  ')),
+  ];
+}
+
+/**
  * The whole report.
  *
  * Returns a string and prints nothing: the caller owns stream discipline
@@ -597,6 +685,13 @@ export function renderTerminal(result: RunResult): string {
             criterionLines(entry, result.environment.runDirectory),
           ),
     ),
+
+    // Story 5.6. Immediately after the criteria it qualifies, because a reader who has just
+    // seen a criterion pass is the reader who needs to know the probe was changed. Placement
+    // agreed with 5.5 at intent-sync: this block here, the non-authoritative one last.
+    ...(result.adaptation === undefined
+      ? []
+      : section('Adaptation', adaptationLines(result.adaptation))),
 
     ...section('Counts', [
       `  Criteria:  ${CRITERION_STATUSES.map((s) => `${criterionCounts[s]} ${s}`).join(' · ')}` +
