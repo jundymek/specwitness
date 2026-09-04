@@ -44,7 +44,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { SpecwitnessConfig } from '../../../src/config/index.js';
 import { configSchema } from '../../../src/config/schema.js';
 import type { RunResult } from '../../../src/domain/run-result.js';
-import { explainVerifiedRun } from '../../../src/cli/verify/explain.js';
+import { explainVerifiedRun, publishExplainedRun } from '../../../src/cli/verify/explain.js';
 import { FixedClock } from '../../fakes/ports.js';
 import { fullyPopulatedRunResult } from '../../fixtures/run-result.js';
 
@@ -272,5 +272,87 @@ describe('nothing is spent on a run with nothing to explain', () => {
     // into a note — so this asserts the note is the CHEAP one, not the caught one.
     expect(output.note).toMatch(/nothing to explain/);
     expect(output.note).not.toMatch(/could not be honoured/);
+  });
+});
+
+describe('publishing the explained run cannot break the verification', () => {
+  /**
+   * FOUND BY REVIEW, and it is the sharpest instance of this story's own subject.
+   *
+   * `RunStore.writeResult` can throw — a full disk, a permission revoked between
+   * `onComplete`'s write and this one. An exception escaping the command is caught by
+   * `main.ts` and classified as an INFRASTRUCTURE FAILURE, exit 3. So a completed
+   * verification whose verdict was already decided would have been reported as an infra
+   * error because an OPTIONAL convenience could not be filed — the exact guarantee the
+   * whole story rests on, broken by the one path that touches the disk after the verdict
+   * exists.
+   *
+   * It also fires on the AC2 failure routes, which write purely to record the
+   * `providerUsage` of a call that did NOT work.
+   */
+  const explained: RunResult = {
+    ...fullyPopulatedRunResult(),
+    explanations: [{ criterionId: 'E7-03', explanation: 'a hypothesis' }],
+  };
+  const original = fullyPopulatedRunResult();
+
+  it('returns the explained run when the write commits', async () => {
+    const written: RunResult[] = [];
+
+    const published = await publishExplainedRun({
+      explained,
+      original,
+      writeResult: async (result) => {
+        written.push(result);
+        return { durable: true };
+      },
+      warn: () => undefined,
+    });
+
+    expect(published).toBe(explained);
+    expect(written).toEqual([explained]);
+  });
+
+  it('falls back to the stored run when the write THROWS, and never rethrows', async () => {
+    const warnings: string[] = [];
+
+    const published = await publishExplainedRun({
+      explained,
+      original,
+      writeResult: async () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+      warn: (message) => warnings.push(message),
+    });
+
+    // NOT the explained run. `writeResult` stages and renames atomically, so a throw means
+    // the rename did not commit and the document `onComplete` wrote is intact on disk — the
+    // run WITHOUT the hypotheses. Returning the explained one anyway would make the terminal
+    // and `--json` print bytes that disagree with the stored file, which is exactly the
+    // AD-11/Q53 drift the single serializer exists to prevent.
+    expect(published).toBe(original);
+    expect(published.explanations).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('the verification is complete and stored');
+    expect(warnings[0]).toContain('discarded');
+  });
+
+  it('keeps the explained run when only the durability barrier failed', async () => {
+    // A DIFFERENT CONDITION, reported differently. `rename(2)` committed and only the fsync
+    // after it did not: the document IS published, so it is rendered, and the operator is
+    // told its survival of a power loss is unconfirmed. Collapsing this into the throw case
+    // would discard hypotheses that are sitting on disk.
+    const warnings: string[] = [];
+
+    const published = await publishExplainedRun({
+      explained,
+      original,
+      writeResult: async () => ({ durable: false, barrier: 'fsync refused' }),
+      warn: (message) => warnings.push(message),
+    });
+
+    expect(published).toBe(explained);
+    expect(warnings[0]).toContain('could not be made durable');
+    expect(warnings[0]).toContain('fsync refused');
   });
 });

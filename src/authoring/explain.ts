@@ -150,8 +150,12 @@ export const MAX_EXPLAINED_CRITERIA = 20;
 /** Per-field prompt cap. The values are already redacted; this bounds cost, not exposure. */
 const FIELD_CAP_CHARS = 400;
 
-/** Whole-prompt cap, in characters. Bounded output is a house convention (FR-29). */
-const PROMPT_CAP_CHARS = 24_000;
+/**
+ * Whole-prompt cap, in characters. Bounded output is a house convention (FR-29).
+ *
+ * Exported so a test asserts against THIS number rather than a hand-copied duplicate of it.
+ */
+export const PROMPT_CAP_CHARS = 24_000;
 
 /**
  * The cap on ONE returned hypothesis, in bytes.
@@ -315,7 +319,7 @@ export function buildExplainPrompt(
   result: RunResult,
   criteria: readonly DerivedCriterionResult[],
 ): string {
-  const lines: string[] = [
+  const header: string[] = [
     'You are assisting a verification tool called SpecWitness.',
     '',
     'A verification run has finished and some acceptance criteria did not pass. The',
@@ -333,44 +337,67 @@ export function buildExplainPrompt(
     '--- FAILED CRITERIA ---',
   ];
 
+  const body: string[] = [];
+
   for (const criterion of criteria) {
-    lines.push(
+    body.push(
       '',
       `criterionId: ${criterion.criterionId}`,
       `status: ${criterion.status} (severity ${criterion.severity})`,
       `statement: ${clip(criterion.statement)}`,
     );
     if (criterion.expected !== undefined) {
-      lines.push(`expected: ${clip(criterion.expected)}`);
+      body.push(`expected: ${clip(criterion.expected)}`);
     }
     if (criterion.actual !== undefined) {
-      lines.push(`actual: ${clip(criterion.actual)}`);
+      body.push(`actual: ${clip(criterion.actual)}`);
     }
     if (criterion.evidence !== undefined && criterion.evidence.length > 0) {
-      lines.push(
+      body.push(
         `evidence: ${criterion.evidence.map((ref) => `${ref.kind} at ${ref.path}`).join(', ')}`,
       );
     }
   }
 
-  lines.push('', '--- EVIDENCE SUMMARIES (already redacted; this is all there is) ---');
+  body.push('', '--- EVIDENCE SUMMARIES (already redacted; this is all there is) ---');
   if (result.evidence.length === 0) {
-    lines.push('(none captured)');
+    body.push('(none captured)');
   } else {
     for (const evidence of result.evidence) {
-      lines.push(`- ${summarizeEvidence(evidence)}`);
+      body.push(`- ${summarizeEvidence(evidence)}`);
     }
   }
 
-  lines.push(
+  const footer: string[] = [
     '',
     '--- RESPOND WITH ONLY THIS JSON ---',
     '{"explanations":[{"criterionId":"<one of the ids above>","hypothesis":"<your text>"}]}',
     '',
     'Use only criterionIds listed above; any other id is discarded.',
-  );
+  ];
 
-  return clip(lines.join('\n'), PROMPT_CAP_CHARS);
+  // THE CAP FALLS ON THE BODY ALONE, and never on the instructions.
+  //
+  // The first version clipped the assembled prompt as one string, which bounds it correctly
+  // and cuts off the wrong end: the response-shape line and the valid-ids rule are the LAST
+  // thing in the document, so exactly the runs with the most to explain would have sent a
+  // provider a prompt that stops mid-sentence and never says what to reply with. Those runs
+  // would then burn the whole retry budget on schema rejections — the failure arriving
+  // precisely where the feature was most wanted. Found by review.
+  //
+  // `header` and `footer` are fixed literals of known length, so the body's budget is what
+  // is left over; `Math.max(0, …)` keeps it defined even if the framing ever grows past the
+  // cap, in which case the instructions survive and the evidence does not — the right way
+  // round. `clip` marks the cut with an ellipsis, so a truncated body reads as truncated.
+  // The empty string stands in for the body slot, so this measures the framing EXACTLY as
+  // it will appear — including both separator newlines the body sits between. Measuring
+  // `[...header, ...footer]` instead undercounts by one separator, and `clip` adds an
+  // ellipsis on top, which is how the first version of this overshot the cap by two
+  // characters. The `- 1` is that ellipsis.
+  const framing = [...header, '', ...footer].join('\n').length;
+  const budget = Math.max(0, PROMPT_CAP_CHARS - framing - 1);
+
+  return [...header, clip(body.join('\n'), budget), ...footer].join('\n');
 }
 
 /**

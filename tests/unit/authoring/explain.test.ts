@@ -36,6 +36,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EXPLANATION_CAP_BYTES,
   MAX_EXPLAINED_CRITERIA,
+  PROMPT_CAP_CHARS,
   buildExplainPrompt,
   explainRun,
   explainableCriteria,
@@ -126,7 +127,47 @@ describe('AC1 — the prompt carries the three required inputs, and nothing forb
     const prompt = buildExplainPrompt(huge, explainableCriteria(huge));
 
     // A prompt is a subscription cost and a context window. Summaries, not dumps.
-    expect(prompt.length).toBeLessThan(30_000);
+    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CAP_CHARS);
+  });
+
+  it('keeps the response instructions when the body is bounded away', () => {
+    // FOUND BY REVIEW. Clipping the assembled prompt as one string bounds it correctly and
+    // cuts off the WRONG END: the response-shape line and the valid-ids rule are last, so
+    // exactly the runs with the most to explain would send a prompt that stops mid-sentence
+    // and never says what to reply with — burning the whole retry budget on schema
+    // rejections, precisely where the feature was most wanted.
+    const base = fullyPopulatedRunResult();
+    const template = base.criteria.find((c) => c.status === 'fail') as DerivedCriterionResult;
+    const huge: RunResult = {
+      ...base,
+      criteria: Array.from({ length: MAX_EXPLAINED_CRITERIA }, (_unused, index) => ({
+        ...template,
+        criterionId: `E9-${index}`,
+        statement: 'x'.repeat(50_000),
+        actual: 'y'.repeat(50_000),
+      })),
+      // `result.evidence` is the genuinely UNBOUNDED input here — criteria are capped by
+      // `MAX_EXPLAINED_CRITERIA` and every field by `FIELD_CAP_CHARS`, but a long run can
+      // hold arbitrarily many evidence members. Repeating the fixture's own members is what
+      // pushes this past the whole-prompt cap, so the test exercises the input that can
+      // actually overflow it rather than one that merely looks large.
+      evidence: Array.from({ length: 60 }, () => base.evidence).flat(),
+    };
+
+    const prompt = buildExplainPrompt(huge, explainableCriteria(huge));
+
+    // The bound really was reached, so nothing below passes vacuously.
+    expect(prompt.length).toBeGreaterThan(PROMPT_CAP_CHARS - 4_000);
+    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CAP_CHARS);
+
+    // The instructions survive at BOTH ends.
+    expect(prompt).toContain('NON-AUTHORITATIVE');
+    expect(prompt).toMatch(/Do NOT propose a change/);
+    expect(prompt).toContain('--- RESPOND WITH ONLY THIS JSON ---');
+    expect(prompt).toContain('"criterionId"');
+    expect(prompt).toContain('Use only criterionIds listed above');
+    // And the body really was cut, so this is not passing because nothing was bounded.
+    expect(prompt).toContain('…');
   });
 });
 

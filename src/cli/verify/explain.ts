@@ -160,3 +160,58 @@ export async function explainVerifiedRun(
     };
   }
 }
+
+/**
+ * Publish the explained run, or fall back to the run that is already stored.
+ *
+ * EXTRACTED SO ITS FAILURE HANDLING IS TESTABLE, which is why `releaseRun` and
+ * `armInterruptNotice` are their own modules too — the failure window here is inside a
+ * single process, between `onComplete`'s write and this one, and cannot be opened from
+ * outside.
+ *
+ * THE DEFECT THIS EXISTS TO CLOSE, found by review. `RunStore.writeResult` can THROW — a
+ * full disk, a permission revoked between the two writes. An exception escaping the
+ * command is caught by `main.ts` and classified as an INFRASTRUCTURE FAILURE, exit 3. So a
+ * completed verification whose verdict was already decided would have been reported as an
+ * infra error because an OPTIONAL convenience could not be filed. That is the exact
+ * guarantee this story rests on, broken by the one path that touches the disk after the
+ * verdict exists. It also fires on the AC2 failure routes, which write purely to record the
+ * `providerUsage` of a call that did not work.
+ *
+ * ON FAILURE THE AUGMENTATION IS DISCARDED, not merely warned about — and that is the part
+ * worth reading twice. `writeResult` stages and renames atomically, so a throw means the
+ * rename did not commit and the document `onComplete` wrote is intact on disk: the run
+ * WITHOUT the hypotheses. Returning the explained run anyway would make the terminal and
+ * `--json` show bytes that disagree with the stored file, which is the AD-11/Q53 drift the
+ * single serializer exists to prevent. Returning `original` keeps all three in agreement,
+ * and AC2's "the explanation is simply absent with a note" covers this route like the rest.
+ */
+export async function publishExplainedRun(input: {
+  /** The run carrying the hypotheses. */
+  readonly explained: RunResult;
+  /** The run already on disk, returned unchanged if the write does not commit. */
+  readonly original: RunResult;
+  /** `RunStore.writeResult`, bound to this run. AD-8: the sole writer, never a raw path. */
+  readonly writeResult: (result: RunResult) => Promise<{ readonly durable: boolean; readonly barrier?: string }>;
+  readonly warn: (message: string) => void;
+}): Promise<RunResult> {
+  try {
+    const write = await input.writeResult(input.explained);
+    if (!write.durable) {
+      // The document IS published - `rename(2)` committed - and only the durability barrier
+      // after it did not. Distinct from the catch below, and reported distinctly: one says
+      // "it is stored but its survival of a power loss is unconfirmed", the other says "it
+      // is not stored at all".
+      input.warn(
+        `the run result was written but could not be made durable: ${write.barrier ?? 'the directory fsync did not complete'}`,
+      );
+    }
+    return input.explained;
+  } catch (error) {
+    input.warn(
+      'the verification is complete and stored, but the explainer output could not be ' +
+        `written beside it, so it has been discarded: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return input.original;
+  }
+}

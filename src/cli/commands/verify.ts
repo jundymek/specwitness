@@ -102,7 +102,7 @@ import { createDoctorEffects } from '../doctor/effects.js';
 import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
 import { armInterruptNotice } from '../verify/interrupt.js';
-import { explainVerifiedRun } from '../verify/explain.js';
+import { explainVerifiedRun, publishExplainedRun } from '../verify/explain.js';
 import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
 
@@ -518,12 +518,15 @@ async function verify(
       // could not be explained is not rewritten at all — the stored bytes are
       // then not merely equivalent to the unexplained ones, they were never
       // touched.
-      const write = await store.writeResult(created.runId, published);
-      if (!write.durable) {
-        printWarning(
-          `the run result was written but could not be made durable: ${write.barrier ?? 'the directory fsync did not complete'}`,
-        );
-      }
+      //
+      // AND IT IS CONTAINED against a write that throws — see `publishExplainedRun`,
+      // which is its own function precisely so that failure handling is testable.
+      published = await publishExplainedRun({
+        explained: published,
+        original: result,
+        writeResult: async (toStore) => await store.writeResult(created.runId, toStore),
+        warn: printWarning,
+      });
     }
   }
 
