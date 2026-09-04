@@ -96,7 +96,11 @@
  */
 
 import { deriveCriterionResult } from '../../domain/criterion-result.js';
+import type { AppliedMechanicsChange } from '../../domain/adaptation.js';
+import type { AdaptationCandidate, MechanicsAdapter } from '../../domain/adaptation-port.js';
+import { adaptCriteria, AdaptationRefused } from '../../domain/adaptation-apply.js';
 import type {
+  ContractCriterionRef,
   DerivationOptions,
   DerivedCriterionResult,
   ProbeAttempt,
@@ -105,6 +109,7 @@ import type {
 } from '../../domain/criterion-result.js';
 import { InfraError } from '../../domain/errors.js';
 import type { Evidence, RedactionOptions } from '../../domain/evidence.js';
+import { boundedText } from '../../domain/evidence.js';
 import type { PlanCriterion, ProbeSpec } from '../../domain/plan.js';
 import { resolveMechanics, type ResolvedData } from '../../domain/plan-data.js';
 import type { CriterionStatus } from '../../domain/result.js';
@@ -187,6 +192,16 @@ export interface ProbesStageDeps {
   readonly dispatch: ProbeDispatcher;
   /** Defaults to zero retries for every surface. */
   readonly retries?: RetryPolicy;
+  /**
+   * FR-18 / story 5.6 — the mechanics adapter, when `--adapt` was passed.
+   *
+   * ABSENT BY DEFAULT, and the absence is the FR-18/Q66 guarantee rather than a
+   * convenience: with no adapter wired there is no provider in scope on this path at all,
+   * so a default `verify` run cannot spend quota even by mistake. Injected from the edge
+   * for the same AD-1 reason `dispatch` is — `src/pipeline/**` may not import
+   * `src/authoring/**`, so the caller composes and passes a port in.
+   */
+  readonly adapt?: MechanicsAdapter;
   /** Config-declared extra redaction patterns (AD-10), threaded into every derivation. */
   readonly redaction?: RedactionOptions;
 }
@@ -250,6 +265,7 @@ async function executePlan(
   );
 
   let probesRun = 0;
+  const executed: ExecutedCriterion[] | undefined = deps.adapt === undefined ? undefined : [];
 
   for (const entry of deps.criteria) {
     const criterion = contractCriteria.get(entry.criterionId);
@@ -305,13 +321,307 @@ async function executePlan(
       }),
     );
 
+    // Story 5.6: remembered ONLY when an adapter is wired, so a default run allocates
+    // nothing and the adaptation path is provably inert rather than merely unused.
+    executed?.push({
+      index: context.run.criteria.length,
+      entry,
+      criterion,
+      attempts,
+      result: select(perProbe),
+    });
+
     context.run.criteria.push(select(perProbe));
+  }
+
+  if (deps.adapt !== undefined && executed !== undefined) {
+    probesRun += await adaptAndReExecute(deps, context, cwd, executed, deps.adapt);
   }
 
   return stageOk(
     `${probesRun} ${probesRun === 1 ? 'probe' : 'probes'} executed across ` +
       `${deps.criteria.length} planned ${deps.criteria.length === 1 ? 'criterion' : 'criteria'}`,
   );
+}
+
+
+/* == story 5.6: the mechanics adaptation pass ========================================== */
+
+/** One criterion as the first pass left it, kept only when an adapter is wired. */
+interface ExecutedCriterion {
+  /** Position in `context.run.criteria`, so a replacement lands where the original was. */
+  readonly index: number;
+  readonly entry: PlanCriterion;
+  readonly criterion: ContractCriterionRef;
+  readonly attempts: Map<string, ProbeAttempt[]>;
+  readonly result: DerivedCriterionResult;
+}
+
+/**
+ * Which failing browser probes are worth adapting.
+ *
+ * ⚠️ **AN `execError` IS NEVER ADAPTED, AND THIS IS THE LINE THAT ENFORCES IT.** AC1 scopes
+ * the trigger to a probe *failing on element-not-found* — a COSMETIC DRIFT signal — and
+ * `src/surfaces/browser.ts` is explicit that the two are different observations:
+ *
+ *   the probe LOOKED and saw the wrong value  => an unsatisfied assertion => `fail`
+ *   the probe COULD NOT LOOK at all           => `execError`              => `error`
+ *
+ * A browser that crashed, failed to launch or timed out before the first assertion tells us
+ * nothing about a locator. Proposing a new one there would be guessing at a selector while
+ * the browser is on fire — and worse, it would spend quota and produce a change on evidence
+ * that does not exist. So the candidate set is `status === 'fail'` only: `error`,
+ * `needs_human`, `skipped` and `pass` are all excluded, and `error` is excluded even though
+ * it is the loudest failure in the report.
+ *
+ * ⚠️ **THE COST OF THAT RULE, STATED BECAUSE IT IS LARGER THAN IT LOOKS AND WAS MEASURED
+ * RATHER THAN ASSUMED.** In 5.2's classification a missing element produces two DIFFERENT
+ * outcomes depending on where it is missing:
+ *
+ *   an ASSERTION reads a selector matching nothing  =>  unsatisfied assertion  =>  `fail`
+ *   a SCENARIO STEP cannot find its target          =>  `execError`            =>  `error`
+ *
+ * So the most obvious motivating case — "Create company" is relabelled and the probe CLICKS
+ * it — lands in `error` and is NOT adapted here. What remains adaptable is drift where the
+ * steps still SUCCEED and the page is simply wrong: a renamed route, or a deprecated control
+ * that is still present and now leads elsewhere. Both are proved end to end against a real
+ * browser in `tests/integration/surfaces/browser-adaptation.test.ts`, which also carries a
+ * test that MEASURES this limitation so it cannot drift silently.
+ *
+ * The rule is not widened to cover it, because the `execError` for a missing step target is
+ * shaped identically to the one a mid-run CRASH produces — the only difference is a `phase`
+ * word inside a prose message, and branching on that would be classifying by matching an
+ * adapter's prose, which this codebase rejects as a technique. Closing it properly means a
+ * structured reason on `ProbeExecError`, an additive change to a merged type owned by 5.2.
+ * Reported to the owner rather than smuggled in. See DECISIONS.md D12.
+ */
+function adaptationCandidates(executed: readonly ExecutedCriterion[]): AdaptationCandidate[] {
+  const candidates: AdaptationCandidate[] = [];
+
+  for (const record of executed) {
+    // `fail` and nothing else. `outcomeOf` has already made `execError` outrank any
+    // assertion the probe managed to evaluate, so a criterion that could not look is
+    // `error` here and never reaches this branch.
+    if (record.result.status !== 'fail' || record.entry.disposition !== 'automated') {
+      continue;
+    }
+
+    for (const probe of record.entry.probes) {
+      if (probe.surface !== 'browser') {
+        continue;
+      }
+      const probeAttempts = record.attempts.get(probe.id) ?? [];
+      // The probe must itself have LOOKED. A criterion can fail because one of its probes
+      // failed while a browser probe beside it errored; adapting that browser probe would
+      // be the same guess-while-on-fire, reached by a different door.
+      const looked = probeAttempts.some(
+        (attempt) => attempt.execError === undefined && attempt.assertionEvaluations.length > 0,
+      );
+      const unsatisfied = probeAttempts
+        .flatMap((attempt) => attempt.assertionEvaluations)
+        .find((assertion) => !assertion.satisfied);
+      if (!looked || unsatisfied === undefined) {
+        continue;
+      }
+
+      candidates.push({
+        criterionId: record.criterion.criterionId,
+        statement: record.criterion.statement,
+        probeId: probe.id,
+        path: probe.mechanics.path,
+        scenario: probe.mechanics.scenario,
+        // ALREADY REDACTED AND BOUNDED by `deriveCriterionResult` (AD-10). Nothing here
+        // re-reads an evidence file, and no trace or screenshot is opened — see
+        // `AdaptationCandidate` for why that absence is the point.
+        ...(record.result.expected === undefined ? {} : { expected: record.result.expected }),
+        ...(record.result.actual === undefined ? {} : { actual: record.result.actual }),
+      });
+    }
+  }
+
+  return candidates;
+}
+
+/**
+ * Proposes, validates, applies to a COPY, re-executes, and records.
+ *
+ * ============================================================================
+ * ⚠️ AN ADAPTED RE-EXECUTION NEVER ENTERS 5.4's ATTEMPT LIST. READ THIS BEFORE EDITING.
+ * ============================================================================
+ *
+ * "The flake rule is untouched" is TRUE and it is NOT SUFFICIENT, and a later reader will
+ * otherwise believe the first half covers this case. The merged rule computes its answer
+ * from whatever attempt list it is handed:
+ *
+ *   `criterion-result.ts:441-443` — flaky = status is pass AND some EARLIER attempt was not
+ *   `criterion-result.ts:445-452` — the per-attempt record exists when attempts.length > 1
+ *
+ * and `executePlan` above keys attempts by probe id. Since `probeId` is a pure SELECTOR
+ * that changes no identity, a re-execution of probe P would land in P's own array by
+ * construction, producing `[fail with ORIGINAL mechanics, pass with ADAPTED mechanics]` —
+ * exactly the input that yields `flaky: true`, a per-attempt record, and an entry in the
+ * run-level flakiness summary.
+ *
+ * That would be a lie. A retry repeats the SAME probe and changes only how often something
+ * was tried; an adaptation CHANGES the probe and is a different fact about a run. Reporting
+ * it as flake would tell a human the UI is intermittent when what actually happened is that
+ * the probe was rewritten — the one way this story could launder a real failure into noise.
+ *
+ * **SO THE RE-EXECUTION COLLECTS INTO A FRESH MAP** (`executeCriterion` builds its own) and
+ * the replacement result is derived from THAT list alone. It therefore has exactly one
+ * attempt, so `flaky` is structurally false and the per-attempt record is structurally
+ * absent — never constructed, rather than constructed and filtered out. Do not "simplify"
+ * this by merging the two maps.
+ *
+ * Raised by the epic-5 supervisor from the merged code before any run had shown it.
+ *
+ * ============================================================================
+ * AN ADAPTATION MAY ONLY EVER TURN A `fail` INTO A `pass`
+ * ============================================================================
+ *
+ * The replacement is taken ONLY when the re-derived criterion is `pass`. Anything else —
+ * still failing, newly erroring, a browser that died on the second look — leaves the
+ * ORIGINAL result standing with its ORIGINAL evidence, exactly as AC2 requires, and the run
+ * is not marked `adapted`.
+ *
+ * That gives a property worth stating on its own: **an adapted run's verdict can only ever
+ * improve, never degrade.** A hostile or merely incompetent proposal cannot introduce a new
+ * failure, cannot turn a `fail` into an `error`, cannot reach `needs_human`, and cannot move
+ * the exit code in the bad direction. The blast radius of the whole feature is bounded to
+ * "one criterion that was already failing now passes, and the run says loudly that it was
+ * adapted".
+ */
+async function adaptAndReExecute(
+  deps: ProbesStageDeps,
+  context: StageContext,
+  cwd: string,
+  executed: readonly ExecutedCriterion[],
+  adapt: MechanicsAdapter,
+): Promise<number> {
+  const candidates = adaptationCandidates(executed);
+  if (candidates.length === 0) {
+    // Nothing was adaptable, so no provider is called and the run carries NO adaptation key
+    // at all. "A run that did not adapt has no marker and no record" is assertable because
+    // of this early return.
+    return 0;
+  }
+
+  const decision = await adapt(candidates);
+
+  // FR-15 / Q65 / AD-4: EVERY provider invocation is recorded, including one whose payload
+  // was thrown away. A run that spent subscription quota while `providerUsage` stayed empty
+  // would make FR-18's whole guarantee unauditable — which is the reason `verify.ts` gives
+  // for recording plan compilation, and it applies identically here.
+  if (decision.usage !== undefined) {
+    context.run.providerUsage.push(decision.usage);
+  }
+
+  const refuse = (reason: string): number => {
+    // RECORDED, not swallowed. A reader must be able to tell a hostile provider from an
+    // absent one. `adapted` stays false and every criterion keeps its original result.
+    context.run.adaptation = {
+      adapted: false,
+      applied: [],
+      refusal: boundedText(reason, deps.redaction),
+    };
+    return 0;
+  };
+
+  if (decision.outcome === 'refused') {
+    return refuse(decision.reason);
+  }
+
+  // The patches are applied to a COPY of the criteria. `adaptCriteria` is pure and has no
+  // file system in scope, so the project's `.specwitness/plans/<epic>.yaml` and the frozen
+  // contract cannot be written from here — the guarantee is a property of the module rather
+  // than a discipline (see `domain/adaptation-apply.ts`).
+  const byCriterionId = new Map<string, ExecutedCriterion>(
+    executed.map((record) => [record.criterion.criterionId, record]),
+  );
+  let adapted;
+  try {
+    adapted = adaptCriteria(
+      executed.map((record) => record.entry),
+      decision.patches,
+    );
+  } catch (error) {
+    if (error instanceof AdaptationRefused) {
+      return refuse(error.message);
+    }
+    throw error;
+  }
+
+  const changedProbeIds = new Set(adapted.changes.map((change) => change.probeId));
+  const applied: AppliedMechanicsChange[] = [];
+  let probesRun = 0;
+
+  for (const entry of adapted.criteria) {
+    if (entry.disposition !== 'automated') {
+      continue;
+    }
+    const adaptedProbes = entry.probes.filter((probe) => changedProbeIds.has(probe.id));
+    if (adaptedProbes.length === 0) {
+      continue;
+    }
+    const record = byCriterionId.get(entry.criterionId);
+    if (record === undefined) {
+      continue;
+    }
+
+    // A FRESH map, per the section above. Only the adapted probes are re-run: a probe whose
+    // mechanics did not move has already been observed and re-running it would duplicate its
+    // evidence for no new information.
+    const fresh = await executeCriterion(deps, context, cwd, entry.criterionId, adaptedProbes);
+    probesRun += fresh.size;
+
+    const options: DerivationOptions = { ...deps.redaction };
+    const perProbe = entry.probes.map((probe) =>
+      deriveCriterionResult(
+        record.criterion,
+        // The adapted probe's OWN fresh list; every other probe keeps the first pass's.
+        (changedProbeIds.has(probe.id) ? fresh.get(probe.id) : record.attempts.get(probe.id)) ?? [],
+        { ...options, probeId: probe.id },
+      ),
+    );
+    const replacement = select(perProbe);
+
+    // ONLY an improvement to `pass` is taken. See the section above: this is what bounds
+    // the whole feature to "a failing criterion now passes", and what keeps AC2's "a failed
+    // adaptation leaves the criterion exactly as it was" true without a second code path.
+    if (replacement.status !== 'pass') {
+      continue;
+    }
+
+    context.run.criteria[record.index] = replacement;
+    for (const change of adapted.changes) {
+      if (change.criterionId !== entry.criterionId) {
+        continue;
+      }
+      applied.push({
+        criterionId: change.criterionId,
+        probeId: change.probeId,
+        field: change.field,
+        // Both sides redacted and bounded at the moment the record is built (AD-10). `to`
+        // is provider-authored text that was applied to an executable artifact.
+        from: boundedText(change.from, deps.redaction),
+        to: boundedText(change.to, deps.redaction),
+      });
+    }
+  }
+
+  context.run.adaptation =
+    applied.length === 0
+      ? {
+          adapted: false,
+          applied: [],
+          refusal: boundedText(
+            'the proposal was valid and was applied to a plan copy, but the re-executed probe did not pass — the original failure stands',
+            deps.redaction,
+          ),
+        }
+      : { adapted: true, applied };
+
+  return probesRun;
 }
 
 /**

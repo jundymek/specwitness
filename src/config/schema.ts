@@ -136,7 +136,16 @@ const providerSchema = z.strictObject({
 });
 
 /** Kebab-case by spec + addendum section D; see the header note. */
-export const AI_ROLES = ['contract-author', 'plan-author', 'explainer'] as const;
+export const AI_ROLES = [
+  'contract-author',
+  'plan-author',
+  'explainer',
+  // Story 5.6. SEPARATE FROM `explainer` by requirement: an explainer produces text a
+  // human reads, this role produces a change to an executable artifact. Sharing one role
+  // would mean a project that wanted a failure explainer silently also granted permission
+  // to rewrite its probes.
+  'mechanics-adapter',
+] as const;
 
 const aiSchema = z.strictObject({
   providers: z.record(nonEmptyString, providerSchema).optional(),
@@ -145,6 +154,7 @@ const aiSchema = z.strictObject({
       'contract-author': nonEmptyString.optional(),
       'plan-author': nonEmptyString.optional(),
       explainer: nonEmptyString.optional(),
+      'mechanics-adapter': nonEmptyString.optional(),
     })
     .optional(),
 });
