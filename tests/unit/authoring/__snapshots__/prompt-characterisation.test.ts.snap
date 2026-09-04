@@ -97,7 +97,7 @@ match, and a text match beats a positional or generated class name.
 === THE FAILING PROBES ===
 
 1. probeId: submit-order
-   criterion E7-01: the endpoint accepts AUTH_TOKEN=NOTAREALKEY-0123456789abcdefghij
+   criterion E7-01: the endpoint accepts AUTH_TOKEN=[REDACTED]
    current path: /orders
    current scenario:
      goto "/orders"
