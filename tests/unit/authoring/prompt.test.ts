@@ -227,8 +227,9 @@ describe('bounding (story 6.8, AC1)', () => {
 
     const prompt = buildContractPrompt(ordinary);
 
+    // The cap means the cap — the trailing newline is assembled inside the budget. Codex P2.
     expect(new TextEncoder().encode(prompt).length).toBeLessThanOrEqual(
-      CONTRACT_PROMPT_CAP_BYTES + 1,
+      CONTRACT_PROMPT_CAP_BYTES,
     );
     expect(prompt).toContain('--- Story 7.39');
     expect(prompt).not.toContain('truncated:');

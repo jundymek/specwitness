@@ -132,9 +132,16 @@ export function buildContractPrompt(epic: EpicSpec, redaction?: RedactionOptions
     body.push('', ...renderStory(story));
   }
 
-  return `${assemblePrompt({
+  return assemblePrompt({
     head,
     body,
+    // ⚠️ THE TRAILING NEWLINE IS PART OF THE ASSEMBLY, NOT APPENDED AFTER IT. Raised as a P2
+    // by the codex review: this builder used to write `${assemblePrompt(...)}\n`, so a prompt
+    // that filled the cap exactly came back one byte OVER the cap it advertises. One byte is
+    // harmless in itself; a cap that does not mean the cap is not, because the next reader
+    // budgets against the constant. Expressing it as an empty tail line puts it inside the
+    // budget AND inside the region no input size can truncate.
+    tail: [''],
     capBytes: CONTRACT_PROMPT_CAP_BYTES,
     // ⚠️ REFUSE, DO NOT TRUNCATE. Raised as a P2 by the codex review of story 6.8, and
     // correct against that story's own reasoning: the cap's doc comment already said
@@ -144,7 +151,7 @@ export function buildContractPrompt(epic: EpicSpec, redaction?: RedactionOptions
     // provider is invoked — costing no quota — rather than a quietly shortened prompt.
     onOverflow: 'refuse',
     ...(redaction === undefined ? {} : { redaction }),
-  })}\n`;
+  });
 }
 
 function renderStory(story: EpicStory): string[] {
