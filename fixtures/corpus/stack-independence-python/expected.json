@@ -1,0 +1,18 @@
+{
+  "expectedVersion": 1,
+  "fixture": "stack-independence-python",
+  "why": "Stack independence, demonstrated rather than asserted (FR-4, NFR-6). The target is a Python 3 service with NO package.json anywhere: a Python gate, a Python service with HTTP readiness, a Python packaged command, and a POSIX shell observation script asserting a before/after invariant over persisted state. Every stack specific enters through .specwitness/config.yaml and nowhere else. This embodies no defect class from brief section 7 -- it is the FR-4 proof, and the first execution in this repository against a target that is not a Node project, so a Node assumption in gate resolution, service startup or observation would surface here and nowhere else. PASS is the expected outcome; a failure here is a candidate stack-neutrality leak in the product, not a broken fixture.",
+  "proves": ["AC1", "FR-4", "NFR-6", "NFR-10", "AD-12", "AD-3", "FR-18", "FR-25"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass",
+      "E1-02": "pass",
+      "E1-03": "pass"
+    }
+  },
+  "stderrAbsent": ["package.json", "node_modules"]
+}

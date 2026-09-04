@@ -1,0 +1,63 @@
+# SpecWitness Project Config for the corpus fixture `stack-independence-python`.
+#
+# ===========================================================================
+# THIS FILE IS THE WHOLE POINT OF STORY 6.4.
+# ===========================================================================
+# FR-4 says all stack specifics enter ONLY through Project Config. Everything
+# that makes this target a Python project rather than a Node one is in the
+# eight declarations below and NOWHERE ELSE -- no adapter, no plugin, no
+# detection step, no `package.json`. If that claim is true, this file is the
+# entire difference between verifying a Python service and verifying a Node
+# one. Before this fixture the claim had never been executed.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus
+# fixture is the one place in this repository where a config is committed
+# with commands intended to run, so adding or editing one is a
+# SECURITY-RELEVANT change, not test data. Every command here is
+# `python3 <relative path>` or `sh <relative path>`: argv, never a shell
+# line, with nothing to quote and nothing for a shell to interpret even if
+# one were involved. None reaches the network.
+#
+# `{{PORT:inventory}}` is substituted by the corpus runner with a freshly
+# allocated ephemeral loopback port at materialisation time. A hardcoded port
+# would make two concurrent runs of this suite fight over one socket; see
+# `fixtures/corpus/README.md` for the placeholder rules.
+#
+# NOTE WHAT IS ABSENT: there is no `setup:` block. That is deliberate but it
+# proves LESS than it looks like it proves, and the PR body says so --
+# `src/pipeline/stages/setup.ts:18` is still a placeholder stage, so
+# `setup.install` is not executed for a project of ANY stack today.
+
+version: 1
+
+project:
+  baseBranch: master
+
+gates:
+  # Not `pnpm test`. A gate is whatever the project declares, in whatever
+  # language the project is written in.
+  - { id: seed-check, run: python3 gates/check_inventory_seed.py }
+
+services:
+  inventory:
+    run: python3 app/inventory_service.py {{PORT:inventory}} state/reservations.log
+    port: {{PORT:inventory}}
+    ready:
+      url: http://127.0.0.1:{{PORT:inventory}}/health
+      timeoutSec: 30
+
+# `observations:` is the ONE map of declared commands a plan may reference
+# (`src/schemas/plan.ts:977`), and BOTH the observation surface and the shell
+# surface resolve their `commandId` from it. So the packaged command E1-02
+# probes is declared here too, even though it is driven by a shell probe
+# rather than by an observation. 6.1's `runner-pass` fixture does the same
+# thing with `node commands/version.cjs`; the only difference here is the
+# language, which is the point.
+observations:
+  # A shell script, not a database client. SpecWitness names no database and
+  # no query language: the project declares a command, it emits JSON on
+  # stdout, and SpecWitness asserts over the JSON.
+  reservations:
+    run: sh observations/count_reservations.sh state/reservations.log
+  version:
+    run: python3 commands/version.py
