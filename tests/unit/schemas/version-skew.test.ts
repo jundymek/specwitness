@@ -266,6 +266,50 @@ describe('⚠️ an unknown key inside a PROVIDER-AUTHORED payload stays malform
     }
   });
 
+  it('⚠️ reports an AD-6 EXCLUSIVITY violation as malformed, never as a skew', () => {
+    // THE VERDICT-BEARING FIELD, and the one place a wrong answer would be worst.
+    // `RunOutcomeSchema` is a `z.union` of two strict objects, so a document claiming BOTH
+    // a product verdict AND an infrastructure error — which AD-6 says can never both be
+    // true — fails as `invalid_union` rather than as `unrecognized_keys`. `unknownKeysOnly`
+    // therefore returns null and the malformed message stands.
+    //
+    // This is asserted rather than assumed BECAUSE it is a property of how zod reports
+    // union failures, not something this codebase controls. If a zod upgrade ever flattened
+    // that to bare unrecognised-key issues, a document asserting a PASS and an infra error
+    // at the same time would start telling the operator to upgrade SpecWitness. This test
+    // is what would go red.
+    const contradictory = JSON.parse(JSON.stringify(validRunResult())) as Record<string, unknown>;
+    contradictory['outcome'] = { verdict: 'PASS', infraError: 'infra' };
+
+    try {
+      parseRunResult(JSON.stringify(contradictory), '/runs/r/result.json');
+      expect.unreachable('an outcome claiming both a verdict and an infra error must be refused');
+    } catch (error) {
+      const infra = error as InfraError;
+      expect(infra.message).toContain('malformed');
+      expect(infra.message).not.toContain('was written by a newer SpecWitness');
+    }
+  });
+
+  it('reports an unknown key INSIDE the outcome as a skew, path-qualified', () => {
+    // The other direction, and it is the correct one: `outcome` is produced mechanically by
+    // `aggregate()`, never by a provider, so an extra key there really would be a newer
+    // SpecWitness recording something this build does not know about. The name is
+    // path-qualified so the operator is told WHERE, not merely that something was
+    // unexpected.
+    const document = JSON.parse(JSON.stringify(validRunResult())) as Record<string, unknown>;
+    document['outcome'] = { verdict: 'PASS', settledBy: 'a-future-field' };
+
+    try {
+      parseRunResult(JSON.stringify(document), '/runs/r/result.json');
+      expect.unreachable('an unrecognised outcome key must be refused');
+    } catch (error) {
+      const infra = error as InfraError;
+      expect(infra.message).toContain('was written by a newer SpecWitness');
+      expect(infra.hint).toContain('outcome.settledBy');
+    }
+  });
+
   it('still reports a ROOT-level unknown key as a skew even when explanations are present', () => {
     // The other direction, so the carve-out is a scalpel rather than a blanket: a run that
     // legitimately carries explanations must still get the friendly diagnosis when the
