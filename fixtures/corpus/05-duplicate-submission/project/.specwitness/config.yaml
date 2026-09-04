@@ -1,0 +1,34 @@
+# SpecWitness Project Config for the corpus fixture `05-duplicate-submission`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Every command here is `node <relative path inside this fixture>`:
+# argv, never a shell line. None of them reaches the network, reads anything
+# outside this directory, or installs anything.
+#
+# `{{PORT:app}}` is substituted by the corpus runner with a freshly allocated
+# ephemeral loopback port at materialisation time.
+
+version: 1
+
+project:
+  baseBranch: master
+
+gates:
+  - { id: tests, run: node gates/tests.cjs }
+
+services:
+  app:
+    run: node app/server.cjs {{PORT:app}}
+    port: {{PORT:app}}
+    ready:
+      url: http://127.0.0.1:{{PORT:app}}/health
+      timeoutSec: 30
+
+observations:
+  # Reports the persisted rows — the only place a duplicate submission is
+  # visible, because both responses were successes (brief §35).
+  orders: { run: node commands/orders-observation.cjs }
+  # Driven by a SHELL probe (E5-03): the module's own suite, green in this run.
+  module-tests: { run: node commands/module-tests.cjs }
