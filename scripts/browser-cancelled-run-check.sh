@@ -202,6 +202,23 @@ else
   reaped=""
   while read -r pid pgid; do
     [ -z "${pid:-}" ] && continue
+
+    # ⚠️ THE SAME REFUSALS `assertSignallableProcessGroup` MAKES, and for the same reasons.
+    # `src/infra/process-runner.ts:364-376` states them: a pgid must be an integer greater
+    # than 1, because "0 would signal the SpecWitness process group itself and -1 every
+    # process on the machine". This script signals GROUPS, so it needs the identical guard —
+    # `kill -TERM -1` on a shared runner would signal everything the user owns. The merged
+    # product refuses these; a shell script that reaps must not be the one place that does not.
+    case "${pgid}" in
+      ''|*[!0-9]*)
+        echo "    refusing to signal process group '${pgid}': not an integer"
+        continue
+        ;;
+    esac
+    if [ "${pgid}" -le 1 ]; then
+      echo "    refusing to signal process group ${pgid}: must be greater than 1"
+      continue
+    fi
     # Never signal our own group: `kill -<own pgid>` would kill this script mid-reap.
     if [ "${pgid}" = "${own_pgid}" ]; then
       echo "    refusing to signal process group ${pgid}: it is this script's own"
