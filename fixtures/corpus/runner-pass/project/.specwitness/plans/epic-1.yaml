@@ -1,0 +1,60 @@
+# Hand-written Verification Plan for the corpus fixture `runner-pass`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, AC1's "no real providers"). The `contract.fingerprint` below must
+# match the frozen contract beside it; the runner does not patch it, so a
+# contract re-freeze means this line is re-copied by hand.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 0a62fbde022f173ed007c140286bf89a46b24344fa9c3fe6898829f55298094b
+  data:
+    seed: corpusseed000001
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: orders-status
+          surface: http
+          mechanics:
+            serviceId: app
+            method: GET
+            path: /orders
+          assertions:
+            - description: the orders endpoint answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+            - description: the order state reads approved
+              target: { source: jsonPath, path: status }
+              comparison: equals
+              expected: approved
+    - criterionId: E1-02
+      disposition: automated
+      probes:
+        - id: version-probe
+          surface: shell
+          mechanics:
+            commandId: version
+            args: ["--version"]
+            argumentAllowlist: ["--version"]
+          assertions:
+            - description: the command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: it prints its own name and version
+              target: { source: stdout }
+              comparison: contains
+              expected: corpus-fixture-app 1.0.0
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

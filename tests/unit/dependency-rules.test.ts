@@ -632,3 +632,82 @@ describe('the report layer may reach the core and nothing else', () => {
     expect(exitCode).toBe(0);
   });
 });
+
+
+/**
+ * Story 6.1, rider e5-C — the `authoring-layer` rule.
+ *
+ * APPENDED, deliberately, following the precedent stories 3.3 and 3.6 set in this file:
+ * this describe shares **zero `expect()`** with any above it, so a rebase against another
+ * story that also appends here is a text merge rather than a negotiation.
+ *
+ * Why the rule was missing until now, stated because it is the whole point of the rider:
+ * `ingest`, `pipeline` and `report` each had a layer rule while `authoring` appeared only
+ * inside their comments. An Epic 5 agent planted `authoring -> infra` and watched depcruise
+ * PASS — a clean cruise proves only that nobody has violated a rule that exists. Story 6.8
+ * lands inside this layer in wave 2, so the fence goes up first.
+ */
+describe('the authoring-layer rule (story 6.1, rider e5-C)', () => {
+  it('blocks src/authoring from importing an adapter that is not providers', async () => {
+    // THE EXACT IMPORT THAT PASSED. `src/infra/run-store.ts` is run evidence, and the
+    // spine puts it behind the pipeline: the CLI edge orchestrates authoring before and
+    // outside the pipeline, and the pipeline never authors. An authoring service that can
+    // open the run store is one that can write into a run it is not part of.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'authoring/__probe-run-store.ts',
+      "import { createRunStore } from '../infra/run-store.js';\nexport const p = createRunStore;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('authoring-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks src/authoring from importing another application layer', async () => {
+    // `pipeline` and `authoring` are siblings in the application layer, and the spine
+    // draws no edge between them in either direction. `pipeline-layer` already forbids the
+    // reverse; without this rule the direction that was open is the one where a plan
+    // compiler could reach into a running verification.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'authoring/__probe-pipeline.ts',
+      "import { runPipeline } from '../pipeline/run-pipeline.js';\nexport const p = runPipeline;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('authoring-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('lets src/authoring import the core, providers, ingest, its own siblings and node:fs', async () => {
+    // The permit half, and none of it is decoration. `providers/invoke.ts` is AD-2's ONE
+    // shared invoke gate and authoring is its principal caller (`src/authoring/plan.ts`
+    // imports it today). `node:fs` is how contract and plan FILES are read and written
+    // (`contract-file.ts`, `plan-file.ts`) — a built-in is not a layer. `ingest` is drawn
+    // by the spine (AUTH -> ING) and is unused under src/authoring today; it is permitted
+    // anyway, because narrowing a rule below the binding graph would be a redesign made
+    // by a lint file rather than by an ADR.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'authoring/__probe-sibling.ts', 'export const sibling = 1;\n');
+    await writeModule(
+      tree,
+      'authoring/__probe-service.ts',
+      "import { readFile } from 'node:fs/promises';\n" +
+        "import { InfraError } from '../domain/errors.js';\n" +
+        "import { SCHEMA_VERSIONS } from '../schemas/versions.js';\n" +
+        "import { ingestEpic } from '../ingest/index.js';\n" +
+        "import { sibling } from './__probe-sibling.js';\n" +
+        'export const p = { readFile, InfraError, SCHEMA_VERSIONS, ingestEpic, sibling };\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('authoring-layer');
+    expect(exitCode).toBe(0);
+  });
+});

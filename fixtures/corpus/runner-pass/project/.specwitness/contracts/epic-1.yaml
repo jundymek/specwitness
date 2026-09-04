@@ -1,0 +1,35 @@
+# Hand-written Verification Contract for the corpus fixture `runner-pass`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-1 --freeze` — see `fixtures/corpus/README.md`
+# section "Freezing a fixture contract". That is deliberate and it is NOT the
+# thing AD-12 forbids: a contract is an INPUT to the run, and its fingerprint is
+# a hash the product must be able to recompute from these bytes or refuse the
+# run. `expected.json` — the OUTCOME — is hand-written and never generated.
+spec:
+  epic: epic-1
+  version: 1
+  criteria:
+    - id: E1-01
+      statement: The orders endpoint answers 200 and reports the order state as approved.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+    - id: E1-02
+      statement: The packaged command reports its version.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 0a62fbde022f173ed007c140286bf89a46b24344fa9c3fe6898829f55298094b
+  createdAt: 2026-09-04T09:00:00.000Z
+  frozenAt: 2026-09-04T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-04T09:00:00.000Z
+  history: []

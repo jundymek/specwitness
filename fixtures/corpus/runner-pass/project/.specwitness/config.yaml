@@ -1,0 +1,33 @@
+# SpecWitness Project Config for the corpus fixture `runner-pass`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Every command here is `node <relative path inside this fixture>`:
+# argv, never a shell line, with nothing to quote and nothing for a shell to
+# interpret even if one were involved.
+#
+# `{{PORT:app}}` is substituted by the corpus runner with a freshly allocated
+# ephemeral loopback port at materialisation time. A hardcoded port would make
+# two concurrent runs of this suite fight over one socket; see
+# `fixtures/corpus/README.md` for the placeholder rules.
+
+version: 1
+
+project:
+  baseBranch: master
+
+gates:
+  - { id: lint, run: node gates/lint.cjs }
+
+services:
+  app:
+    run: node app/server.cjs {{PORT:app}}
+    port: {{PORT:app}}
+    ready:
+      url: http://127.0.0.1:{{PORT:app}}/health
+      timeoutSec: 30
+
+observations:
+  version:
+    run: node commands/version.cjs

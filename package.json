@@ -26,6 +26,9 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:corpus": "vitest run tests/corpus",
+    "test:ci": "vitest run --reporter=default --reporter=json --outputFile=.vitest-report.json",
+    "report:skips": "node scripts/report-skipped-suites.mjs .vitest-report.json",
     "test:watch": "vitest",
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
     "lint": "pnpm run depcruise"
