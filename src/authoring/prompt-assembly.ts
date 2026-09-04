@@ -58,8 +58,15 @@
  * function, including by forgetting to.
  *
  * `promptField` therefore exists to BOUND one value, not to be the thing that redacts it.
- * Redaction is idempotent (`evidence.ts:427`), so a field that passed through both is
- * redacted once in effect and costs nothing extra.
+ *
+ * ⚠️ **AND IT CANNOT APPLY A CONFIGURED PATTERN AT ALL** — `PromptFieldOptions` has nowhere
+ * to put one. An earlier version of this paragraph said that "redaction is idempotent, so a
+ * field that passed through both is redacted once in effect". That is true of the BUILT-IN
+ * patterns and **false of `extraPatterns`**, which are arbitrary project regexes: `/E/g`
+ * alone turns `EEE` into `[R[REDACTED]DACT[REDACTED]D]`, because the replacement contains an
+ * `E`. Raised as a P2 by the codex review — the same wrong sentence had already survived the
+ * fix to the defect it described one level down. The configured patterns are applied exactly
+ * once, by `assemblePrompt`, over the assembled body.
  *
  * `head` and `tail` are NOT redacted, and that is not an oversight. They are fixed string
  * literals authored in this repository, not text captured from anything — running the
@@ -129,7 +136,21 @@ const MARKER_ROUNDS = 3;
  */
 export const PROMPT_FIELD_CAP_BYTES = 400;
 
-export interface PromptFieldOptions extends RedactionOptions {
+/**
+ * ⚠️ **DELIBERATELY NOT `extends RedactionOptions`.** Raised as a P2 by the codex review.
+ *
+ * `promptField` bounds one field and `assemblePrompt` redacts the body it ends up in. If
+ * this type could carry `extraPatterns`, a caller doing both — which is exactly what
+ * `explain.ts` does for every field — would apply the configured patterns TWICE. The
+ * built-in patterns are idempotent (`evidence.ts:427`) so running them twice is running them
+ * once; a project's own regex has no such guarantee, and `/E/g` alone turns `EEE` into
+ * `[R[REDACTED]DACT[REDACTED]D]`.
+ *
+ * Having no field for them makes the double pass **unrepresentable** rather than merely
+ * avoided, which is the same discipline `schemas/adaptation.ts` uses for a boundary that
+ * must not be crossed by accident.
+ */
+export interface PromptFieldOptions {
   /** Defaults to `PROMPT_FIELD_CAP_BYTES`. Applies to the RETURNED string, marker included. */
   readonly capBytes?: number;
 }
@@ -150,7 +171,10 @@ export function promptField(value: string, options?: PromptFieldOptions): string
   return boundWithMarker(
     value,
     options?.capBytes ?? PROMPT_FIELD_CAP_BYTES,
-    options,
+    // NO redaction options, by construction — see `PromptFieldOptions`. The built-in
+    // patterns still run, inside `boundedText`, so a field is never returned raw; the
+    // CONFIGURED patterns are applied exactly once, later, by `assemblePrompt`.
+    undefined,
     // A space, not a newline: a field is rendered inline, on the line its label opens.
     ' ',
   );

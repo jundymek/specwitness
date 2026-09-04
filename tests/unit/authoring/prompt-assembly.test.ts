@@ -425,3 +425,48 @@ describe('redaction is applied exactly once (codex P1)', () => {
     expect(prompt).toContain(`of ${new TextEncoder().encode(once).length} bytes shown`);
   });
 });
+
+/**
+ * ⚠️ `promptField` MUST NOT APPLY THE CONFIGURED PATTERNS — `assemblePrompt` does, exactly
+ * once. Raised as a P2 by the codex review, and it is the previous P1 one level up.
+ *
+ * The earlier fix made `assemblePrompt` redact each bounding candidate exactly once. It did
+ * not fix the composition: `explain.ts` clips every field through `promptField` and then
+ * hands the result to `assemblePrompt`, so a configured pattern was still applied twice —
+ * once per helper. This module's own header had asserted the opposite in as many words
+ * ("redaction is idempotent, so a field that passed through both is redacted once in
+ * effect"), which is true of the BUILT-IN patterns and false of arbitrary project regexes.
+ * The same wrong sentence, in the same file, surviving the fix to the thing it described.
+ *
+ * The resolution makes the double pass unrepresentable rather than merely avoided:
+ * `PromptFieldOptions` no longer extends `RedactionOptions`, so `promptField` has **nowhere
+ * to put** a configured pattern. It bounds, and applies the built-in patterns only — which
+ * are documented idempotent (`evidence.ts:427`) and so may safely run again at assembly.
+ */
+describe('promptField applies the configured patterns zero times (codex P2)', () => {
+  const EXPANDING: RedactionOptions = { extraPatterns: [/E/g] };
+
+  it('a field routed through both helpers is redacted with the pattern exactly once', () => {
+    const raw = 'EEE';
+    const once = redactText(raw, EXPANDING);
+
+    const prompt = assemblePrompt({
+      head: [],
+      // `promptField(raw, EXPANDING)` — how `explain.ts` used to call it, and the shape the
+      // P2 was about — NO LONGER COMPILES: `PromptFieldOptions` has no `extraPatterns`
+      // field. The double pass is unrepresentable rather than merely avoided, so this test
+      // pins the surviving behaviour and the TYPE is what forbids the defect.
+      body: [promptField(raw)],
+      capBytes: 24_000,
+      redaction: EXPANDING,
+    });
+
+    expect(prompt).toBe(once);
+  });
+
+  it('still applies the BUILT-IN patterns on its own, so a field is never raw', () => {
+    // `promptField` remains safe standing alone for the shapes the product recognises
+    // itself; what it cannot do is apply a pattern the caller configured.
+    expect(promptField(`API_KEY=${SEEDED_SECRET}`)).not.toContain(SEEDED_SECRET);
+  });
+});

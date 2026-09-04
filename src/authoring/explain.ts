@@ -291,8 +291,11 @@ export function explainableCriteria(result: RunResult): readonly DerivedCriterio
  * dump, and never a re-read. The switch is exhaustive over the closed union, so a seventh
  * evidence kind stops compiling here rather than silently producing a blank line.
  */
-function summarizeEvidence(evidence: Evidence, redaction: RedactionOptions | undefined): string {
-  const field = (value: string): string => promptField(value, redaction);
+function summarizeEvidence(evidence: Evidence): string {
+  // NO `redaction` here, deliberately: `promptField` bounds and applies the built-in
+  // patterns, and `assemblePrompt` applies the run's CONFIGURED patterns exactly once over
+  // the assembled body. Passing them here too applied them twice. Codex P2.
+  const field = (value: string): string => promptField(value);
 
   switch (evidence.kind) {
     case 'http':
@@ -326,7 +329,10 @@ export function buildExplainPrompt(
   criteria: readonly DerivedCriterionResult[],
   redaction?: RedactionOptions,
 ): string {
-  const field = (value: string): string => promptField(value, redaction);
+  // NO `redaction` here, deliberately: `promptField` bounds and applies the built-in
+  // patterns, and `assemblePrompt` applies the run's CONFIGURED patterns exactly once over
+  // the assembled body. Passing them here too applied them twice. Codex P2.
+  const field = (value: string): string => promptField(value);
 
   const header: string[] = [
     'You are assisting a verification tool called SpecWitness.',
@@ -373,7 +379,7 @@ export function buildExplainPrompt(
     body.push('(none captured)');
   } else {
     for (const evidence of result.evidence) {
-      body.push(`- ${summarizeEvidence(evidence, redaction)}`);
+      body.push(`- ${summarizeEvidence(evidence)}`);
     }
   }
 
