@@ -1,0 +1,39 @@
+# SpecWitness Project Config for the corpus fixture
+# `10-cross-story-integration-broken`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Every command here is `node <relative path inside this fixture>`:
+# argv, never a shell line. None of them reaches the network, reads anything
+# outside this directory, or installs anything.
+#
+# `{{PORT:app}}` is substituted by the corpus runner with a freshly allocated
+# ephemeral loopback port at materialisation time.
+
+version: 1
+
+project:
+  baseBranch: master
+
+# BOTH story modules' suites, as the project's own test command. GREEN in the
+# same run in which verification fails — that is this fixture's whole argument.
+gates:
+  - { id: tests, run: node gates/tests.cjs }
+
+services:
+  app:
+    run: node app/server.cjs {{PORT:app}}
+    port: {{PORT:app}}
+    ready:
+      url: http://127.0.0.1:{{PORT:app}}/health
+      timeoutSec: 30
+
+observations:
+  # Reports the persisted order state — the only place the seam between the two
+  # modules is visible.
+  orders: { run: node commands/orders-observation.cjs }
+  # Driven by a SHELL probe (E10-01), so "both modules pass their own tests" is
+  # a criterion the run adjudicated rather than a claim the fixture's prose
+  # makes.
+  module-tests: { run: node commands/module-tests.cjs }
