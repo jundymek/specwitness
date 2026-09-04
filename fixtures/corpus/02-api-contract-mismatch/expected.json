@@ -1,0 +1,24 @@
+{
+  "expectedVersion": 1,
+  "fixture": "02-api-contract-mismatch",
+  "why": "Brief section 7 and section 50 class 2: the API returns success and its response contract is incomplete. Creating an order answers 201 with a genuinely approved order, and the response omits the currency the frozen contract requires (app/order-response.cjs), so E2-01 must be fail while E2-02 (the service is healthy) and E2-03 (the order module's own test suite passes, in this same run) stay pass. WHY NO STORY-LEVEL GATE COULD HAVE CAUGHT IT: there is nothing here for a linter or a type checker to see - the serializer is a plain object literal whose every key exists and whose every value has the right type - and the module's unit suite is green because it was written from that implementation, so it asserts that the fields the code produces round-trip, which they do. A test written from the code cannot notice a field the code never had. Only something holding the frozen contract beside the running system can. The verdict is FAIL with exit 1 and NO gateFailed: the project's own test gate exits 0 in this run, and a gateFailed marker appearing here would mean the product had attributed a criterion failure to a broken build. Evidence kinds are pinned through the stderr report, which under --json carries the human-readable rendering: gate, http and command.",
+  "proves": ["AC1", "NFR-10", "AD-12", "AD-13", "AD-6", "FR-25", "FR-26", "ADR-002", "ADR-003"],
+  "command": ["verify", "epic-2", "--json"],
+  "exitCode": 1,
+  "outcome": { "verdict": "FAIL" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E2-01": "fail",
+      "E2-02": "pass",
+      "E2-03": "pass"
+    }
+  },
+  "stderrContains": [
+    "  gate tests (pass, exit 0): node gates/tests.cjs",
+    "  http POST http://127.0.0.1:<PORT:app>/orders -> 201",
+    "  command module-tests (exit 0): node commands/module-tests.cjs",
+    "      expected: EUR",
+    "      actual:   <json path '$.currency' did not resolve in the response body>"
+  ]
+}
