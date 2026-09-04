@@ -1,0 +1,16 @@
+{
+  "expectedVersion": 1,
+  "fixture": "runner-pass",
+  "why": "The green direction of the corpus runner itself. A correct application, a frozen contract that describes it accurately and a precompiled plan that probes it faithfully must produce PASS and exit 0 — through a service on an ephemeral loopback port, a Deterministic Gate, an http probe and a shell probe, so the runner is proven against the stages a defect-class fixture will use rather than against a trivial one. It embodies no defect class from brief section 7; the numbered classes belong to stories 6.2 (1, 2, 3, 5, 10), 6.3 (6, 7, 8, 9, 11) and 6.4.",
+  "proves": ["AC1", "NFR-10", "AD-12", "FR-18"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass",
+      "E1-02": "pass"
+    }
+  }
+}

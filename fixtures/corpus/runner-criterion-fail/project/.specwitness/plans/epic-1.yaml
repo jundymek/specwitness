@@ -1,0 +1,52 @@
+# Hand-written Verification Plan for the corpus fixture
+# `runner-criterion-fail`.
+#
+# THE PLAN IS CORRECT. It probes for exactly what the contract requires; the
+# APP is what is wrong (`commands/release.cjs` reports `beta`). A fixture whose
+# plan was wrong instead would fail too, and would prove nothing about the
+# defect class it claims to embody.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: dedcdd26ad7d83e8304a5a4c996e3664f70492bcac2c15567ad9a79f4aa7f2df
+  data:
+    seed: corpusseed000002
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: release-exit
+          surface: shell
+          mechanics:
+            commandId: release
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+    - criterionId: E1-02
+      disposition: automated
+      probes:
+        - id: release-channel
+          surface: shell
+          mechanics:
+            commandId: release
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the reported channel is stable
+              target: { source: stdout }
+              comparison: contains
+              expected: channel=stable
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

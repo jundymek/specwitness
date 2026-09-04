@@ -1,0 +1,20 @@
+# SpecWitness Project Config for the corpus fixture `runner-criterion-fail`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. The single command here is `node commands/release.cjs`: argv, never
+# a shell line.
+#
+# No services, no ports, no gates. The fixture's whole job is to make ONE
+# criterion fail for ONE stated reason, so everything that could fail for
+# another reason is absent.
+
+version: 1
+
+project:
+  baseBranch: master
+
+observations:
+  release:
+    run: node commands/release.cjs
