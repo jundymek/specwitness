@@ -107,6 +107,27 @@ const CRITERIA: readonly PlanCriterion[] = [
 ];
 
 /**
+ * A SECOND ELIGIBLE probe, used only by the mixed-payload test.
+ *
+ * ⚠️ Its presence is load-bearing. Once the candidate rule narrowed to a step-target miss,
+ * only `submit-order` was eligible under `CRITERIA` — so the mixed fixture's second entry was
+ * refused by the STAGE's trespass check before the schema mattered, and the test passed under
+ * a NEUTERED schema for the wrong reason. Found by re-running the schema plant after the
+ * narrowing, not by review.
+ *
+ * With both probes eligible and both proposals asking for the working scenario, an intact
+ * schema refuses the payload whole and both stay broken; a neutered one strips the illegal
+ * key, applies both, and the criterion passes — which is what makes the test go red.
+ */
+const MIXED_CRITERIA: readonly PlanCriterion[] = [
+  {
+    criterionId: CRITERION.criterionId,
+    disposition: 'automated',
+    probes: [PROBE, { ...PROBE, id: 'also-broken' }],
+  },
+];
+
+/**
  * The shipped fake, pointed at one adversarial fixture directory.
  *
  * `mode` IS the fixture directory — the fake's documented configuration, reused rather than
@@ -133,9 +154,12 @@ function adapterFor(fixture: string) {
 }
 
 /** A stage whose probe passes iff its scenario is `WORKING`. */
-function stageWith(adapt: ProbesStageDeps['adapt']): ProbesStageDeps {
+function stageWith(
+  adapt: ProbesStageDeps['adapt'],
+  criteria: readonly PlanCriterion[] = CRITERIA,
+): ProbesStageDeps {
   return {
-    criteria: CRITERIA,
+    criteria,
     data: NO_DATA,
     dispatch: ({ probe, attempt }): ProbeDispatch => {
       const scenario = (probe as BrowserProbe).mechanics.scenario;
@@ -180,10 +204,10 @@ function stageWith(adapt: ProbesStageDeps['adapt']): ProbesStageDeps {
   };
 }
 
-async function runWith(fixture: string) {
+async function runWith(fixture: string, criteria: readonly PlanCriterion[] = CRITERIA) {
   const context = stageContext();
   context.run.contractCriteria.push(CRITERION);
-  await createProbesStage(stageWith(adapterFor(fixture))).run(context);
+  await createProbesStage(stageWith(adapterFor(fixture), criteria)).run(context);
   return context;
 }
 
@@ -231,7 +255,7 @@ describe('AC2 — a hostile provider gets nothing', () => {
     // The single most important negative case. `adapt-mixed` proposes a PERFECTLY LEGAL
     // scenario change for `submit-order` alongside an expected-value edit for another
     // probe. If anything salvaged the legal half, this criterion would PASS.
-    const context = await runWith('adapt-mixed');
+    const context = await runWith('adapt-mixed', MIXED_CRITERIA);
 
     expect(context.run.criteria[0]?.status).toBe('error');
     expect(context.run.adaptation?.adapted).toBe(false);
