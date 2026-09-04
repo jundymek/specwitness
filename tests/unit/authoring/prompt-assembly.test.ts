@@ -220,23 +220,23 @@ describe('assemblePrompt — redaction (AC1, AC2)', () => {
 
 describe('promptField — bounding one untrusted value', () => {
   it('redacts and caps, in that order', () => {
-    expect(promptField(`API_KEY=${SEEDED_SECRET}`)).not.toContain(SEEDED_SECRET);
+    expect(promptField(`API_KEY=${SEEDED_SECRET}`, undefined).text).not.toContain(SEEDED_SECRET);
   });
 
   it('caps at the shared field cap by default', () => {
-    expect(bytes(promptField('x'.repeat(5_000)))).toBeLessThanOrEqual(PROMPT_FIELD_CAP_BYTES);
+    expect(bytes(promptField('x'.repeat(5_000), undefined).text)).toBeLessThanOrEqual(PROMPT_FIELD_CAP_BYTES);
   });
 
   it('takes a caller-supplied cap', () => {
-    expect(bytes(promptField('x'.repeat(5_000), { capBytes: 50 }))).toBeLessThanOrEqual(50);
+    expect(bytes(promptField('x'.repeat(5_000), { capBytes: 50 }).text)).toBeLessThanOrEqual(50);
   });
 
   it('leaves a short value untouched, with no marker', () => {
-    expect(promptField('the endpoint responds 200')).toBe('the endpoint responds 200');
+    expect(promptField('the endpoint responds 200', undefined).text).toBe('the endpoint responds 200');
   });
 
   it('marks a value it cut, so a clipped field reads as clipped', () => {
-    expect(promptField('x'.repeat(5_000))).toMatch(/… truncated: \d+ of \d+ bytes shown/);
+    expect(promptField('x'.repeat(5_000), undefined).text).toMatch(/… truncated: \d+ of \d+ bytes shown/);
   });
 });
 
@@ -452,11 +452,10 @@ describe('promptField applies the configured patterns zero times (codex P2)', ()
 
     const prompt = assemblePrompt({
       head: [],
-      // `promptField(raw, EXPANDING)` — how `explain.ts` used to call it, and the shape the
-      // P2 was about — NO LONGER COMPILES: `PromptFieldOptions` has no `extraPatterns`
-      // field. The double pass is unrepresentable rather than merely avoided, so this test
-      // pins the surviving behaviour and the TYPE is what forbids the defect.
-      body: [promptField(raw)],
+      // The field carries the options, so IT applies the configured pattern — before its own
+      // cut. `assemblePrompt` then passes the branded result through untouched, which is what
+      // keeps the pattern to exactly one application across the two helpers.
+      body: [promptField(raw, EXPANDING)],
       capBytes: 24_000,
       redaction: EXPANDING,
     });
@@ -467,6 +466,81 @@ describe('promptField applies the configured patterns zero times (codex P2)', ()
   it('still applies the BUILT-IN patterns on its own, so a field is never raw', () => {
     // `promptField` remains safe standing alone for the shapes the product recognises
     // itself; what it cannot do is apply a pattern the caller configured.
-    expect(promptField(`API_KEY=${SEEDED_SECRET}`)).not.toContain(SEEDED_SECRET);
+    expect(promptField(`API_KEY=${SEEDED_SECRET}`, undefined).text).not.toContain(SEEDED_SECRET);
+  });
+});
+
+/**
+ * ⚠️ A CONFIGURED PATTERN MUST BE APPLIED BEFORE THE FIELD IS CUT. Codex P1.
+ *
+ * The report: *"When a configured `extraPattern` match crosses the 400-byte field boundary,
+ * `promptField` truncates the raw value before `assemblePrompt` applies that pattern. The
+ * truncated fragment no longer matches the regex, so a prefix of the configured secret is
+ * sent to the provider."*
+ *
+ * This is the ordering hazard `boundedText` documents — *"cutting first could split an
+ * assignment so that the pattern no longer matches and the tail of a secret survives the
+ * cut"* — and I had reasoned my way around it while fixing the double-pass P2. That
+ * reasoning held only for the BUILT-IN shapes, whose `NAME=` prefix survives a truncation
+ * and keeps matching. **A configured pattern has no such structure**: it is an arbitrary
+ * regex, and cutting anywhere inside its match destroys the match and preserves the prefix.
+ *
+ * So the correct arrangement is: redact each segment ONCE, with the full options, BEFORE it
+ * is bounded — and prove at assembly that it is not redacted a second time. `promptField`
+ * therefore returns a branded value, which `assemblePrompt` passes through untouched.
+ */
+describe('a configured pattern that straddles the field cap (codex P1)', () => {
+  it('never lets a prefix of the secret through', () => {
+    // The secret sits so that the 400-byte field cap falls INSIDE it. Truncating first would
+    // leave its opening characters in the prompt with nothing left to match.
+    // ⚠️ THE SECRET MUST STRADDLE THE CUT, and arranging that takes care — a shorter secret
+    // sitting at the end is simply DROPPED by truncation, which is safe and would make this
+    // test pass for the wrong reason. The field cap is 400 bytes and the truncation marker
+    // reserves roughly 40, so the cut lands near byte 360. With 340 bytes of padding and a
+    // 100-byte secret the value is 440 bytes — over the cap, so it is really cut — and the
+    // cut falls INSIDE the secret, leaving about twenty of its characters on the near side.
+    // That surviving prefix is the leak.
+    const secret = `CODENAME-ORCHID-${'9f2b1c7d4e6a8b0c'.repeat(5)}-END`;
+    const pattern = new RegExp(secret, 'g');
+    const padding = 'x'.repeat(340);
+
+    const prompt = assemblePrompt({
+      head: [],
+      body: [promptField(`${padding}${secret}`, { extraPatterns: [pattern] })],
+      capBytes: 24_000,
+      redaction: { extraPatterns: [pattern] },
+    });
+
+    // ABSENT, and so is any leading fragment of it (Epic 3 retro §7 — a prefix is still a
+    // credential, and the marker being present proves nothing about what sits beside it).
+    expect(prompt).not.toContain(secret);
+    expect(prompt).not.toContain(secret.slice(0, 20));
+    expect(prompt).not.toContain(secret.slice(0, 12));
+  });
+
+  it('still applies the pattern exactly once end to end', () => {
+    const raw = 'EEE';
+    const opts = { extraPatterns: [/E/g] };
+
+    const prompt = assemblePrompt({
+      head: [],
+      body: [promptField(raw, opts)],
+      capBytes: 24_000,
+      redaction: opts,
+    });
+
+    expect(prompt).toBe(redactText(raw, opts));
+  });
+
+  it('redacts a plain string body entry that never went through promptField', () => {
+    // The structural guarantee is unchanged: anything placed in `body` is redacted, whether
+    // or not the builder remembered a helper.
+    const prompt = assemblePrompt({
+      head: [],
+      body: [`AUTH_TOKEN=${SEEDED_SECRET}`],
+      capBytes: 24_000,
+    });
+
+    expect(prompt).not.toContain(SEEDED_SECRET);
   });
 });

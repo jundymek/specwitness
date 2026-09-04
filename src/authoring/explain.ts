@@ -130,7 +130,12 @@ import type {
 import { attemptInvoke } from '../providers/invoke.js';
 import { schemaVersionFor } from '../schemas/versions.js';
 
-import { assemblePrompt, promptField } from './prompt-assembly.js';
+import {
+  assemblePrompt,
+  promptField,
+  promptLine,
+  type PromptField,
+} from './prompt-assembly.js';
 
 /** The role name, spelled once. Already declared in `AI_ROLES` and `AgentRole`. */
 export const EXPLAINER_ROLE = 'explainer' as const;
@@ -291,28 +296,47 @@ export function explainableCriteria(result: RunResult): readonly DerivedCriterio
  * dump, and never a re-read. The switch is exhaustive over the closed union, so a seventh
  * evidence kind stops compiling here rather than silently producing a blank line.
  */
-function summarizeEvidence(evidence: Evidence): string {
-  // NO `redaction` here, deliberately: `promptField` bounds and applies the built-in
-  // patterns, and `assemblePrompt` applies the run's CONFIGURED patterns exactly once over
-  // the assembled body. Passing them here too applied them twice. Codex P2.
-  const field = (value: string): string => promptField(value);
+function summarizeEvidence(
+  evidence: Evidence,
+  redaction: RedactionOptions | undefined,
+): PromptField {
+  const field = (value: string): PromptField => promptField(value, redaction);
+  const line = (...parts: readonly (string | PromptField)[]): PromptField =>
+    promptLine(parts, redaction);
 
   switch (evidence.kind) {
     case 'http':
-      return `http ${evidence.request.method} ${evidence.request.url} -> ${evidence.response.status}; body: ${field(evidence.response.body.text)}`;
+      return line(
+        `http ${evidence.request.method} ${evidence.request.url} -> ${evidence.response.status}; body: `,
+        field(evidence.response.body.text),
+      );
     case 'browser':
-      return `browser ${evidence.url}${evidence.trace === undefined ? '' : ' (trace captured)'}`;
+      return line(
+        `browser ${evidence.url}${evidence.trace === undefined ? '' : ' (trace captured)'}`,
+      );
     case 'observation':
-      return `observation ${evidence.observationId}: ${field(evidence.snapshot.text)}`;
+      return line(`observation ${evidence.observationId}: `, field(evidence.snapshot.text));
     case 'command':
-      return `command ${evidence.commandId} exited ${evidence.exitCode ?? 'null'}; stdout: ${field(evidence.stdout.text)}; stderr: ${field(evidence.stderr.text)}`;
+      return line(
+        `command ${evidence.commandId} exited ${evidence.exitCode ?? 'null'}; stdout: `,
+        field(evidence.stdout.text),
+        '; stderr: ',
+        field(evidence.stderr.text),
+      );
     case 'gate':
-      return `gate ${evidence.gateId} ${evidence.status} (exit ${evidence.exitCode ?? 'null'}); stdout: ${field(evidence.stdout.text)}; stderr: ${field(evidence.stderr.text)}`;
+      return line(
+        `gate ${evidence.gateId} ${evidence.status} (exit ${evidence.exitCode ?? 'null'}); stdout: `,
+        field(evidence.stdout.text),
+        '; stderr: ',
+        field(evidence.stderr.text),
+      );
     case 'provider':
       // The rawResponse of an EARLIER provider call is deliberately not forwarded: it is
       // diagnostic text about a different invocation, and it is the one evidence member
       // whose content is itself model output.
-      return `provider ${evidence.role} via ${evidence.provider} (${evidence.attempts} attempts)`;
+      return line(
+        `provider ${evidence.role} via ${evidence.provider} (${evidence.attempts} attempts)`,
+      );
   }
 }
 
@@ -329,10 +353,13 @@ export function buildExplainPrompt(
   criteria: readonly DerivedCriterionResult[],
   redaction?: RedactionOptions,
 ): string {
-  // NO `redaction` here, deliberately: `promptField` bounds and applies the built-in
-  // patterns, and `assemblePrompt` applies the run's CONFIGURED patterns exactly once over
-  // the assembled body. Passing them here too applied them twice. Codex P2.
-  const field = (value: string): string => promptField(value);
+  // The run's options go to `promptField`, which redacts BEFORE it cuts — a configured
+  // match straddling the field cap would otherwise be split into an unmatchable prefix.
+  // The returned value is branded, so `assemblePrompt` passes it through rather than
+  // redacting it a second time. Codex P1, twice over.
+  const field = (value: string): PromptField => promptField(value, redaction);
+  const line = (...parts: readonly (string | PromptField)[]): PromptField =>
+    promptLine(parts, redaction);
 
   const header: string[] = [
     'You are assisting a verification tool called SpecWitness.',
@@ -347,29 +374,41 @@ export function buildExplainPrompt(
     'a criterion passes. State, for each criterion below, your best guess at the ROOT',
     'CAUSE of what was observed, in at most three sentences.',
     '',
-    `Run: ${result.runId} · epic ${result.epic} · base ${result.baseSha} · head ${result.headSha}`,
+  ];
+
+  // ⚠️ THE RUN METADATA IS BODY, NOT HEAD, and it used to be head. Raised as a P2 by the
+  // codex review: `head` is never redacted because it is meant to hold this repository's own
+  // fixed literals, and this line is not one — `runId`, `epic`, `baseSha` and `headSha` are
+  // variable, and `RunResult` requires only that they be non-empty strings. An imported or
+  // programmatically built run could carry a secret shape in one of them and it would bypass
+  // the boundary entirely. Variable data belongs on the redacted side of the split; that the
+  // values are ordinarily harmless is not the same as their being trusted.
+  const body: (string | PromptField)[] = [
+    line(
+      `Run: ${result.runId} · epic ${result.epic} · base ${result.baseSha} · head ${result.headSha}`,
+    ),
     '',
     '--- FAILED CRITERIA ---',
   ];
 
-  const body: string[] = [];
-
   for (const criterion of criteria) {
     body.push(
       '',
-      `criterionId: ${criterion.criterionId}`,
-      `status: ${criterion.status} (severity ${criterion.severity})`,
-      `statement: ${field(criterion.statement)}`,
+      line(`criterionId: ${criterion.criterionId}`),
+      line(`status: ${criterion.status} (severity ${criterion.severity})`),
+      line('statement: ', field(criterion.statement)),
     );
     if (criterion.expected !== undefined) {
-      body.push(`expected: ${field(criterion.expected)}`);
+      body.push(line('expected: ', field(criterion.expected)));
     }
     if (criterion.actual !== undefined) {
-      body.push(`actual: ${field(criterion.actual)}`);
+      body.push(line('actual: ', field(criterion.actual)));
     }
     if (criterion.evidence !== undefined && criterion.evidence.length > 0) {
       body.push(
-        `evidence: ${criterion.evidence.map((ref) => `${ref.kind} at ${ref.path}`).join(', ')}`,
+        line(
+          `evidence: ${criterion.evidence.map((ref) => `${ref.kind} at ${ref.path}`).join(', ')}`,
+        ),
       );
     }
   }
@@ -379,7 +418,7 @@ export function buildExplainPrompt(
     body.push('(none captured)');
   } else {
     for (const evidence of result.evidence) {
-      body.push(`- ${summarizeEvidence(evidence)}`);
+      body.push(line('- ', summarizeEvidence(evidence, redaction)));
     }
   }
 

@@ -137,20 +137,43 @@ const MARKER_ROUNDS = 3;
 export const PROMPT_FIELD_CAP_BYTES = 400;
 
 /**
- * ⚠️ **DELIBERATELY NOT `extends RedactionOptions`.** Raised as a P2 by the codex review.
+ * Marks text that `promptField` has ALREADY redacted with the run's full options.
  *
- * `promptField` bounds one field and `assemblePrompt` redacts the body it ends up in. If
- * this type could carry `extraPatterns`, a caller doing both — which is exactly what
- * `explain.ts` does for every field — would apply the configured patterns TWICE. The
- * built-in patterns are idempotent (`evidence.ts:427`) so running them twice is running them
- * once; a project's own regex has no such guarantee, and `/E/g` alone turns `EEE` into
- * `[R[REDACTED]DACT[REDACTED]D]`.
- *
- * Having no field for them makes the double pass **unrepresentable** rather than merely
- * avoided, which is the same discipline `schemas/adaptation.ts` uses for a boundary that
- * must not be crossed by accident.
+ * A symbol rather than a naming convention, so `assemblePrompt` can tell "already redacted"
+ * from "a plain string that still needs it" **by construction**. This is what makes exactly
+ * one redaction pass per segment a property of the types rather than of everyone's care.
  */
-export interface PromptFieldOptions {
+const PROMPT_FIELD_BRAND: unique symbol = Symbol('promptField');
+
+/** The result of `promptField`: bounded, and redacted exactly once. */
+export interface PromptField {
+  readonly [PROMPT_FIELD_BRAND]: true;
+  readonly text: string;
+}
+
+const isPromptField = (entry: string | PromptField): entry is PromptField =>
+  typeof entry !== 'string';
+
+/**
+ * ⚠️ **CARRIES `RedactionOptions`, AND THE BRAND — NOT THE TYPE — PREVENTS A DOUBLE PASS.**
+ *
+ * An earlier version removed `extends RedactionOptions` so `promptField` could not apply a
+ * configured pattern at all. That closed a double-pass defect and opened a worse one, raised
+ * as a P1 by the codex review: the field was truncated at its cap with only the built-in
+ * patterns applied, so **a configured match straddling the cut was split, stopped matching,
+ * and its prefix reached the provider.**
+ *
+ * That is the ordering hazard `boundedText` documents — *"cutting first could split an
+ * assignment so that the pattern no longer matches and the tail of a secret survives the
+ * cut"*. The earlier reasoning held only for the BUILT-IN shapes, whose `NAME=` prefix
+ * survives truncation and keeps matching. **An arbitrary configured regex has no such
+ * structure**: cut anywhere inside its match and the match is gone while the prefix remains.
+ *
+ * So a field is redacted with the FULL options BEFORE it is bounded, and `promptField`
+ * returns a BRANDED value that `assemblePrompt` passes through untouched. Exactly one pass
+ * per segment, and the order is redact-then-cut everywhere.
+ */
+export interface PromptFieldOptions extends RedactionOptions {
   /** Defaults to `PROMPT_FIELD_CAP_BYTES`. Applies to the RETURNED string, marker included. */
   readonly capBytes?: number;
 }
@@ -167,17 +190,28 @@ export interface PromptFieldOptions {
  * marker outside the cap; that is a small overshoot rather than a defect, but a cap that
  * means "and then a bit more" is the kind of imprecision two modules later disagree about.
  */
-export function promptField(value: string, options?: PromptFieldOptions): string {
-  return boundWithMarker(
-    value,
-    options?.capBytes ?? PROMPT_FIELD_CAP_BYTES,
-    // NO redaction options, by construction — see `PromptFieldOptions`. The built-in
-    // patterns still run, inside `boundedText`, so a field is never returned raw; the
-    // CONFIGURED patterns are applied exactly once, later, by `assemblePrompt`.
-    undefined,
-    // A space, not a newline: a field is rendered inline, on the line its label opens.
-    ' ',
-  );
+export function promptField(
+  value: string,
+  // ⚠️ REQUIRED, not optional, and `undefined` must be written out. A `PromptField` is passed
+  // through by `assemblePrompt` untouched — that is what keeps the configured patterns to one
+  // pass — so a caller that silently OMITTED the options would skip them for that field
+  // entirely, and nothing downstream would notice. Making the argument mandatory converts a
+  // silent omission into a visible one; the built-in patterns apply either way.
+  options: PromptFieldOptions | undefined,
+): PromptField {
+  return {
+    [PROMPT_FIELD_BRAND]: true,
+    // REDACTED WITH THE FULL OPTIONS FIRST, then bounded. The configured patterns must run
+    // before the cut, or a match straddling it is split into an unmatchable — and still
+    // sensitive — prefix. `boundWithMarker` applies only the built-ins after this, and those
+    // are idempotent (`evidence.ts:427`), so the configured patterns run exactly once.
+    text: boundWithMarker(
+      redactText(value, options),
+      options?.capBytes ?? PROMPT_FIELD_CAP_BYTES,
+      // A space, not a newline: a field is rendered inline, on the line its label opens.
+      ' ',
+    ),
+  };
 }
 
 /**
@@ -205,6 +239,32 @@ export function promptField(value: string, options?: PromptFieldOptions): string
  */
 export type PromptOverflowPolicy = 'truncate' | 'refuse';
 
+/**
+ * Composes fixed label text with already-redacted fields into ONE branded body line.
+ *
+ * Prompts are not lists of bare values: they read `statement: <the statement>`, and the
+ * label is this repository's own text while the value is not. Without this, a builder would
+ * have to interpolate a `PromptField` back into a plain string — which would hand
+ * `assemblePrompt` something it must redact, redacting the field a second time and
+ * reintroducing the defect the brand exists to prevent.
+ *
+ * **String parts are redacted too**, with the run's options. They are expected to be fixed
+ * labels, for which redaction is a no-op, and treating them as trusted-by-position would be
+ * the same footgun `head` already carries — one worth having in exactly one place, not two.
+ * `PromptField` parts are passed through untouched, because they are already redacted.
+ */
+export function promptLine(
+  parts: readonly (string | PromptField)[],
+  redaction?: RedactionOptions,
+): PromptField {
+  return {
+    [PROMPT_FIELD_BRAND]: true,
+    text: parts
+      .map((part) => (isPromptField(part) ? part.text : redactText(part, redaction)))
+      .join(''),
+  };
+}
+
 export interface PromptAssembly {
   /**
    * Fixed instruction lines that open the prompt. NEVER redacted and NEVER bounded.
@@ -219,7 +279,7 @@ export interface PromptAssembly {
    * Joined with newlines. Everything a provider is being shown — criterion statements,
    * declared ids, evidence summaries, observed values — goes here.
    */
-  readonly body: readonly string[];
+  readonly body: readonly (string | PromptField)[];
   /**
    * Fixed instruction lines that close the prompt: the response shape, the valid-ids rule.
    * NEVER redacted and NEVER bounded — this is the guarantee the story exists for.
@@ -265,12 +325,19 @@ export function assemblePrompt(input: PromptAssembly): string {
   const framing = byteLength([...input.head, '', ...tail].join('\n'));
   const budget = input.capBytes - framing;
 
-  const raw = input.body.join('\n');
+  // EACH SEGMENT REDACTED EXACTLY ONCE. A `PromptField` was already redacted with the full
+  // options by `promptField`, before it was cut; a plain string has not been touched, so it
+  // is redacted here. Neither is redacted twice, and both are redacted before any cut.
+  const raw = input.body
+    .map((entry) => (isPromptField(entry) ? entry.text : redactText(entry, input.redaction)))
+    .join('\n');
 
   if ((input.onOverflow ?? 'truncate') === 'refuse') {
     // Measured on the REDACTED text, because that is what would actually be sent — a
     // redaction can only shorten, so measuring the raw text would refuse prompts that fit.
-    const redactedBytes = byteLength(redactText(raw, input.redaction));
+    // `raw` is already fully redacted, so this measures exactly the bytes that would be
+    // sent — the same string `boundWithMarker` is about to bound.
+    const redactedBytes = byteLength(raw);
     if (redactedBytes > budget) {
       throw new InfraError(
         `the assembled prompt is too large: ${redactedBytes} bytes of content with only ` +
@@ -282,7 +349,7 @@ export function assemblePrompt(input: PromptAssembly): string {
     }
   }
 
-  const slot = boundWithMarker(raw, budget, input.redaction, '\n');
+  const slot = boundWithMarker(raw, budget, '\n');
 
   return [...input.head, slot, ...tail].join('\n');
 }
@@ -300,36 +367,24 @@ export function assemblePrompt(input: PromptAssembly): string {
  * could split an assignment so that the pattern no longer matches, leaving the tail of a
  * credential behind in text that looks clean.
  */
-function boundWithMarker(
-  raw: string,
-  capBytes: number,
-  redaction: RedactionOptions | undefined,
-  separator: string,
-): string {
+function boundWithMarker(raw: string, capBytes: number, separator: string): string {
   if (capBytes <= 0 || raw === '') {
     return '';
   }
 
-  // ⚠️ EVERY `boundedText` CALL BELOW STARTS FROM `raw`, NEVER FROM A REDACTED STRING, so
-  // each candidate receives EXACTLY ONE redaction pass. Raised as a P1 by the codex review
-  // of story 6.8, and correct.
+  // ⚠️ `raw` IS ALREADY REDACTED WITH THE CONFIGURED PATTERNS, and no call below passes
+  // them again. `boundedText` still applies the BUILT-IN patterns internally, which is free:
+  // they are idempotent (`evidence.ts:427`), so running them over already-clean text yields
+  // the same string.
   //
-  // The first version redacted here and handed the RESULT to `boundedText`, which redacts
-  // again internally. That is harmless for the BUILT-IN patterns, which `evidence.ts:427`
-  // documents as idempotent — `[REDACTED]` contains no sensitive assignment, so twice is
-  // once.
-  //
-  // It is NOT harmless for `extraPatterns`, which are arbitrary project-supplied regexes
-  // with no idempotence guarantee whatsoever. `/E/g` is enough to break it: the replacement
-  // `[REDACTED]` itself contains an `E`, so a second pass rewrites the marker and the text
-  // GROWS — `EEE` became `[R[REDACTED]DACT[REDACTED]D]…`.
-  //
-  // And it grew on the wrong side of the fail-closed check. `assemblePrompt` measures ONE
-  // pass to decide whether to refuse, so a larger second pass slipped past the refusal and
-  // was silently truncated — defeating `onOverflow: 'refuse'` by way of the very redaction
-  // it depends on. A redactor must not rely on the good behaviour of a pattern it did not
-  // write.
-  let bounded = boundedText(raw, { ...redaction, capBytes });
+  // Passing the configured patterns here as well was a P1: they are arbitrary project
+  // regexes with no idempotence guarantee, and `/E/g` alone turns `EEE` into
+  // `[R[REDACTED]DACT[REDACTED]D]` because the replacement contains an `E`. Worse, the growth
+  // landed on the wrong side of the fail-closed check — `assemblePrompt` measures the text
+  // once to decide whether to refuse, so a larger second pass slipped past the refusal and
+  // was silently truncated, defeating `onOverflow: 'refuse'` through the redaction it
+  // depends on.
+  let bounded = boundedText(raw, { capBytes });
   let marker = truncationMarker(bounded);
   if (marker === '') {
     return bounded.text;
@@ -344,8 +399,8 @@ function boundWithMarker(
       return '';
     }
 
-    // From `raw` again, for the reason above: one pass per candidate, always.
-    const candidate = boundedText(raw, { ...redaction, capBytes: limit });
+    // From `raw` again, and again without the configured patterns.
+    const candidate = boundedText(raw, { capBytes: limit });
     const candidateMarker = truncationMarker(candidate);
     if (candidateMarker === '') {
       // Unreachable — `limit < capBytes` and the content was already too long for
