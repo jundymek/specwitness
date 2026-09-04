@@ -227,6 +227,43 @@ describe('the FR-34 hook — linkable to a future attribution, without implement
     expect(record.criteria.fail).toBe(250);
   });
 
+  it('caps finding ids across the WHOLE record, not per status', () => {
+    // ⚠️ Raised as a P2 by the codex review of this branch. The cap is what keeps a line
+    // inside the size where a single `O_APPEND` write stays atomic, so a per-BUCKET cap
+    // is not a cap at all: 150 of each status is 450 ids in one record with
+    // `findingCriterionIdsTruncated` still false, because no single bucket exceeded 200.
+    // A contract has no criterion-count limit, so this is reachable rather than theoretical.
+    const many = [
+      ...Array.from({ length: 150 }, (_u, i) => criterion(`c-fail-${i}`, 'fail')),
+      ...Array.from({ length: 150 }, (_u, i) => criterion(`c-human-${i}`, 'needs_human')),
+      ...Array.from({ length: 150 }, (_u, i) => criterion(`c-error-${i}`, 'error')),
+    ];
+
+    const record = toScorecardRecord(run({ criteria: many }));
+    const listed =
+      record.findingCriterionIds.fail.length +
+      record.findingCriterionIds.needs_human.length +
+      record.findingCriterionIds.error.length;
+
+    expect(listed).toBeLessThanOrEqual(200);
+    expect(record.findingCriterionIdsTruncated).toBe(true);
+    // The COUNTS stay exact even when the list is cut — a truncated list must never
+    // shrink a denominator 6.6 divides by.
+    expect(record.criteria.fail).toBe(150);
+    expect(record.criteria.needs_human).toBe(150);
+    expect(record.criteria.error).toBe(150);
+  });
+
+  it('keeps the serialized line bounded even at the cap, which is what the append rests on', () => {
+    const many = Array.from({ length: 600 }, (_u, i) => criterion(`criterion-with-a-realistic-id-${i}`, 'fail'));
+
+    const line = serializeScorecardRecord(toScorecardRecord(run({ criteria: many })));
+
+    // The concurrency guarantee in `src/infra/scorecard-store.ts` is argued from the line
+    // staying small. This is that argument, asserted.
+    expect(line.length).toBeLessThan(8192);
+  });
+
   it('does not carry an attribution of its own — that is FR-34 and story 6.6s', () => {
     const record = toScorecardRecord(run());
 

@@ -95,11 +95,23 @@ export const SCORECARD_FILENAME = 'scorecard.jsonl';
 const FIELD_CAP_BYTES = 256;
 
 /**
- * How many finding criterion ids one record carries before it stops listing them.
+ * How many finding criterion ids one record carries, ACROSS ALL THREE STATUSES.
  *
- * A contract with more than 200 failing criteria is not a case anyone summarises
- * per-criterion, and `findingCriterionIdsTruncated` tells 6.6 that the list is partial
- * so it never reports a truncated list as a complete one.
+ * ⚠️ ONE SHARED BUDGET, not one per status, and the distinction was a P2 from the codex
+ * review of this story. A per-bucket cap is not a cap: 150 failures, 150 needs-human and
+ * 150 errors is 450 ids in a single record with `findingCriterionIdsTruncated` still
+ * false, because no individual bucket exceeded its own allowance. A contract has no
+ * criterion-count limit, so that is reachable rather than theoretical.
+ *
+ * It matters because the LINE SIZE is what the concurrency guarantee rests on — see
+ * `src/infra/scorecard-store.ts`. A record that can grow to three times its documented
+ * bound is a record that can outgrow the size at which a single `O_APPEND` write stays
+ * atomic, which is the one property the whole append design depends on.
+ *
+ * 200 because a contract with more than 200 findings is not a case anyone summarises
+ * per-criterion, and `findingCriterionIdsTruncated` tells story 6.6 the list is partial
+ * so it never reports a cut list as a complete one. The per-status COUNTS in
+ * `ScorecardCriterionCounts` stay exact regardless, so no denominator ever shrinks.
  */
 const MAX_FINDING_IDS = 200;
 
@@ -409,7 +421,14 @@ export const ScorecardRecordSchema = z
 
 /* ── the projection ───────────────────────────────────────────────────────────────── */
 
-/** The finding ids, capped, with the flag that says whether the cap bit. */
+/**
+ * The finding ids, capped ACROSS THE RECORD, with the flag that says whether the cap bit.
+ *
+ * The budget is spent in a FIXED order — `fail`, then `needs_human`, then `error` — so two
+ * runs with the same criteria produce the same record, and so the ids most likely to be
+ * worth attributing survive truncation first. A run that overflows the budget is already
+ * one nobody attributes id-by-id; what it must not do is silently claim a complete list.
+ */
 function findingIds(result: RunResult): {
   readonly ids: ScorecardFindingIds;
   readonly truncated: boolean;
@@ -421,16 +440,20 @@ function findingIds(result: RunResult): {
   const needsHuman = collect('needs_human');
   const error = collect('error');
 
+  let remaining = MAX_FINDING_IDS;
+  const take = (ids: readonly string[]): readonly string[] => {
+    const taken = ids.slice(0, Math.max(0, remaining)).map(field);
+    remaining -= taken.length;
+    return taken;
+  };
+
   return {
     ids: {
-      fail: fail.slice(0, MAX_FINDING_IDS).map(field),
-      needs_human: needsHuman.slice(0, MAX_FINDING_IDS).map(field),
-      error: error.slice(0, MAX_FINDING_IDS).map(field),
+      fail: take(fail),
+      needs_human: take(needsHuman),
+      error: take(error),
     },
-    truncated:
-      fail.length > MAX_FINDING_IDS ||
-      needsHuman.length > MAX_FINDING_IDS ||
-      error.length > MAX_FINDING_IDS,
+    truncated: fail.length + needsHuman.length + error.length > MAX_FINDING_IDS,
   };
 }
 
@@ -620,8 +643,24 @@ export function parseScorecardLine(line: string, lineNumber: number, path: strin
   }
 
   // Paths and codes only. Never `issue.message`, which can quote the value it rejected.
+  //
+  // EVERY PATH SEGMENT GOES THROUGH `field()` TOO, and that is belt-and-braces rather than
+  // a fix for a reachable leak — stated precisely because overclaiming a vulnerability is
+  // its own kind of wrong. Raised as a P2 by the codex review of this branch on the theory
+  // that an attacker-controlled map key reaches `issue.path`; measured against this schema,
+  // it does not. An unexpected key under `stageDurationsMs` produces an `unrecognized_keys`
+  // issue carrying the key in `issue.keys` with `path` stopping at `stageDurationsMs`, so
+  // it routes to the branch above, which already redacts. Every path segment this schema
+  // can produce today is one of its own field names, a `STAGE_NAMES` enum member, or an
+  // array index.
+  //
+  // It is applied anyway because that argument is a property of TODAY'S FIELD LIST, not of
+  // this function: the day someone adds a free-form-keyed field — 6.6 has every reason to
+  // want one — a path segment becomes attacker-controlled and this would silently become a
+  // leak in the file least able to afford one. One `.map(field)` makes the module header's
+  // claim true by construction instead of by an argument that has to be re-derived.
   const detail = parsed.error.issues
-    .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.code}`)
+    .map((issue) => `${issue.path.map((segment) => field(String(segment))).join('.') || '<root>'}: ${issue.code}`)
     .join('; ');
 
   return {
