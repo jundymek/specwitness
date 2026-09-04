@@ -1,0 +1,116 @@
+# Hand-written Verification Plan for the corpus fixture
+# `03-ui-success-without-db-mutation`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18). The `contract.fingerprint` must match the frozen contract beside it.
+#
+# THE PLAN IS CORRECT. It probes for exactly what the contract requires; the APP
+# is what is wrong (`app/confirmations.cjs` never writes to the store).
+#
+# E3-01 PROBES THE UI HALF AND MUST PASS. That is not decoration: if the http
+# probe went red this fixture would be testing a broken endpoint, which is a
+# defect class every story-level test already catches, and it would prove
+# nothing about epic-level verification. The failure has to land on E3-02's
+# OBSERVATION.
+plan:
+  epic: epic-3
+  contract:
+    version: 1
+    fingerprint: 818d6eab20f1e93bb96d55f232f98e03542c1e539cf3fc3cef9129e4ae7f87f4
+  data:
+    seed: corpusseed030001
+    bindings: []
+  criteria:
+    # WHAT THE USER IS TOLD. Correct, and pinned as correct.
+    - criterionId: E3-01
+      disposition: automated
+      probes:
+        - id: confirm-response
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /orders/order-1/confirm
+          assertions:
+            - description: confirming an order answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+            - description: the response reports success
+              target: { source: jsonPath, path: $.ok }
+              comparison: equals
+              expected: "true"
+            - description: the response carries the confirmation message a user is shown
+              target: { source: jsonPath, path: $.message }
+              comparison: contains
+              expected: confirmed
+
+    # WHAT THE SYSTEM DID. The observation wraps a second confirm request and
+    # measures the persisted store on either side of it.
+    #
+    # The wrapped http probe asserts 200 and PASSES — so the criterion's failure
+    # is unambiguously the observation's, not a second opinion about the
+    # endpoint. A criterion carries one result and `fail` outranks `pass` when
+    # its probes disagree (`src/pipeline/stages/probes.ts` PROBE_PRECEDENCE).
+    #
+    # `lastConfirmedOrderId` is asserted FIRST on purpose. It is the assertion
+    # whose diagnosis is rendered into the report, and its absence says exactly
+    # what happened: the store holds no confirmation at all. A delta of 0 alone
+    # would be true of a store that had been written and then reverted.
+    - criterionId: E3-02
+      disposition: automated
+      probes:
+        - id: confirm-action
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /orders/order-1/confirm
+          assertions:
+            - description: the confirm request answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+        - id: persisted-confirmations
+          surface: observation
+          mechanics:
+            commandId: confirmations
+            args: []
+            around: confirm-action
+          assertions:
+            - description: the store records the confirmed order after the request
+              target: { source: jsonPath, path: $.lastConfirmedOrderId, phase: after }
+              comparison: equals
+              expected: order-1
+            - description: exactly one confirmation is persisted by the request
+              target: { source: jsonPath, path: $.confirmedOrders, phase: delta }
+              comparison: equals
+              expected: "1"
+
+    - criterionId: E3-03
+      disposition: automated
+      probes:
+        - id: module-suite
+          surface: shell
+          mechanics:
+            commandId: module-tests
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the module test suite exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: every module test passed
+              target: { source: stdout }
+              comparison: contains
+              expected: "confirmations-module: 4 passed, 0 failed"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

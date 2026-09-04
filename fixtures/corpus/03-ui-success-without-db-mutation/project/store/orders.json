@@ -1,0 +1,6 @@
+{
+  "orders": [
+    { "id": "order-1", "state": "pending" }
+  ],
+  "confirmations": []
+}
