@@ -1,0 +1,50 @@
+# Hand-written Verification Contract for the corpus fixture `01-all-correct`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-1 --freeze` — see `fixtures/corpus/README.md`
+# § "Adding a fixture". That is deliberate and it is NOT the thing AD-12
+# forbids: a contract is an INPUT to the run, and its fingerprint is a hash the
+# product must be able to recompute from these bytes or refuse the run.
+# `expected.json` — the OUTCOME — is hand-written and never generated.
+#
+# FOUR criteria across THREE surfaces, on purpose. An all-correct fixture with
+# one trivial criterion proves almost nothing: it is the only fixture in the
+# corpus that shows SpecWitness does not cry wolf, so it has to exercise the
+# stages a defect-class fixture uses rather than the cheapest path to green.
+spec:
+  epic: epic-1
+  version: 1
+  criteria:
+    - id: E1-01
+      statement: Creating an order answers 201 and the created order reports the approved status and the EUR currency.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+    - id: E1-02
+      statement: Creating an order persists exactly one new order.
+      kind: integration
+      severity: critical
+      verifiability: automated
+    - id: E1-03
+      statement: Every persisted order carries the approved status.
+      kind: invariant
+      severity: normal
+      verifiability: automated
+    - id: E1-04
+      statement: The report command reports the service currency and the order schema version.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: df59e03ddca405a0f26053341f3c468ebb03accc5df7e5bb45ea99ad532806c8
+  createdAt: 2026-09-04T09:00:00.000Z
+  frozenAt: 2026-09-04T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-04T09:00:00.000Z
+  history: []

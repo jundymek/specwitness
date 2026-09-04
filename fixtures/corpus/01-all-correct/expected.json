@@ -1,0 +1,24 @@
+{
+  "expectedVersion": 1,
+  "fixture": "01-all-correct",
+  "why": "Brief section 50 class 1 and the corpus's only control: everything is correct, so SpecWitness must say so. It is the one fixture that proves the product does not cry wolf, and the one that will break first when anything in the pipeline changes - which is what it is for. A green Deterministic Gate, a service on an ephemeral loopback port, and four criteria across THREE surfaces: http (E1-01), an observation wrapping an http action with a delta assertion (E1-02), a standalone observation snapshot (E1-03) and shell (E1-04). Every criterion is adjudicated by at least one assertion and none is skipped, because a criterion nobody could adjudicate reporting PASS is this product's oldest live hazard (Epic 4 retro section 2 observation 2) and an all-correct fixture is where it hides best. AC1's third clause - the EVIDENCE KINDS - is pinned through stderrContains rather than through the outcome document, because the expectation format has no evidence field: with --json the human-readable report is written to stderr, and its Evidence section names each member by kind. The four lines below are therefore this fixture's evidence-kind assertion: gate, http, observation and command, one per kind the run must produce.",
+  "proves": ["AC1", "NFR-10", "AD-12", "AD-13", "AD-11", "FR-18", "FR-25", "FR-26", "ADR-002"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass",
+      "E1-02": "pass",
+      "E1-03": "pass",
+      "E1-04": "pass"
+    }
+  },
+  "stderrContains": [
+    "  gate tests (pass, exit 0): node gates/tests.cjs",
+    "  http POST http://127.0.0.1:<PORT:app>/orders -> 201",
+    "  observation orders",
+    "  command report (exit 0): node commands/report.cjs"
+  ]
+}

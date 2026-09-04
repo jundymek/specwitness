@@ -1,0 +1,130 @@
+# Hand-written Verification Plan for the corpus fixture `01-all-correct`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, AC1's "no real providers"). The `contract.fingerprint` below must
+# match the frozen contract beside it; the runner does not patch it, so a
+# contract re-freeze means this line is re-copied by hand.
+#
+# ORDER MATTERS AND IS DELIBERATE. Criteria execute sequentially, in the order
+# written here (`src/pipeline/stages/probes.ts:315`). Every assertion below is
+# nevertheless written to be independent of how many orders already exist: E1-01
+# reads only its own response, E1-02 asserts a DELTA rather than a total, E1-03
+# asserts a property that holds for any number of approved orders, and E1-04
+# reads nothing from the store at all. A fixture whose outcome depended on the
+# absolute row count would go red the first time a criterion was added above it,
+# for a reason nobody would believe.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: df59e03ddca405a0f26053341f3c468ebb03accc5df7e5bb45ea99ad532806c8
+  data:
+    seed: corpusseed010001
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: create-order
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /orders
+            headers:
+              content-type: application/json
+            body: '{"item":"widget","quantity":2}'
+          assertions:
+            - description: creating an order answers 201
+              target: { source: status }
+              comparison: equals
+              expected: "201"
+            - description: the created order reports the approved status
+              target: { source: jsonPath, path: $.status }
+              comparison: equals
+              expected: approved
+            - description: the created order reports the EUR currency
+              target: { source: jsonPath, path: $.currency }
+              comparison: equals
+              expected: EUR
+
+    # THE WRAPPED PAIR. The observation runs its command, lets the http probe
+    # perform the action between the two snapshots, runs the command again and
+    # compares (`src/surfaces/observation.ts`). Both probes belong to ONE
+    # criterion, so both must be satisfied for it to pass — the http probe's own
+    # result is derived exactly as any other probe's is
+    # (`src/pipeline/stages/probes.ts:967-968`).
+    - criterionId: E1-02
+      disposition: automated
+      probes:
+        - id: submit-order
+          surface: http
+          mechanics:
+            serviceId: app
+            method: POST
+            path: /orders
+            headers:
+              content-type: application/json
+            body: '{"item":"widget","quantity":1}'
+          assertions:
+            - description: submitting an order answers 201
+              target: { source: status }
+              comparison: equals
+              expected: "201"
+        - id: persisted-orders-delta
+          surface: observation
+          mechanics:
+            commandId: orders
+            args: []
+            around: submit-order
+          assertions:
+            - description: exactly one new order is persisted
+              target: { source: jsonPath, path: $.count, phase: delta }
+              comparison: equals
+              expected: "1"
+
+    - criterionId: E1-03
+      disposition: automated
+      probes:
+        - id: orders-all-approved
+          surface: observation
+          mechanics:
+            commandId: orders
+            args: []
+          assertions:
+            - description: every persisted order carries the approved status
+              target: { source: jsonPath, path: $.allApproved, phase: snapshot }
+              comparison: equals
+              expected: "true"
+
+    - criterionId: E1-04
+      disposition: automated
+      probes:
+        - id: report-config
+          surface: shell
+          mechanics:
+            commandId: report
+            args: ["--config"]
+            argumentAllowlist: ["--config"]
+          assertions:
+            - description: the report command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: it reports the service currency
+              target: { source: stdout }
+              comparison: contains
+              expected: currency=EUR
+            - description: it reports the order schema version
+              target: { source: stdout }
+              comparison: contains
+              expected: schema=orders/v1
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
