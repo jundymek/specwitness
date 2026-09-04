@@ -550,6 +550,45 @@ export async function runFixture(
 /* ── comparison ────────────────────────────────────────────────────────────────────── */
 
 /**
+ * Structural equality for the small, JSON-shaped outcome objects this module compares.
+ *
+ * Deliberately not `JSON.stringify` equality: that compares key ORDER too, and key order in
+ * a run document is an artefact of how the object was constructed rather than a fact about
+ * the run. Deliberately not a deep-equal dependency either — the values here are two or
+ * three string-valued keys, and a corpus runner that pulled in a package to compare them
+ * would be adding a supply-chain surface to the one suite whose whole purpose is trust.
+ */
+function deepEqual(left: unknown, right: unknown): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((entry, index) => deepEqual(entry, right[index]))
+    );
+  }
+  if (
+    left === null ||
+    right === null ||
+    typeof left !== 'object' ||
+    typeof right !== 'object'
+  ) {
+    return false;
+  }
+  const leftEntries = Object.entries(left as Record<string, unknown>);
+  const rightObject = right as Record<string, unknown>;
+  return (
+    leftEntries.length === Object.keys(rightObject).length &&
+    leftEntries.every(
+      ([key, value]) => key in rightObject && deepEqual(value, rightObject[key]),
+    )
+  );
+}
+
+/**
  * Compares an observation to its hand-written expectation and returns one line per
  * mismatch. An empty array means the fixture held.
  *
@@ -593,9 +632,41 @@ export function compareOutcome(
   } else {
     const observedOutcome = observed.document.outcome as Record<string, unknown>;
     const expectedOutcome = expected.outcome as Record<string, unknown>;
-    if (JSON.stringify(observedOutcome) !== JSON.stringify(expectedOutcome)) {
+    // STRUCTURAL equality, not `JSON.stringify` equality. The two outcomes carry the same
+    // small set of keys and `JSON.stringify` would compare their ORDER as well as their
+    // values, so `{gateFailed, verdict}` and `{verdict, gateFailed}` would read as a corpus
+    // failure. Key order in the document is decided by wherever `domain/verdict.ts` built
+    // the object, and a harmless refactor there must not turn every fixture red — "a
+    // fixture that fails on Tuesday" is the failure mode this whole format is shaped
+    // against. Behaviour changes still fail, which is the only thing that should.
+    if (!deepEqual(observedOutcome, expectedOutcome)) {
       problems.push(
         `outcome: expected ${JSON.stringify(expectedOutcome)}, observed ${JSON.stringify(observedOutcome)}`,
+      );
+    }
+
+    // DUPLICATES ARE REPORTED BEFORE THE MAP IS BUILT, and the order matters. `new Map(...)`
+    // keeps the LAST entry for a repeated key, so a document carrying two contradictory
+    // results for one criterion would collapse to whichever came second and an `exact`
+    // expectation could still pass. Nothing in `src/schemas/result.ts` requires criterion
+    // ids to be unique, so this is a shape the corpus can actually meet — and a corpus that
+    // reports green while the product emits contradictory records is the green-for-nothing
+    // failure this suite exists to close, arriving through the comparator itself.
+    const duplicates = [
+      ...new Set(
+        observed.document.criteria
+          .map((entry) => entry.criterionId)
+          .filter((id, index, all) => all.indexOf(id) !== index),
+      ),
+    ].sort();
+    for (const criterionId of duplicates) {
+      const statuses = observed.document.criteria
+        .filter((entry) => entry.criterionId === criterionId)
+        .map((entry) => entry.status);
+      problems.push(
+        `criterion ${criterionId}: the run reported it ${statuses.length} times ` +
+          `(${statuses.join(', ')}). One criterion, one result — a duplicate is either a ` +
+          'defect in aggregation or two probes credited to the same criterion.',
       );
     }
 
@@ -710,7 +781,16 @@ export function renderFailure(
 /** Hosts a corpus fixture may name. Anything else leaves the machine (AC1). */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0:0:0:0:0:0:0:1']);
 
-const URL_IN_TEXT = /\b(?:https?):\/\/([^/\s"'`)\]}]+)/g;
+/**
+ * A URL's authority, up to the path.
+ *
+ * `]` is deliberately NOT excluded: an IPv6 authority is `[::1]:8080`, and stopping at the
+ * closing bracket would capture `[::1` — which is neither a host nor anything
+ * `LOOPBACK_HOSTS` can match, so a legitimate loopback fixture would be reported as
+ * reaching the network. `)` and `}` still terminate the match, so a markdown link or a
+ * template expression around a URL does not swallow the syntax after it.
+ */
+const URL_IN_TEXT = /\b(?:https?):\/\/([^/\s"'`)}]+)/g;
 
 /**
  * Every non-loopback URL host named anywhere in a fixture's checked-in project.
@@ -732,8 +812,17 @@ export async function nonLoopbackHosts(projectDirectory: string): Promise<string
       if (authority === undefined) {
         continue;
       }
-      const host = authority.split(':')[0] ?? authority;
-      // A port placeholder leaves `{{PORT:app}}` in the authority; the host is what matters.
+      // BRACKET-AWARE. An IPv6 authority is `[::1]:8080`, so splitting on `:` yields `[`
+      // and a legitimate loopback fixture would be reported as reaching the network — a
+      // FALSE POSITIVE, which in this guard is the expensive direction: it fails a correct
+      // fixture and teaches the next author that the check is noise. `[::1]` is already in
+      // `LOOPBACK_HOSTS`, so the intent was always to accept it.
+      //
+      // `new URL()` is not used: a fixture's authority legitimately contains an
+      // unsubstituted `{{PORT:app}}` placeholder, which is not a parseable URL.
+      const host = authority.startsWith('[')
+        ? authority.slice(0, authority.indexOf(']') + 1) || authority
+        : (authority.split(':')[0] ?? authority);
       if (!LOOPBACK_HOSTS.has(host)) {
         found.add(host);
       }

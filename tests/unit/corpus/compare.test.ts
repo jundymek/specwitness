@@ -127,6 +127,47 @@ describe('drift is detected', () => {
   });
 });
 
+describe('the comparison is about behaviour, not about serialisation', () => {
+  it('does not care about the KEY ORDER of the outcome object', () => {
+    // Key order in a run document is an artefact of how `domain/verdict.ts` built the
+    // object, not a fact about the run. Comparing serialised strings would make a harmless
+    // refactor there turn every fixture red — "a fixture that fails on Tuesday", which is
+    // the failure mode this whole format is shaped against.
+    const expected = expectation({
+      outcome: { verdict: 'FAIL', gateFailed: 'lint' },
+      criteria: { assertion: 'subset', statuses: {} },
+    });
+    const document = {
+      // The same two keys, the other way round.
+      outcome: { gateFailed: 'lint', verdict: 'FAIL' },
+      criteria: [],
+    } as unknown as RunResultDocument;
+
+    expect(compareOutcome(expected, observation({ document }), normalizer)).toEqual([]);
+  });
+
+  it('catches a DUPLICATE criterion result instead of silently keeping the last one', () => {
+    // The green-for-nothing failure arriving through the comparator itself. Nothing in
+    // `src/schemas/result.ts` requires criterion ids to be unique, and a naive
+    // `new Map(...)` keeps the LAST entry — so a document carrying two contradictory
+    // results for one criterion would collapse to whichever came second, and an `exact`
+    // expectation could pass while the product emitted a contradiction.
+    const document = {
+      outcome: { verdict: 'FAIL' },
+      criteria: [
+        { criterionId: 'E1-01', status: 'pass' },
+        { criterionId: 'E1-02', status: 'fail' },
+        { criterionId: 'E1-02', status: 'pass' },
+      ],
+    } as unknown as RunResultDocument;
+
+    const problems = compareOutcome(expectation(), observation({ document }), normalizer);
+
+    expect(problems.join('\n')).toContain('the run reported it 2 times');
+    expect(problems.join('\n')).toContain('fail, pass');
+  });
+});
+
 describe('exact and subset are different claims', () => {
   const document = {
     outcome: { verdict: 'FAIL' },

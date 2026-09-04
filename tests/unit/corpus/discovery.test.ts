@@ -20,7 +20,13 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { describeTreeDrift, discoverFixtures, hashCorpusTree } from '../../corpus/runner.js';
+import {
+  describeTreeDrift,
+  discoverFixtures,
+  hashCorpusTree,
+  machineStateReferences,
+  nonLoopbackHosts,
+} from '../../corpus/runner.js';
 
 const roots: string[] = [];
 
@@ -134,5 +140,70 @@ describe('the fixture-immutability guard', () => {
     await writeFile(join(root, 'alpha', 'expected.json'), '"fail"\n', 'utf8');
 
     expect(describeTreeDrift(before, await hashCorpusTree(root))).toContain('modified:');
+  });
+});
+
+describe('the hermeticity scanners over checked-in fixture text', () => {
+  /** A project directory containing one file with the given text. */
+  async function project(text: string): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'specwitness-corpus-scan-'));
+    roots.push(root);
+    await mkdir(join(root, 'project', '.specwitness'), { recursive: true });
+    await writeFile(join(root, 'project', '.specwitness', 'config.yaml'), text, 'utf8');
+    return join(root, 'project');
+  }
+
+  it('reports a host that is not loopback', async () => {
+    expect(
+      await nonLoopbackHosts(await project('url: https://api.example.com/health\n')),
+    ).toEqual(['api.example.com']);
+  });
+
+  it('accepts 127.0.0.1 and localhost', async () => {
+    expect(
+      await nonLoopbackHosts(
+        await project('a: http://127.0.0.1:4000/health\nb: http://localhost:4001/x\n'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('accepts a BRACKETED IPv6 loopback authority', async () => {
+    // `[::1]:8080` split on `:` yields `[`, so a naive parse reports a legitimate loopback
+    // fixture as reaching the network. A FALSE POSITIVE is the expensive direction in this
+    // guard: it fails a correct fixture and teaches the next author that the check is noise.
+    expect(await nonLoopbackHosts(await project('url: http://[::1]:8080/health\n'))).toEqual([]);
+  });
+
+  it('still reports a bracketed IPv6 address that is NOT loopback', async () => {
+    expect(
+      await nonLoopbackHosts(await project('url: http://[2001:db8::1]:8080/health\n')),
+    ).toEqual(['[2001:db8::1]']);
+  });
+
+  it('accepts a loopback host whose port is still a placeholder', async () => {
+    // The authority a checked-in fixture actually carries, before substitution.
+    expect(
+      await nonLoopbackHosts(await project('url: http://127.0.0.1:{{PORT:app}}/health\n')),
+    ).toEqual([]);
+  });
+
+  it('reports a reference to a credential store', async () => {
+    // NFR-1, AD-4, Q59 — checked where committed executable content enters the repository,
+    // rather than trusted to review.
+    // Two needles match this one line — `~/.claude` and `.claude/credentials` — and both
+    // are reported. Overlapping patterns are fine here: the output is a list of reasons a
+    // human reads, not a count anything branches on.
+    expect(
+      await machineStateReferences(await project('run: cat ~/.claude/credentials.json\n')),
+    ).toEqual([
+      '.specwitness/config.yaml: .claude/credentials',
+      '.specwitness/config.yaml: ~/.claude',
+    ]);
+  });
+
+  it('reports a reference to the invoking user home directory', async () => {
+    expect(
+      await machineStateReferences(await project('run: node $HOME/tool.js\n')),
+    ).toEqual(['.specwitness/config.yaml: $HOME']);
   });
 });
