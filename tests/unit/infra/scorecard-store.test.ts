@@ -209,6 +209,55 @@ describe('the happy path appends one complete line per run', () => {
     expect(text).toContain('run-20260904T120100Z-bbbb');
   });
 
+  it('does not concatenate onto a torn final line, losing BOTH records', async () => {
+    // Raised as a P2 by the codex review of this branch, and it is the failure this story
+    // exists to prevent: a completed run vanishing from the measurement with no symptom.
+    //
+    // ADR-008 §5 makes ONE torn line survivable. But a crash or a short write leaves the
+    // file with NO trailing newline, and appending then glues the next complete record
+    // onto the fragment — so the reader skips them as a single malformed line and the
+    // GOOD run is lost along with the damaged one. One casualty becomes two, and the
+    // second one was healthy.
+    //
+    // Every earlier test in this file wrote its torn line WITH a trailing newline, which
+    // is why none of them caught this. That is the more useful half of the finding.
+    const root = await project();
+    const store = new ScorecardStore(root);
+    const warnings = collector();
+    await writeFile(
+      join(root, '.specwitness', SCORECARD_FILENAME),
+      '{"schemaVersion":1,"runId":"run-2026090',
+      'utf8',
+    );
+
+    await store.appendRecord(record({ runId: 'run-20260904T120100Z-good' }), warnings.warn);
+    const file = await store.read();
+
+    // The completed run survives — that is the whole point.
+    expect(file.records).toHaveLength(1);
+    expect(file.records[0]?.runId).toBe('run-20260904T120100Z-good');
+    // And the damaged fragment is still counted, so `skippedRecords` stays honest.
+    expect(file.skipped).toHaveLength(1);
+    expect(file.skipped[0]?.reason).toBe('malformed');
+  });
+
+  it('adds no separator when the file already ends cleanly', async () => {
+    // The other direction: a repair that fired unconditionally would put a blank line
+    // between every pair of records. Harmless to the reader, but it would mean the file
+    // grows at twice the rate the concurrency argument assumes, and it would look like
+    // damage to anyone opening it.
+    const root = await project();
+    const store = new ScorecardStore(root);
+    const warnings = collector();
+
+    await store.appendRecord(record({ runId: 'run-20260904T120000Z-aaaa' }), warnings.warn);
+    await store.appendRecord(record({ runId: 'run-20260904T120100Z-bbbb' }), warnings.warn);
+
+    const text = await readFile(join(root, '.specwitness', SCORECARD_FILENAME), 'utf8');
+
+    expect(text).not.toContain('\n\n');
+  });
+
   it('never writes outside .specwitness/, and never inside .specwitness/runs/', async () => {
     const root = await project();
     const store = new ScorecardStore(root);

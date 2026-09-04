@@ -68,7 +68,7 @@
  * `src/domain` or `src/schemas`.
  */
 
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile, open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -138,7 +138,9 @@ export class ScorecardStore {
     try {
       // ONE write, `O_APPEND`. Not read-modify-write, not open-truncate-write: either of
       // those would lose a concurrent run's record rather than merely interleave with it.
-      await appendFile(this.#path, serializeScorecardRecord(record), {
+      // The separator is part of the SAME buffer, so this stays one `write(2)` — see
+      // `#separatorForTornTail`.
+      await appendFile(this.#path, `${await this.#separatorForTornTail()}${serializeScorecardRecord(record)}`, {
         encoding: 'utf8',
         flag: 'a',
       });
@@ -167,6 +169,52 @@ export class ScorecardStore {
       } catch {
         // Intentionally empty. See above: there is nowhere left to say it.
       }
+    }
+  }
+
+  /**
+   * A newline to prepend when the file's last line was never terminated, else `''`.
+   *
+   * ⚠️ WITHOUT THIS, ONE TORN LINE COSTS TWO RECORDS — the damaged one and the next good
+   * one. Raised as a P2 by the codex review of this story, and it is the failure this
+   * whole module exists to prevent: a completed run vanishing from the measurement with no
+   * symptom anywhere.
+   *
+   * ADR-008 §5 makes a single torn line survivable, and a crash or a short write is
+   * exactly how one arises — leaving the file with no trailing newline. Appending then
+   * glues the next COMPLETE record onto the fragment, and the reader skips the pair as one
+   * malformed line. One casualty becomes two, and the second was healthy.
+   *
+   * WHY THIS DOES NOT REINTRODUCE THE READ-MODIFY-WRITE THIS MODULE REFUSES. It reads ONE
+   * BYTE and writes nothing; the record and its separator go out in a single buffer, so
+   * the append is still one `write(2)` and still atomic. The read is a separate syscall,
+   * so two concurrent writers can both observe a torn tail and both prepend a newline —
+   * which yields one BLANK LINE between records, and `read` below skips blank lines
+   * without counting them. A benign outcome was chosen over a lock, deliberately: locking
+   * a file that every run must write would make a verification wait on its own
+   * instrumentation.
+   *
+   * Any failure answers `''`. A store that could not inspect the tail must still record —
+   * the worst case is then exactly today's behaviour, which is the right direction to fail
+   * in for something that may never change an outcome.
+   */
+  async #separatorForTornTail(): Promise<string> {
+    let handle;
+    try {
+      handle = await open(this.#path, 'r');
+      const { size } = await handle.stat();
+      if (size === 0) {
+        return '';
+      }
+      const tail = Buffer.alloc(1);
+      await handle.read(tail, 0, 1, size - 1);
+      return tail[0] === 0x0a ? '' : '\n';
+    } catch {
+      // Includes ENOENT, which is the ordinary first-record case: no file, nothing to
+      // separate from.
+      return '';
+    } finally {
+      await handle?.close().catch(() => undefined);
     }
   }
 
