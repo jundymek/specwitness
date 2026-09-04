@@ -410,10 +410,11 @@ interface ExecutedCriterion {
  * THE INVARIANT
  * ============================================================================
  *
- * **AN ADAPTED RUN'S VERDICT CAN ONLY EVER IMPROVE, NEVER DEGRADE.** The replacement is
- * taken only when the re-derived criterion is `pass`; anything else leaves the ORIGINAL
- * result standing, with its original status and its original evidence, exactly as AC2
- * requires.
+ * **AN ADAPTED RUN'S VERDICT CAN ONLY EVER IMPROVE, NEVER DEGRADE**, and it holds PER PROBE
+ * rather than per criterion. A probe's adapted result is taken only when it is `pass`;
+ * otherwise that probe keeps its original result with its original evidence, exactly as AC2
+ * requires. Since no probe's contribution is ever replaced by a worse one, `select` over
+ * them can never resolve worse than it did before.
  *
  * So the blast radius is: *a criterion whose probe could not find a control it was told to
  * click may come to pass — and the run says loudly that it was adapted, and what changed.*
@@ -423,11 +424,22 @@ function adaptationCandidates(executed: readonly ExecutedCriterion[]): Adaptatio
   const candidates: AdaptationCandidate[] = [];
 
   for (const record of executed) {
-    // `error` only. A `fail` means the probe LOOKED and saw something wrong, which is a fact
-    // about the product and never this flow's business — see the section above.
-    if (record.result.status !== 'error' || record.entry.disposition !== 'automated') {
+    if (record.entry.disposition !== 'automated') {
       continue;
     }
+
+    // ⚠️ NO CHECK ON THE CRITERION'S AGGREGATE STATUS, and its absence is deliberate.
+    //
+    // An earlier version required `record.result.status === 'error'` before looking at any
+    // probe. `select` resolves a criterion by `PROBE_PRECEDENCE`, where `fail` outranks
+    // `error` — so a criterion with a step-target-missing browser probe AND a sibling that
+    // merely failed resolves to `fail`, and the aggregate guard skipped the eligible probe
+    // because of a result that was not about it. Raised as a P2 by the codex review.
+    //
+    // Eligibility is a fact about ONE PROBE'S OWN ATTEMPT, so it is asked of that attempt.
+    // The aggregate check was also redundant: the per-probe signal below already excludes
+    // everything it excluded, which is why planting the aggregate check alone changed no
+    // test.
 
     for (const probe of record.entry.probes) {
       if (probe.surface !== 'browser') {
@@ -657,32 +669,55 @@ async function adaptAndReExecute(
     probesRun += fresh.size;
 
     const options: DerivationOptions = { ...deps.redaction };
-    const perProbe = entry.probes.map((probe) =>
-      deriveCriterionResult(
-        record.criterion,
-        // The adapted probe's OWN fresh list; every other probe keeps the first pass's.
-        (changedProbeIds.has(probe.id) ? fresh.get(probe.id) : record.attempts.get(probe.id)) ?? [],
-        { ...options, probeId: probe.id },
-      ),
-    );
-    const replacement = select(perProbe);
 
-    // ONLY an improvement to `pass` is taken. See the section above: this is what bounds
-    // the whole feature to "a failing criterion now passes", and what keeps AC2's "a failed
-    // adaptation leaves the criterion exactly as it was" true without a second code path.
-    const kept = replacement.status === 'pass';
-    if (kept) {
-      context.run.criteria[record.index] = replacement;
+    // ⚠️ ACCEPTANCE IS DECIDED PER PROBE, BEFORE THE CRITERION IS RECOMPUTED.
+    //
+    // An earlier version compared the recomputed CRITERION against `pass`. With several
+    // adaptable probes under one criterion, a proposal that genuinely fixed one of them was
+    // discarded whenever a sibling still failed — and the run then recorded that nothing had
+    // been applied, which was false: a browser really had run the adapted mechanics and that
+    // probe really had passed. Raised as a P2 by the codex review.
+    //
+    // A probe's fresh result is taken ONLY when it is `pass`; otherwise that probe keeps its
+    // original result, with its original evidence. The criterion is then recomputed from the
+    // mix. **The invariant survives per probe**: no probe's contribution is ever replaced by
+    // a worse one, so `select` over them can never resolve worse than before — a criterion
+    // that still fails because of an unrelated sibling is reported honestly as failing, with
+    // the adaptation that did work recorded as applied.
+    const keptProbeIds = new Set<string>();
+    const perProbe = entry.probes.map((probe) => {
+      const original = deriveCriterionResult(record.criterion, record.attempts.get(probe.id) ?? [], {
+        ...options,
+        probeId: probe.id,
+      });
+      if (!changedProbeIds.has(probe.id)) {
+        return original;
+      }
+      // The adapted probe's OWN fresh list — never merged with the first pass's, which is
+      // what keeps 5.4's flake vocabulary intact (see the section above).
+      const adaptedResult = deriveCriterionResult(record.criterion, fresh.get(probe.id) ?? [], {
+        ...options,
+        probeId: probe.id,
+      });
+      if (adaptedResult.status !== 'pass') {
+        return original;
+      }
+      keptProbeIds.add(probe.id);
+      return adaptedResult;
+    });
+
+    if (keptProbeIds.size > 0) {
+      context.run.criteria[record.index] = select(perProbe);
     }
 
     // RECORDED EITHER WAY. The change was applied to the plan copy and a browser really
-    // executed it, so the audit says so whether or not the result was kept; `adapted`
+    // executed it, so the audit says so whether or not its result was kept; `adapted`
     // describes what was kept, and these two lists describe what was done.
     for (const change of adapted.changes) {
       if (change.criterionId !== entry.criterionId) {
         continue;
       }
-      (kept ? applied : discarded).push({
+      (keptProbeIds.has(change.probeId) ? applied : discarded).push({
         criterionId: change.criterionId,
         probeId: change.probeId,
         field: change.field,
@@ -703,7 +738,7 @@ async function adaptAndReExecute(
           applied: [],
           ...discardedRecord,
           refusal: boundedText(
-            'the proposal was valid and was applied to a plan copy, but no re-executed probe passed — every criterion kept its original outcome',
+            'the proposal was valid and was applied to a plan copy, but no re-executed probe passed — every criterion kept its original outcome and its original evidence',
             deps.redaction,
           ),
         }

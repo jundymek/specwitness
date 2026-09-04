@@ -610,6 +610,118 @@ describe('retries and adaptation, which are different things that can both be tr
   });
 });
 
+describe('⚠️ multi-probe criteria — eligibility and acceptance are PER PROBE', () => {
+  /**
+   * A criterion with TWO browser probes: one that could not find its step target (eligible),
+   * and one that merely failed an assertion (an ordinary product failure, never eligible).
+   *
+   * `select` resolves this criterion to `fail`, because `PROBE_PRECEDENCE` puts `fail` above
+   * `error` — which is exactly the shape that used to hide the eligible probe.
+   */
+  function mixedCriterion(): { deps: ProbesStageDeps; offered: string[][] } {
+    const { adapt, offered } = proposeWorking();
+    return {
+      offered,
+      deps: {
+        criteria: [
+          {
+            criterionId: 'E7-01',
+            disposition: 'automated',
+            probes: [browserProbe('missing-target'), browserProbe('plain-failure')],
+          },
+        ],
+        data: NO_DATA,
+        dispatch: ({ probe, attempt }): ProbeDispatch => {
+          const scenario = (probe as BrowserProbe).mechanics.scenario;
+          return {
+            executor: {
+              surface: probe.surface,
+              execute: async (): Promise<ProbeAttempt> => {
+                if (probe.id === 'plain-failure') {
+                  // Reads a real value that is simply wrong. Never adaptable.
+                  return {
+                    attempt,
+                    observations: [{ name: 'title', value: 'Orders' }],
+                    assertionEvaluations: [
+                      {
+                        description: 'the organization page appears',
+                        satisfied: false,
+                        expected: 'Organizations',
+                        actual: 'Orders',
+                      },
+                    ],
+                    evidence: [],
+                    durationMs: 1,
+                  };
+                }
+                if (scenario !== WORKING) {
+                  return {
+                    attempt,
+                    observations: [],
+                    assertionEvaluations: [],
+                    evidence: [],
+                    execError: {
+                      message: 'the step could not find its target',
+                      reason: 'step-target-missing',
+                    },
+                    durationMs: 1,
+                  };
+                }
+                return {
+                  attempt,
+                  observations: [],
+                  assertionEvaluations: [
+                    {
+                      description: 'the organization page appears',
+                      satisfied: true,
+                      expected: 'Organizations',
+                      actual: 'Organizations',
+                    },
+                  ],
+                  evidence: [],
+                  durationMs: 1,
+                };
+              },
+            },
+            params: { probe },
+          };
+        },
+        adapt,
+      },
+    };
+  }
+
+  it('offers the eligible probe even though the CRITERION resolved to fail', async () => {
+    // THE ROUND-5 P2. `select` gives this criterion `fail` because a fail outranks an error,
+    // and an aggregate guard skipped the eligible probe because of a sibling result that was
+    // not about it. Eligibility is a fact about one probe's own attempt.
+    const { deps, offered } = mixedCriterion();
+
+    const { context } = await run(deps);
+
+    expect(offered).toEqual([['missing-target']]);
+    // The plain failure was never offered, so the product failure stays a product failure.
+    expect(offered[0]).not.toContain('plain-failure');
+    expect(context.run.criteria[0]?.status).toBe('fail');
+  });
+
+  it('keeps the adaptation that WORKED even though a sibling keeps the criterion failing', async () => {
+    // The second round-5 P2. Comparing the recomputed CRITERION against `pass` discarded a
+    // proposal that genuinely fixed one probe, and then recorded that nothing had been
+    // applied — false, because a browser really ran it and that probe really passed.
+    const { deps } = mixedCriterion();
+
+    const { context } = await run(deps);
+
+    expect(context.run.adaptation?.adapted).toBe(true);
+    expect(context.run.adaptation?.applied.map((change) => change.probeId)).toEqual([
+      'missing-target',
+    ]);
+    // And the criterion still fails, honestly, because of the sibling.
+    expect(context.run.criteria[0]?.status).toBe('fail');
+  });
+});
+
 describe('the codex findings', () => {
   it('offsets the adapted attempt past the first pass, so evidence cannot be overwritten', async () => {
     // P1. `src/surfaces/browser.ts` derives evidence filenames from criterion id, probe id
