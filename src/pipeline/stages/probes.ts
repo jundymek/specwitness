@@ -707,6 +707,8 @@ async function adaptAndReExecute(
   // Executed, then thrown away because the criterion did not improve. Recorded rather than
   // dropped — see `RunAdaptation.discarded` for why omitting it was a lie about the run.
   const discarded: AppliedMechanicsChange[] = [];
+  /** Why an adapted probe could not be executed at all. See the try/catch below. */
+  const unexecutable: string[] = [];
   let probesRun = 0;
 
   for (const entry of adapted.criteria) {
@@ -740,14 +742,53 @@ async function adaptAndReExecute(
     //
     // The wave-2 pattern once more: *the criterion was preserved* and *its evidence was
     // preserved* are two different claims, and only the first had a test.
-    const fresh = await executeCriterion(
-      deps,
-      context,
-      cwd,
-      entry.criterionId,
-      adaptedProbes,
-      (probeId) => record.attempts.get(probeId)?.length ?? 0,
-    );
+    // ⚠️ A FAILURE TO EXECUTE THE ADAPTED PROBE IS A REFUSED ADAPTATION, NOT A RUN FAILURE.
+    //
+    // The payload schema types `scenario` as free prose — exactly as the merged plan schema
+    // does — so a schema-VALID proposal can still be something 5.2's parser refuses: "log in,
+    // then click Submit", or a `goto` at an absolute URL. 5.2 refuses those with an
+    // `InfraError` before any I/O, which is correct and is its job.
+    //
+    // What was wrong was what happened next: that throw propagated out of the stage and
+    // became exit 3. A provider returning unparseable prose could therefore turn a product
+    // FAIL into an INFRASTRUCTURE ERROR — changing the verdict and the exit code, which AC2
+    // forbids in terms and which this module's own invariant ("a verdict can only ever
+    // improve") claims is impossible. Raised as a P1 by the codex review.
+    //
+    // I had a test proving 5.2 throws for such a scenario and none asking what the STAGE did
+    // with the throw: the same two-halves-of-a-distinction shape that runs through this
+    // whole branch.
+    //
+    // Caught HERE and nowhere wider: only the adapted re-execution is inside the try, so a
+    // genuine infrastructure failure on any OTHER path still surfaces normally. The original
+    // result already stands — the first pass observed what it observed — so keeping it is
+    // both safe and the honest answer.
+    let fresh;
+    try {
+      fresh = await executeCriterion(
+        deps,
+        context,
+        cwd,
+        entry.criterionId,
+        adaptedProbes,
+        (probeId) => record.attempts.get(probeId)?.length ?? 0,
+      );
+    } catch (error) {
+      unexecutable.push(error instanceof Error ? error.message : String(error));
+      for (const change of adapted.changes) {
+        if (change.criterionId !== entry.criterionId) {
+          continue;
+        }
+        discarded.push({
+          criterionId: change.criterionId,
+          probeId: change.probeId,
+          field: change.field,
+          from: boundedText(change.from, deps.redaction),
+          to: boundedText(change.to, deps.redaction),
+        });
+      }
+      continue;
+    }
     probesRun += fresh.size;
 
     const options: DerivationOptions = { ...deps.redaction };
@@ -820,11 +861,15 @@ async function adaptAndReExecute(
           applied: [],
           ...discardedRecord,
           refusal: boundedText(
-            'the proposal was valid and was applied to a plan copy, but no re-executed probe passed — every criterion kept its original outcome and its original evidence',
+            unexecutable.length === 0
+              ? 'the proposal was valid and was applied to a plan copy, but no re-executed probe passed — every criterion kept its original outcome and its original evidence'
+              : `the proposal was valid but the adapted probe could not be executed, so every criterion kept its original outcome and its original evidence: ${unexecutable[0] ?? ''}`,
             deps.redaction,
           ),
         }
       : { adapted: true, applied, ...discardedRecord };
+  // NOTE: an `unexecutable` proposal is recorded in `discarded` above, so it is visible in
+  // the audit whether or not anything else was applied.
 
   return probesRun;
 }

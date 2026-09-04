@@ -29,6 +29,7 @@ import type {
 import type { BrowserProbe, PlanCriterion } from '../../../../src/domain/plan.js';
 import { resolvePlanData } from '../../../../src/domain/plan-data.js';
 import { summarizeFlakiness } from '../../../../src/domain/result-counts.js';
+import { InfraError } from '../../../../src/domain/errors.js';
 import { createProbesStage } from '../../../../src/pipeline/stages/probes.js';
 import type { ProbeDispatch, ProbesStageDeps } from '../../../../src/pipeline/stages/probes.js';
 import { stageContext } from './services.helpers.js';
@@ -1017,6 +1018,72 @@ describe('probe ids reused across criteria', () => {
     expect(context.run.providerUsage).toEqual([]);
     expect(context.run.criteria[0]?.status).toBe('error');
     expect(context.run.criteria[1]?.status).toBe('error');
+  });
+});
+
+describe('⚠️ an adapted probe that cannot be EXECUTED is a refused adaptation', () => {
+  it('never lets 5.2 refusing an adapted scenario become exit 3', async () => {
+    // THE ROUND-11 CODEX P1, and a direct AC2 violation.
+    //
+    // The payload schema types `scenario` as free prose — exactly as the merged plan schema
+    // does — so a schema-VALID proposal can still be something 5.2's parser refuses ("log in,
+    // then click Submit", or a `goto` at an absolute URL). 5.2 refuses those with an
+    // InfraError before any I/O, which is its job and is correct.
+    //
+    // What was wrong was what happened next: the throw propagated out of the stage and became
+    // exit 3, so a provider returning unparseable prose could turn a product FAIL into an
+    // INFRASTRUCTURE ERROR. AC2 forbids exactly that, and this module's invariant claims it
+    // is impossible.
+    //
+    // I already had a test proving 5.2 throws for such a scenario, and none asking what the
+    // STAGE did with the throw — the same two-halves-of-a-distinction shape as the rest of
+    // this branch.
+    const { adapt } = proposeWorking();
+    const deps: ProbesStageDeps = {
+      criteria: [automated([browserProbe('p1')])],
+      data: NO_DATA,
+      dispatch: ({ probe, attempt }): ProbeDispatch => {
+        const scenario = (probe as BrowserProbe).mechanics.scenario;
+        if (scenario === WORKING) {
+          // 5.2 refuses an adapted scenario it cannot parse, BEFORE any I/O.
+          throw new InfraError(
+            'the scenario line is not a recognised directive',
+            'a scenario is one directive per line',
+          );
+        }
+        return {
+          executor: {
+            surface: probe.surface,
+            execute: async (): Promise<ProbeAttempt> => ({
+              attempt,
+              observations: [],
+              assertionEvaluations: [],
+              evidence: [],
+              execError: {
+                message: 'the step could not find its target',
+                reason: 'step-target-missing',
+              },
+              durationMs: 1,
+            }),
+          },
+          params: { probe },
+        };
+      },
+      adapt,
+    };
+
+    // The stage must NOT throw. If it did, `runPipeline` would classify it as an infra
+    // failure and the run would exit 3 on a criterion that had merely failed.
+    const { context, result } = await run(deps);
+
+    expect(result.status).toBe('ok');
+    // The criterion keeps exactly what the first pass observed.
+    expect(context.run.criteria[0]?.status).toBe('error');
+    // Not adapted, and the audit says the proposal was executed nowhere.
+    expect(context.run.adaptation?.adapted).toBe(false);
+    expect(context.run.adaptation?.applied).toEqual([]);
+    expect(context.run.adaptation?.discarded?.map((change) => change.probeId)).toEqual(['p1']);
+    expect(context.run.adaptation?.refusal?.text).toMatch(/could not be executed/);
   });
 });
 
