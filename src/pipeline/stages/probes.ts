@@ -360,49 +360,58 @@ interface ExecutedCriterion {
 /**
  * Which failing browser probes are worth adapting.
  *
- * ⚠️ **AN `execError` IS NEVER ADAPTED, AND THIS IS THE LINE THAT ENFORCES IT.** AC1 scopes
- * the trigger to a probe *failing on element-not-found* — a COSMETIC DRIFT signal — and
- * `src/surfaces/browser.ts` is explicit that the two are different observations:
+ * ⚠️ **TWO KINDS OF FAILURE ARE ADAPTABLE, AND ONE KIND OF `execError` IS NOT.**
  *
- *   the probe LOOKED and saw the wrong value  => an unsatisfied assertion => `fail`
- *   the probe COULD NOT LOOK at all           => `execError`              => `error`
- *
- * A browser that crashed, failed to launch or timed out before the first assertion tells us
- * nothing about a locator. Proposing a new one there would be guessing at a selector while
- * the browser is on fire — and worse, it would spend quota and produce a change on evidence
- * that does not exist. So the candidate set is `status === 'fail'` only: `error`,
- * `needs_human`, `skipped` and `pass` are all excluded, and `error` is excluded even though
- * it is the loudest failure in the report.
- *
- * ⚠️ **THE COST OF THAT RULE, STATED BECAUSE IT IS LARGER THAN IT LOOKS AND WAS MEASURED
- * RATHER THAN ASSUMED.** In 5.2's classification a missing element produces two DIFFERENT
- * outcomes depending on where it is missing:
+ * AC1 scopes adaptation to a probe *failing on element-not-found* — a COSMETIC DRIFT signal.
+ * The subtlety, and the thing this function exists to get right, is that a missing element
+ * reaches this stage as TWO different statuses depending on where it was missing:
  *
  *   an ASSERTION reads a selector matching nothing  =>  unsatisfied assertion  =>  `fail`
  *   a SCENARIO STEP cannot find its target          =>  `execError`            =>  `error`
  *
- * So the most obvious motivating case — "Create company" is relabelled and the probe CLICKS
- * it — lands in `error` and is NOT adapted here. What remains adaptable is drift where the
- * steps still SUCCEED and the page is simply wrong: a renamed route, or a deprecated control
- * that is still present and now leads elsewhere. Both are proved end to end against a real
- * browser in `tests/integration/surfaces/browser-adaptation.test.ts`, which also carries a
- * test that MEASURES this limitation so it cannot drift silently.
+ * Both are the same fact about the world — the page answered, and the answer was that
+ * nothing matched — so both are adaptable. The second was originally excluded (DECISIONS.md
+ * D12) because `execError` also covers a browser that DIED, and the two were
+ * indistinguishable without reading Playwright's prose. **The owner ruled that gap closed
+ * rather than carried**, so 5.2's driver now records `ProbeExecError.reason` structurally,
+ * established by ASKING THE PAGE whether the selector matched rather than by parsing a
+ * message. This function branches on that field and on nothing else.
  *
- * The rule is not widened to cover it, because the `execError` for a missing step target is
- * shaped identically to the one a mid-run CRASH produces — the only difference is a `phase`
- * word inside a prose message, and branching on that would be classifying by matching an
- * adapter's prose, which this codebase rejects as a technique. Closing it properly means a
- * structured reason on `ProbeExecError`, an additive change to a merged type owned by 5.2.
- * Reported to the owner rather than smuggled in. See DECISIONS.md D12.
+ * WHAT IS STILL NEVER ADAPTED, and why:
+ *
+ *   - `reason: 'unreachable'` — the page could not answer at all. The browser crashed,
+ *     closed or never launched. Proposing a locator here is guessing at a selector while
+ *     the browser is on fire.
+ *   - `reason: 'other'` — it could not look, for a reason nobody established as a target
+ *     miss.
+ *   - **`reason` ABSENT** — an executor that did not say. Absence is never adaptable: a
+ *     reader that needs this distinction must find it stated, never assume it. That is what
+ *     keeps every non-browser surface, and any future one, excluded by default.
+ *   - `needs_human`, `skipped`, `pass`.
+ *
+ * ============================================================================
+ * THE INVARIANT, RE-STATED BECAUSE THIS WIDENING CHANGES IT
+ * ============================================================================
+ *
+ * It used to read "an adaptation may only ever turn a `fail` into a `pass`". An `error` can
+ * now become a `pass` too. **The property that survives — and the one that matters — is
+ * that AN ADAPTED RUN'S VERDICT CAN ONLY EVER IMPROVE, NEVER DEGRADE.** The replacement is
+ * taken only when the re-derived criterion is `pass`; anything else leaves the ORIGINAL
+ * result standing, with its original status and its original evidence, exactly as AC2
+ * requires for the new class as much as the old.
+ *
+ * So the blast radius is now: *a criterion that was failing, or that errored for ONE
+ * specific structurally-identified reason, may come to pass — and the run says loudly that
+ * it was adapted, and what changed.* Nothing else moves.
  */
 function adaptationCandidates(executed: readonly ExecutedCriterion[]): AdaptationCandidate[] {
   const candidates: AdaptationCandidate[] = [];
 
   for (const record of executed) {
-    // `fail` and nothing else. `outcomeOf` has already made `execError` outrank any
-    // assertion the probe managed to evaluate, so a criterion that could not look is
-    // `error` here and never reaches this branch.
-    if (record.result.status !== 'fail' || record.entry.disposition !== 'automated') {
+    if (
+      (record.result.status !== 'fail' && record.result.status !== 'error') ||
+      record.entry.disposition !== 'automated'
+    ) {
       continue;
     }
 
@@ -411,16 +420,22 @@ function adaptationCandidates(executed: readonly ExecutedCriterion[]): Adaptatio
         continue;
       }
       const probeAttempts = record.attempts.get(probe.id) ?? [];
-      // The probe must itself have LOOKED. A criterion can fail because one of its probes
-      // failed while a browser probe beside it errored; adapting that browser probe would
-      // be the same guess-while-on-fire, reached by a different door.
-      const looked = probeAttempts.some(
-        (attempt) => attempt.execError === undefined && attempt.assertionEvaluations.length > 0,
-      );
+      const last = probeAttempts.at(-1);
+      if (last === undefined) {
+        continue;
+      }
+
+      // THE TWO ADAPTABLE SHAPES, and nothing else. Both mean "the page answered and
+      // nothing matched"; they differ only in whether an assertion or a step did the
+      // looking. Everything else — a dead browser, an unestablished reason, an executor
+      // that said nothing — falls through.
       const unsatisfied = probeAttempts
         .flatMap((attempt) => attempt.assertionEvaluations)
         .find((assertion) => !assertion.satisfied);
-      if (!looked || unsatisfied === undefined) {
+      const missedAnAssertion = last.execError === undefined && unsatisfied !== undefined;
+      const missedAStepTarget = last.execError?.reason === 'step-target-missing';
+
+      if (!missedAnAssertion && !missedAStepTarget) {
         continue;
       }
 
@@ -531,6 +546,29 @@ async function adaptAndReExecute(
     return refuse(decision.reason);
   }
 
+  // ⚠️ **A PATCH MAY ONLY NAME A PROBE THAT WAS OFFERED.** Raised as a P1 by the codex
+  // review of this branch, and it is the sharpest hole this story could have shipped.
+  //
+  // `adaptCriteria` validates a patch against every probe in the PLAN, which is the right
+  // question for the applier and the wrong question here. Without this check a hostile
+  // response could name any browser probe it can guess — one that PASSED, or one excluded
+  // because its browser could not look at all — and the stage would execute
+  // provider-modified mechanics against it. The verdict could not get worse (only an
+  // improvement is ever taken), but a provider would still have chosen what a browser
+  // navigated to, on a probe nobody offered it. That is exactly the authority this story
+  // exists to withhold, reached by a door the payload schema does not guard.
+  //
+  // Refused WHOLESALE rather than per-patch, consistent with everything else here: a payload
+  // that reaches outside its remit is not partially honoured.
+  const offered = new Set(candidates.map((candidate) => candidate.probeId));
+  const trespassing = decision.patches.find((patch) => !offered.has(patch.probeId));
+  if (trespassing !== undefined) {
+    return refuse(
+      `the proposal names probe '${trespassing.probeId}', which was not offered for ` +
+        'adaptation — only a probe that failed on an observation it actually made is adaptable',
+    );
+  }
+
   // The patches are applied to a COPY of the criteria. `adaptCriteria` is pure and has no
   // file system in scope, so the project's `.specwitness/plans/<epic>.yaml` and the frozen
   // contract cannot be written from here — the guarantee is a property of the module rather
@@ -553,6 +591,9 @@ async function adaptAndReExecute(
 
   const changedProbeIds = new Set(adapted.changes.map((change) => change.probeId));
   const applied: AppliedMechanicsChange[] = [];
+  // Executed, then thrown away because the criterion did not improve. Recorded rather than
+  // dropped — see `RunAdaptation.discarded` for why omitting it was a lie about the run.
+  const discarded: AppliedMechanicsChange[] = [];
   let probesRun = 0;
 
   for (const entry of adapted.criteria) {
@@ -571,7 +612,27 @@ async function adaptAndReExecute(
     // A FRESH map, per the section above. Only the adapted probes are re-run: a probe whose
     // mechanics did not move has already been observed and re-running it would duplicate its
     // evidence for no new information.
-    const fresh = await executeCriterion(deps, context, cwd, entry.criterionId, adaptedProbes);
+    //
+    // ⚠️ **THE ATTEMPT NUMBER IS OFFSET PAST THE FIRST PASS, AND THAT IS NOT COSMETIC.**
+    // Raised as a P1 by the codex review of this branch. `src/surfaces/browser.ts` derives
+    // its evidence filenames from criterion id, probe id AND attempt number, and its own
+    // comment says why: *"THE ATTEMPT NUMBER IS NOT DECORATION"*. A re-execution that
+    // restarted at attempt 1 would write its trace and screenshot over the FIRST pass's — so
+    // an adaptation that failed would leave the retained original failure pointing at
+    // evidence captured from the ADAPTED run. The criterion result would be untouched and
+    // its evidence would quietly be somebody else's, which is a worse lie than a changed
+    // verdict because nothing in the report would look wrong.
+    //
+    // The wave-2 pattern once more: *the criterion was preserved* and *its evidence was
+    // preserved* are two different claims, and only the first had a test.
+    const fresh = await executeCriterion(
+      deps,
+      context,
+      cwd,
+      entry.criterionId,
+      adaptedProbes,
+      (probeId) => record.attempts.get(probeId)?.length ?? 0,
+    );
     probesRun += fresh.size;
 
     const options: DerivationOptions = { ...deps.redaction };
@@ -588,16 +649,19 @@ async function adaptAndReExecute(
     // ONLY an improvement to `pass` is taken. See the section above: this is what bounds
     // the whole feature to "a failing criterion now passes", and what keeps AC2's "a failed
     // adaptation leaves the criterion exactly as it was" true without a second code path.
-    if (replacement.status !== 'pass') {
-      continue;
+    const kept = replacement.status === 'pass';
+    if (kept) {
+      context.run.criteria[record.index] = replacement;
     }
 
-    context.run.criteria[record.index] = replacement;
+    // RECORDED EITHER WAY. The change was applied to the plan copy and a browser really
+    // executed it, so the audit says so whether or not the result was kept; `adapted`
+    // describes what was kept, and these two lists describe what was done.
     for (const change of adapted.changes) {
       if (change.criterionId !== entry.criterionId) {
         continue;
       }
-      applied.push({
+      (kept ? applied : discarded).push({
         criterionId: change.criterionId,
         probeId: change.probeId,
         field: change.field,
@@ -609,17 +673,20 @@ async function adaptAndReExecute(
     }
   }
 
+  const discardedRecord = discarded.length === 0 ? {} : { discarded };
+
   context.run.adaptation =
     applied.length === 0
       ? {
           adapted: false,
           applied: [],
+          ...discardedRecord,
           refusal: boundedText(
-            'the proposal was valid and was applied to a plan copy, but the re-executed probe did not pass — the original failure stands',
+            'the proposal was valid and was applied to a plan copy, but no re-executed probe passed — every criterion kept its original outcome',
             deps.redaction,
           ),
         }
-      : { adapted: true, applied };
+      : { adapted: true, applied, ...discardedRecord };
 
   return probesRun;
 }
@@ -636,6 +703,15 @@ async function executeCriterion(
   cwd: string,
   criterionId: string,
   probes: readonly ProbeSpec[],
+  /**
+   * How many attempts this probe has ALREADY had in this run (story 5.6).
+   *
+   * Absent for every caller but one. The adaptation pass passes the first pass's count so a
+   * re-executed probe numbers its attempts 2, 3, ... rather than restarting at 1 — see the
+   * call site for why overwriting attempt 1's evidence would quietly corrupt the record of
+   * the original failure.
+   */
+  attemptOffsetFor?: (probeId: string) => number,
 ): Promise<Map<string, ProbeAttempt[]>> {
   // Bound once per criterion and passed to every executor this stage builds. `gates.ts`
   // pushes its own members onto the same array; an executor cannot, so this is the port.
@@ -747,7 +823,9 @@ async function executeCriterion(
     const group = wrappersSharing(probes, probe);
     if (group.length <= 1) {
       // The ordinary case: a plain probe, or the only observation around its action.
-      for (let attempt = 1; attempt <= cyclesFor(probe); attempt += 1) {
+      const offset = attemptOffsetFor?.(probe.id) ?? 0;
+      for (let cycle = 1; cycle <= cyclesFor(probe); cycle += 1) {
+        const attempt = cycle + offset;
         await runAttempt(probe, attempt, soleAction(probe.id, attempt));
       }
       continue;

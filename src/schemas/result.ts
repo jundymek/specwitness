@@ -526,6 +526,8 @@ const RunAdaptationSchema = z
   .object({
     adapted: z.boolean(),
     applied: z.array(AppliedMechanicsChangeSchema),
+    /** Executed, then thrown away because the criterion did not improve. See the domain type. */
+    discarded: z.array(AppliedMechanicsChangeSchema).optional(),
     refusal: BoundedTextSchema.optional(),
   })
   .strict()
@@ -650,7 +652,19 @@ export function toRunResultDocument(result: RunResult): RunResultDocument {
           // `applied` is spread for the reason `criteria` and `gates` are: the model's
           // arrays are `readonly` and the document's are not. Copying here rather than
           // widening either type keeps the domain immutable where it should be.
-          adaptation: { ...result.adaptation, applied: [...result.adaptation.applied] },
+          // Built explicitly rather than spread: the model's arrays are `readonly` and the
+          // document's are not, so a spread would carry the readonly type through. Same
+          // reason `criteria` and `gates` are copied above.
+          adaptation: {
+            adapted: result.adaptation.adapted,
+            applied: [...result.adaptation.applied],
+            ...(result.adaptation.discarded === undefined
+              ? {}
+              : { discarded: [...result.adaptation.discarded] }),
+            ...(result.adaptation.refusal === undefined
+              ? {}
+              : { refusal: result.adaptation.refusal }),
+          },
         }),
   };
 }

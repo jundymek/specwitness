@@ -669,6 +669,8 @@ function assertOrigin(page, payload) {
 
 test('specwitness browser probe', async ({ page, context }) => {
   const outcome = { ok: false, phase: 'start', message: 'the driver did not run', reads: {} };
+  // The selector the CURRENT step is acting on, or null. Read only by the catch below.
+  let failingSelector = null;
   const blocked = [];
 
   // PREVENTION, NOT DETECTION - and the difference is the whole point. Checking the origin
@@ -747,6 +749,9 @@ test('specwitness browser probe', async ({ page, context }) => {
     for (let index = 0; index < payload.steps.length; index += 1) {
       const step = payload.steps[index];
       outcome.phase = 'step ' + (index + 1) + ' (' + step.verb + ')';
+      // Remembered so the catch below can ASK THE PAGE whether this selector matched,
+      // rather than reading the error text. See the catch for why that distinction matters.
+      failingSelector = step.selector === undefined ? null : step.selector;
       const locator = step.selector === undefined ? null : page.locator(step.selector).first();
       if (step.verb === 'goto') {
         await page.goto(step.url, { waitUntil: 'load' });
@@ -782,6 +787,23 @@ test('specwitness browser probe', async ({ page, context }) => {
   } catch (error) {
     outcome.ok = false;
     outcome.message = describe(error);
+    // WHY THE PROBE COULD NOT LOOK, decided by ASKING THE PAGE rather than by reading the
+    // error text (story 5.6, closing D12). A missing element is a fact the page can report;
+    // a dead browser is a page that cannot answer. That is the same distinction this
+    // module's header already draws for assertion reads, applied to steps.
+    //
+    // A count() probe is deliberate: it resolves immediately and does not wait, so it reports
+    // the state at the moment the step gave up rather than starting a second wait of its own.
+    if (failingSelector !== null) {
+      try {
+        outcome.reason =
+          (await page.locator(failingSelector).count()) === 0 ? 'step-target-missing' : 'other';
+      } catch (probeError) {
+        // The page could not answer, so the browser is gone. NOT a target miss, and
+        // therefore never adaptable.
+        outcome.reason = 'unreachable';
+      }
+    }
   } finally {
     try {
       outcome.finalUrl = page.url();
@@ -978,6 +1000,8 @@ interface ScenarioPayload {
 interface DriverOutcome {
   readonly ok: boolean;
   readonly phase?: string;
+  /** Story 5.6: why the probe could not look, when the driver could establish it. */
+  readonly reason?: string;
   readonly message?: string;
   readonly finalUrl?: string | null;
   readonly reads?: Readonly<Record<string, { present: boolean; value?: string; why?: string }>>;
@@ -2146,7 +2170,21 @@ function classifyFailure(
 
   // The driver ran and reported a failure of its own: a navigation that never completed, a
   // step whose element never appeared, or a crash mid-run. `phase` names which.
+  //
+  // Story 5.6: `reason` is the STRUCTURED half of the same answer, established by the driver
+  // by asking the page rather than by anyone reading this message. It is validated against
+  // the closed set here because `outcome` is parsed from a file on disk and is therefore
+  // untrusted — an unrecognised value is dropped rather than passed through, so a hand-edited
+  // driver result cannot invent an adaptable reason.
+  const reason =
+    outcome.reason === 'step-target-missing' ||
+    outcome.reason === 'unreachable' ||
+    outcome.reason === 'other'
+      ? outcome.reason
+      : undefined;
+
   return {
+    ...(reason === undefined ? {} : { reason }),
     message: redact(
       `the browser probe against ${safeUrl} failed during ${outcome.phase ?? 'execution'}: ` +
         `${outcome.message ?? 'no reason was reported'}`,

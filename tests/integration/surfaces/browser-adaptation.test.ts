@@ -10,44 +10,40 @@
  *   ⇒  re-execution through 5.2's OWN path  ⇒  a recorded, marked outcome
  *
  * ============================================================================
- * ⚠️ WHICH FAILURES ARE ACTUALLY ADAPTABLE — MEASURED HERE, NOT ASSUMED
+ * ⚠️ WHICH FAILURES ARE ADAPTABLE — MEASURED HERE, NOT ASSUMED
  * ============================================================================
  *
- * AC1 says "a browser probe failing on element-not-found", and the clarifications say
- * **never adapt an `execError`** because that means the probe could not observe. Those two
+ * AC1 says "failing on element-not-found" and forbids adapting an `execError`. Those two
  * sentences do not partition the space as cleanly as they look, and this file is where the
- * seam was found — by running it, not by reading it.
- *
- * In 5.2's merged classification, a MISSING ELEMENT produces two different outcomes
- * depending on WHERE it is missing:
+ * seam was found — by running it, not by reading it. A MISSING ELEMENT produces two
+ * different outcomes depending on WHERE it is missing:
  *
  *   an ASSERTION reads a selector that matches nothing  =>  unsatisfied assertion  =>  `fail`
  *   a SCENARIO STEP cannot find its target              =>  `execError`            =>  `error`
  *
  * The second is the one that surprises. `click "#create-company"` against a page that
- * renamed the control times out as a STEP failure, and `browser.ts` builds one `execError`
- * for it that is shaped identically to the one a mid-run browser CRASH produces — the only
- * difference is a `phase` word inside a prose message.
+ * renamed the control times out as a STEP failure, and 5.2 built one `execError` for it
+ * that was shaped identically to the one a mid-run browser CRASH produces.
  *
- * So "the button was relabelled and the probe CLICKS it" is `error`, and this story is
- * forbidden from adapting an `error`. That prohibition is right: the alternative is
- * distinguishing the two by matching Playwright's message text, which is precisely the
- * technique this codebase rejects elsewhere ("classified on the OUTCOME, never by matching
- * the adapter's prose").
+ * That gap was originally carried as DECISIONS.md D12 and reported as pending-owner,
+ * because telling the two apart meant matching Playwright's prose — the technique this
+ * codebase rejects. **The owner ruled it closed rather than carried**, so
+ * `ProbeExecError.reason` is now a structured field that 5.2's driver establishes by ASKING
+ * THE PAGE whether the selector matched. All four cases below are therefore live:
  *
- * WHAT IS THEREFORE ADAPTABLE, and what these tests exercise:
+ *   - a stale SCENARIO whose control still exists but leads elsewhere  =>  `fail`, adapted
+ *   - a stale PATH, the route renamed                                  =>  `fail`, adapted
+ *   - a stale SCENARIO whose control is GONE                           =>  `error`
+ *                                       `reason: 'step-target-missing'`, adapted
+ *   - a browser that could not answer at all                           =>  never adapted
  *
- *   - **path drift** — the route was renamed. Steps succeed, the page is wrong, the
- *     assertion is unsatisfied. `fail`. Adaptable, and fixed by a new `path`.
- *   - **scenario drift where the stale control still exists** — a deprecated link is still
- *     on the page and still clickable, but now leads somewhere else. Steps succeed, the
- *     assertion is unsatisfied. `fail`. Adaptable, and fixed by a new `scenario`.
- *
- * The gap is reported in the PR body and the Dev Agent Record rather than worked around
- * here. Closing it properly means a structured reason on `ProbeExecError` so a step-target
- * miss can be told from a crash without reading prose — an ADDITIVE change to a merged
- * type, which is a message to the owner or a follow-up PR, not something a story branch
- * smuggles in.
+ * The last is asserted at the stage level (`tests/unit/pipeline/stages/probes-adaptation.test.ts`)
+ * rather than here, and that placement is deliberate rather than a gap: killing a real
+ * chromium mid-run reproducibly, on an ephemeral port, inside a suite the review sandbox
+ * cannot even bind a socket in, would be a flaky test defending a rule a deterministic one
+ * already defends four ways. What IS proved here is the half only a real browser can prove:
+ * that Playwright really does report the missing target as a step failure, and that the
+ * driver really does classify it.
  *
  * ⚠️ **AN ADAPTED SCENARIO TRAVELS 5.2'S VALIDATION PATH WITH NO SHORTCUT.** The adapted
  * probe goes through the SAME `createProbeDispatcher` the original did, so its scenario is
@@ -311,20 +307,58 @@ describeWithBrowser('5.6 — adapting a real failing browser probe', () => {
   );
 
   it(
-    'measures the seam: a step whose target is missing is an execError, NOT an adaptable fail',
+    'adapts a CLICKED control that is gone — the execError carries a structured reason',
     async () => {
-      // ⚠️ THIS TEST DOCUMENTS A LIMITATION RATHER THAN A FEATURE, and it exists so the
-      // limitation is measured and cannot drift silently. `#gone` is not on the page, so the
-      // CLICK step fails and 5.2 reports an `execError` — indistinguishable in shape from a
-      // mid-run browser crash. The candidate rule therefore excludes it, and the module
-      // header says why. If 5.2's classification ever gains a structured reason, this test
-      // is the one that should change.
+      // ⚠️ THE TEST THAT USED TO MEASURE A LIMITATION NOW MEASURES ITS FIX, and it is kept
+      // rather than replaced so the change is visible in one place. `#gone` is not on the
+      // page, so the CLICK step fails and 5.2 reports an `execError` — but it now says WHY,
+      // established by asking the page whether the selector matched rather than by reading
+      // Playwright's message.
+      //
+      // This is the motivating case of the whole story: a control was renamed, a probe
+      // clicks the old one, and nothing about the system under verification changed.
       const plan = planWith(browserProbe('/orders', 'click "#gone"'));
 
       const outcome = await execute(probeOf(plan), 'step-missing');
 
+      // Still an execError — 5.2's classification is untouched.
       expect(outcome.attempt.execError).toBeDefined();
       expect(deriveCriterionResult(CRITERION, [outcome.attempt]).status).toBe('error');
+      // And it now carries the structured reason the candidate rule branches on. A REAL
+      // browser produced this: nothing here simulates the classification.
+      expect(outcome.attempt.execError?.reason).toBe('step-target-missing');
+
+      // Which means the adaptation flow can reach it. The rest of the chain is the same as
+      // the two tests above.
+      const { plan: adapted, changes } = applyAdaptation(plan, [
+        { probeId: 'reach-organizations', scenario: 'click "#add-organization"' },
+      ]);
+      expect(changes.map((change) => change.field)).toEqual(['scenario']);
+
+      const after = await execute(probeOf(adapted), 'step-missing-after');
+      expect(after.attempt.execError).toBeUndefined();
+      expect(deriveCriterionResult(CRITERION, [after.attempt]).status).toBe('pass');
+      expect(probeOf(adapted).assertions).toBe(probeOf(plan).assertions);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a step failure that is NOT a missing target does not claim to be one',
+    async () => {
+      // The other side of the discrimination, proved against a real browser rather than a
+      // double: `#heading` EXISTS but is not clickable in a way that resolves, so the step
+      // fails while the selector matches. The reason must not be `step-target-missing`,
+      // because the page did not report an absence.
+      //
+      // A `fill` on a non-input is the cleanest reproducible case: the element is there, the
+      // action is invalid.
+      const plan = planWith(browserProbe('/orders', 'fill "#heading" "text"'));
+
+      const outcome = await execute(probeOf(plan), 'step-not-a-miss');
+
+      expect(outcome.attempt.execError).toBeDefined();
+      expect(outcome.attempt.execError?.reason).not.toBe('step-target-missing');
     },
     TEST_TIMEOUT_MS,
   );

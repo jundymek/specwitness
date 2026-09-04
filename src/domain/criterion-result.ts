@@ -66,9 +66,41 @@ export interface AssertionEvaluation {
  * look is not the same as a probe that looked and saw a violation, and the day those two
  * are conflated is the day a flaky environment starts blocking mergeable branches.
  */
+/**
+ * Why the probe could not observe, as a STRUCTURED value rather than a sentence.
+ *
+ * Story 5.6, closing DECISIONS.md D12 by owner decision. Optional and closed: a stored
+ * `result.json` from before this existed still parses, and an executor that does not know
+ * which case it is in simply omits it.
+ *
+ * WHY IT EXISTS. `execError` means "could not look", and until now that was one bucket
+ * holding two very different things: **a step could not find the element it was told to
+ * act on** (cosmetic drift — the page answered, and the answer was that nothing matched)
+ * and **the browser died** (a broken environment). Story 5.6 may adapt the first and must
+ * never adapt the second, and telling them apart by matching the adapter's prose is the
+ * technique this codebase rejects (`src/cli/commands/verify.ts` says so in terms).
+ *
+ * So the distinction is RECORDED AT THE SITE THAT KNOWS IT and every later reader branches
+ * on this field. Nothing infers it afterwards.
+ *
+ * - `step-target-missing` — a scenario step named a selector, and the page reported that
+ *   nothing matched it. The page ANSWERED. This is the only reason 5.6's adaptation flow
+ *   will act on.
+ * - `unreachable` — the page could not answer at all: the browser crashed, closed, or
+ *   never launched. Never adaptable.
+ * - `other` — anything else that could not look. Never adaptable, and deliberately not
+ *   subdivided: a taxonomy grows by ADR, not by a story needing one more case.
+ */
+export type ProbeExecErrorReason = 'step-target-missing' | 'unreachable' | 'other';
+
 export interface ProbeExecError {
   readonly message: string;
   readonly hint?: string;
+  /**
+   * Absent when the executor cannot tell. **Absence is never adaptable** — a reader that
+   * needs the distinction must find it stated, never assume it.
+   */
+  readonly reason?: ProbeExecErrorReason;
 }
 
 /** What one probe attempt produced (AD-13's `ProbeAttempt`). */

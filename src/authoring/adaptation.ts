@@ -22,8 +22,23 @@
  *    `amend.ts`), which makes it the only legal home for a provider-mediated change to a
  *    plan.
  *
- * Verified by planting a violating import and watching `pnpm depcruise` fire. No rule was
- * authored; the merged ones already cover this.
+ * ⚠️ **DEPCRUISE DOES NOT VALIDATE THIS PLACEMENT, AND SAYING SO WOULD BE A VACUOUS
+ * GUARD.** `.dependency-cruiser.cjs` has rules whose `from` matches `^src/domain/`,
+ * `^src/schemas/`, `^src/ingest/`, `^src/pipeline/`, `^src/report/` and the adapters — and
+ * **none matching `^src/authoring/`**. Planting `authoring -> infra` here cruises clean.
+ * Verified directly rather than assumed, after the epic-5 supervisor raised it.
+ *
+ * What actually holds the placement is the argument itself, which stands without a rule:
+ * `src/domain/**` is pure and cannot invoke a provider; `src/pipeline/**` may not import
+ * `src/authoring/**` (that half IS enforced, by `pipeline-layer`); and `authoring` is where
+ * `plan.ts` and `amend.ts` already compose providers through the one merged gate. The one
+ * plant that DOES fire from here is `authoring -> cli`, caught by `nothing-imports-cli`,
+ * which is a real guard about a different question.
+ *
+ * The missing layer rule is NOT authored here: writing one late in a closing wave is how a
+ * boundary gets drawn wrong, and it is out of this story's scope. It is carried to the epic
+ * retrospective as an owner item, with this module and 5.5's as the evidence that the layer
+ * now has several modules and no rule.
  *
  * ============================================================================
  * A REFUSAL IS A VALUE. NOTHING HERE THROWS INTO THE PIPELINE.

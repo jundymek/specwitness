@@ -81,12 +81,37 @@ export interface AppliedMechanicsChange {
  */
 export interface RunAdaptation {
   /**
-   * TRUE only when at least one proposal was validated, applied to the plan copy and
-   * re-executed. Never true for a refused payload; never true for an empty `applied`.
+   * TRUE only when at least one proposal was validated, applied to the plan copy,
+   * re-executed AND KEPT. Never true for a refused payload; never true for an empty
+   * `applied`, even when `discarded` is non-empty — a change that was executed and thrown
+   * away did not adapt the run.
    */
   readonly adapted: boolean;
-  /** Every change that was applied. Empty when a proposal arrived and was refused. */
+  /**
+   * Every change that was applied AND KEPT — the probe was re-executed and its criterion
+   * improved, so the run's results reflect it.
+   *
+   * Empty when a proposal arrived and was refused.
+   */
   readonly applied: readonly AppliedMechanicsChange[];
+  /**
+   * Every change that was applied and EXECUTED but whose criterion did not improve, so the
+   * original result was kept instead.
+   *
+   * ⚠️ **THIS LIST EXISTS BECAUSE OMITTING IT WAS A LIE ABOUT WHAT THE RUN DID.** Raised as
+   * a P2 by the codex review of this branch: one payload can propose changes across several
+   * criteria, and only some re-executions pass. Recording only the successful ones left the
+   * run marked `adapted: true` while changes that a browser had genuinely executed vanished
+   * from the audit — and the refusal note was suppressed too, because `applied` was
+   * non-empty. A reader would have seen a complete-looking record of an incomplete truth.
+   *
+   * The alternative the review offered was refusing the payload atomically. That was
+   * declined: discarding a proposal that demonstrably fixed one criterion because a second
+   * one did not is user-hostile, and the honest option — say what happened to everything —
+   * is available. **The audit describes everything executed; `adapted` describes what was
+   * kept.**
+   */
+  readonly discarded?: readonly AppliedMechanicsChange[];
   /**
    * Why nothing was applied, when a proposal arrived and was not accepted.
    *

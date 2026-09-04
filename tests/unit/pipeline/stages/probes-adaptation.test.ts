@@ -78,7 +78,15 @@ interface Dispatched {
 function scripted(
   criteria: readonly PlanCriterion[],
   adapt: ProbesStageDeps['adapt'],
-  execErrorFor: readonly string[] = [],
+  /**
+   * Probe id -> the structured `reason` its `execError` carries, or `'none'` for an
+   * execError that establishes nothing.
+   *
+   * Story 5.6 closes D12 by owner decision: a step-target miss IS adaptable, a dead browser
+   * is not, and an executor that did not say is not. Those are three different inputs and
+   * this map is what lets each be tested rather than argued about.
+   */
+  execErrorFor: Readonly<Record<string, 'step-target-missing' | 'unreachable' | 'other' | 'none'>> = {},
 ): { deps: ProbesStageDeps; dispatched: Dispatched[] } {
   const dispatched: Dispatched[] = [];
 
@@ -92,13 +100,22 @@ function scripted(
       const executor: SurfaceExecutor = {
         surface: probe.surface,
         execute: async (): Promise<ProbeAttempt> => {
-          if (execErrorFor.includes(probe.id)) {
+          // The execError is a consequence of the STALE scenario, exactly as it is in
+          // production: a step misses its target because the locator is out of date. An
+          // adapted probe looking for the right thing therefore does not error, which is
+          // what makes the step-target-miss case adaptable end to end rather than in
+          // principle only.
+          const reason = scenario === WORKING ? undefined : execErrorFor[probe.id];
+          if (reason !== undefined) {
             return {
               attempt,
               observations: [],
               assertionEvaluations: [],
               evidence: [],
-              execError: { message: 'the browser crashed before the first assertion' },
+              execError: {
+                message: 'the browser probe could not complete',
+                ...(reason === 'none' ? {} : { reason }),
+              },
               durationMs: 1,
             };
           }
@@ -276,7 +293,7 @@ describe('AC2 — a refused or unhelpful proposal changes nothing', () => {
     expect(context.run.adaptation?.refusal?.text).toContain('assertion edit');
   });
 
-  it('keeps the original failure when the proposal names a probe the plan does not carry', async () => {
+  it('keeps the original failure when the proposal names a probe nobody offered', async () => {
     const { deps } = scripted([automated([browserProbe('p1')])], async () => ({
       outcome: 'proposed',
       patches: [{ probeId: 'invented-probe', scenario: WORKING }],
@@ -294,7 +311,45 @@ describe('AC2 — a refused or unhelpful proposal changes nothing', () => {
 
     expect(context.run.criteria[0]?.status).toBe('fail');
     expect(context.run.adaptation?.adapted).toBe(false);
-    expect(context.run.adaptation?.refusal?.text).toMatch(/does not carry/);
+    expect(context.run.adaptation?.refusal?.text).toMatch(/not offered for adaptation/);
+  });
+
+  it('refuses a patch aimed at a probe that PASSED and was never offered', async () => {
+    // THE CODEX P1. `adaptCriteria` validates a patch against every probe in the PLAN, which
+    // is the right question for the applier and the wrong one for the stage. Without the
+    // candidate check a hostile response could name any browser probe it can guess —
+    // including one that passed — and the stage would execute provider-chosen mechanics
+    // against it. The verdict could not get worse, but a provider would have decided what a
+    // browser navigated to on a probe nobody offered it.
+    const plan: PlanCriterion[] = [
+      {
+        criterionId: 'E7-01',
+        disposition: 'automated',
+        probes: [browserProbe('failing'), browserProbe('already-passing', WORKING)],
+      },
+    ];
+    const { deps, dispatched } = scripted(plan, async () => ({
+      outcome: 'proposed',
+      // Aimed at the probe that PASSED, so it was never a candidate.
+      patches: [{ probeId: 'already-passing', scenario: 'click "#somewhere-else"' }],
+      usage: {
+        role: 'mechanics-adapter',
+        provider: 'scripted',
+        durationMs: 1,
+        attempts: 1,
+        model: null,
+        providerCliVersion: null,
+      },
+    }));
+
+    const { context } = await run(deps);
+
+    expect(context.run.adaptation?.adapted).toBe(false);
+    expect(context.run.adaptation?.refusal?.text).toMatch(/not offered for adaptation/);
+    // And crucially: the passing probe was executed ONCE, in the first pass only. No
+    // provider-chosen mechanics ever reached a browser.
+    expect(dispatched.filter((entry) => entry.probeId === 'already-passing')).toHaveLength(1);
+    expect(dispatched.every((entry) => entry.scenario !== 'click "#somewhere-else"')).toBe(true);
   });
 
   it('keeps the original failure when the adapted probe still fails', async () => {
@@ -321,24 +376,176 @@ describe('AC2 — a refused or unhelpful proposal changes nothing', () => {
   });
 });
 
-describe('an execError is NEVER adapted', () => {
-  it('offers no candidate when the browser could not look at all', async () => {
-    let called = 0;
-    const { deps, dispatched } = scripted(
-      [automated([browserProbe('p1')])],
-      async () => {
-        called += 1;
-        return { outcome: 'refused', reason: 'unreachable' };
-      },
-      ['p1'],
-    );
+describe('D12, closed by owner decision — which execErrors are adaptable', () => {
+  /** Runs one criterion whose only probe errored with the given structured reason. */
+  async function runWithReason(reason: 'step-target-missing' | 'unreachable' | 'other' | 'none') {
+    const { adapt, offered } = proposeWorking();
+    const { deps, dispatched } = scripted([automated([browserProbe('p1')])], adapt, { p1: reason });
+    const { context } = await run(deps);
+    return { context, dispatched, offered };
+  }
+
+  it('ADAPTS a step-target miss — the page answered, and nothing matched', async () => {
+    // The motivating case FR-18 exists for, and the one D12 originally could not reach: a
+    // relabelled control that a scenario step clicks. 5.2's driver now records WHY it could
+    // not look, established by asking the page rather than by reading Playwright's prose.
+    const { context, offered, dispatched } = await runWithReason('step-target-missing');
+
+    expect(offered).toEqual([['p1']]);
+    expect(context.run.criteria[0]?.status).toBe('pass');
+    expect(context.run.adaptation?.adapted).toBe(true);
+    expect(dispatched).toHaveLength(2);
+  });
+
+  it('REFUSES a dead browser — a page that could not answer is not cosmetic drift', async () => {
+    const { context, offered, dispatched } = await runWithReason('unreachable');
+
+    expect(offered).toEqual([]);
+    expect(context.run.criteria[0]?.status).toBe('error');
+    expect(context.run.adaptation).toBeUndefined();
+    // No second dispatch: no quota, and no browser driven at provider-chosen mechanics.
+    expect(dispatched).toHaveLength(1);
+  });
+
+  it('REFUSES an execError for some other reason', async () => {
+    const { context, offered } = await runWithReason('other');
+
+    expect(offered).toEqual([]);
+    expect(context.run.criteria[0]?.status).toBe('error');
+    expect(context.run.adaptation).toBeUndefined();
+  });
+
+  it('⚠️ REFUSES an execError that established NO reason — absence is never adaptable', async () => {
+    // The default-deny half, and the one that keeps every other surface (and any future
+    // one) excluded without naming them. An executor that did not say is not an executor
+    // that said "target missing".
+    const { context, offered } = await runWithReason('none');
+
+    expect(offered).toEqual([]);
+    expect(context.run.criteria[0]?.status).toBe('error');
+    expect(context.run.adaptation).toBeUndefined();
+  });
+});
+
+describe('the invariant, re-stated after the D12 widening', () => {
+  it('never lets an adaptation make a verdict WORSE', async () => {
+    // An adapted probe whose re-execution errors must leave the original result standing.
+    // The property that survives the widening is "a verdict can only improve".
+    let secondPass = false;
+    const { deps } = scripted([automated([browserProbe('p1')])], async (candidates) => {
+      secondPass = true;
+      return {
+        outcome: 'proposed',
+        patches: candidates.map((c) => ({ probeId: c.probeId, scenario: 'click "#still-wrong"' })),
+        usage: {
+          role: 'mechanics-adapter',
+          provider: 'scripted',
+          durationMs: 1,
+          attempts: 1,
+          model: null,
+          providerCliVersion: null,
+        },
+      };
+    });
 
     const { context } = await run(deps);
 
-    expect(context.run.criteria[0]?.status).toBe('error');
-    // Not offered, so no quota is spent guessing at a locator while the browser is on fire.
-    expect(called).toBe(0);
-    expect(context.run.adaptation).toBeUndefined();
-    expect(dispatched).toHaveLength(1);
+    expect(secondPass).toBe(true);
+    expect(context.run.criteria[0]?.status).toBe('fail');
+    expect(context.run.adaptation?.adapted).toBe(false);
+  });
+});
+
+describe('the codex findings', () => {
+  it('offsets the adapted attempt past the first pass, so evidence cannot be overwritten', async () => {
+    // P1. `src/surfaces/browser.ts` derives evidence filenames from criterion id, probe id
+    // AND attempt number. A re-execution restarting at attempt 1 would overwrite the first
+    // pass's trace and screenshot — so a FAILED adaptation would leave the retained original
+    // failure pointing at evidence captured from the adapted run.
+    //
+    // Asserted on the attempt NUMBER the executor was handed, which is the value the
+    // filename is built from.
+    const seen: number[] = [];
+    const { adapt } = proposeWorking();
+    const deps: ProbesStageDeps = {
+      criteria: [automated([browserProbe('p1')])],
+      data: NO_DATA,
+      dispatch: ({ probe, attempt }): ProbeDispatch => {
+        seen.push(attempt);
+        const scenario = (probe as BrowserProbe).mechanics.scenario;
+        return {
+          executor: {
+            surface: probe.surface,
+            execute: async (): Promise<ProbeAttempt> => {
+              const satisfied = scenario === WORKING;
+              return {
+                attempt,
+                observations: [],
+                assertionEvaluations: [
+                  {
+                    description: 'the organization page appears',
+                    satisfied,
+                    expected: 'Organizations',
+                    actual: satisfied ? 'Organizations' : 'Orders',
+                  },
+                ],
+                evidence: [],
+                durationMs: 1,
+              };
+            },
+          },
+          params: { probe },
+        };
+      },
+      adapt,
+    };
+
+    await run(deps);
+
+    // First pass attempt 1; the adapted re-execution is attempt 2, not attempt 1 again.
+    expect(seen).toEqual([1, 2]);
+  });
+
+  it('records a change that was executed and then DISCARDED', async () => {
+    // P2. One payload, two criteria, only one improving. The changes that were executed but
+    // not kept must still appear in the audit — omitting them left the run marked adapted
+    // while a browser had genuinely run provider-chosen mechanics that vanished from the
+    // record.
+    const criteria: PlanCriterion[] = [
+      { criterionId: 'E7-01', disposition: 'automated', probes: [browserProbe('fixable')] },
+      { criterionId: 'E7-02', disposition: 'automated', probes: [browserProbe('unfixable')] },
+    ];
+    const { deps } = scripted(criteria, async (candidates) => ({
+      outcome: 'proposed',
+      patches: candidates.map((candidate) => ({
+        probeId: candidate.probeId,
+        // Only the first proposal actually works.
+        scenario: candidate.probeId === 'fixable' ? WORKING : 'click "#no-better"',
+      })),
+      usage: {
+        role: 'mechanics-adapter',
+        provider: 'scripted',
+        durationMs: 1,
+        attempts: 1,
+        model: null,
+        providerCliVersion: null,
+      },
+    }));
+
+    const context = await (async () => {
+      const ctx = stageContext();
+      ctx.run.contractCriteria.push(CRITERION, { ...CRITERION, criterionId: 'E7-02' });
+      await createProbesStage(deps).run(ctx);
+      return ctx;
+    })();
+
+    expect(context.run.adaptation?.adapted).toBe(true);
+    expect(context.run.adaptation?.applied.map((change) => change.probeId)).toEqual(['fixable']);
+    // The executed-and-thrown-away half is recorded rather than silently dropped.
+    expect(context.run.adaptation?.discarded?.map((change) => change.probeId)).toEqual([
+      'unfixable',
+    ]);
+    // And the criterion it belonged to kept its original failure.
+    expect(context.run.criteria[1]?.status).toBe('fail');
   });
 });

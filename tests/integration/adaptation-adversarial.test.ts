@@ -224,13 +224,16 @@ describe('AC2 — a hostile provider gets nothing', () => {
     expect(context.run.adaptation?.applied).toEqual([]);
   });
 
-  it('adapt-unknown-probe: a schema-legal payload naming a probe the plan lacks is refused', async () => {
-    // Past the schema, refused by the applier — the second lock, not the mechanism.
+  it('adapt-unknown-probe: a schema-legal payload naming a probe nobody offered is refused', async () => {
+    // Past the schema, refused by the STAGE's candidate check — which fires before the
+    // applier's own "the plan does not carry this" refusal and is the stronger of the two.
+    // The applier's check is still there and still tested (`adaptation-apply.test.ts`); it
+    // is the second lock, and this is the first.
     const context = await runWith('adapt-unknown-probe');
 
     expect(context.run.criteria[0]?.status).toBe('fail');
     expect(context.run.adaptation?.adapted).toBe(false);
-    expect(context.run.adaptation?.refusal?.text).toMatch(/does not carry/);
+    expect(context.run.adaptation?.refusal?.text).toMatch(/not offered for adaptation/);
   });
 });
 
