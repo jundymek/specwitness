@@ -277,6 +277,13 @@ module.exports = {
         'earns this rule its keep is `src/infra/scorecard-store.ts`: `src/infra/**` may ' +
         'legitimately use any Node built-in, and without this rule a single `node:https` ' +
         'import beside the `node:fs` one would pass every other check in this file. ' +
+        'THE SUBPATH SUFFIX IS NOT DECORATION: `node:dns/promises` is a real module and an ' +
+        'anchored `$` alone would have let it straight through — the same shape as ' +
+        '`node:fs/promises`, which this codebase uses everywhere, so it is the natural ' +
+        'thing for someone to reach for. It is written `($|/)` rather than `(/.*)?$` because ' +
+        'dependency-cruiser REFUSES the latter as an unsafe regular expression and bails ' +
+        'out of the whole run — which would have disabled every rule in this file, not ' +
+        'just this one. Raised as a P2 by the codex review of story 6.5. ' +
         'THE HONEST LIMIT: dependency-cruiser sees IMPORTS. Node\'s global `fetch` needs ' +
         'none, so it is not caught here — `tests/unit/dependency-rules.test.ts` scans the ' +
         'two modules\' source for it, and plants a `node:https` import to watch this rule ' +
@@ -285,7 +292,7 @@ module.exports = {
       from: { path: '^src/(schemas/scorecard|infra/scorecard-store)\\.ts$' },
       to: {
         path: [
-          '^(node:)?(http|https|http2|net|tls|dgram|dns)$',
+          '^(node:)?(http|https|http2|net|tls|dgram|dns)($|/)',
           // Anything whose job is to fetch. Named rather than inferred: a future
           // dependency added for an unrelated reason must not silently become reachable
           // from this path.

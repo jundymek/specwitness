@@ -751,6 +751,20 @@ describe('the scorecard is local-only, structurally (story 6.5)', () => {
     expect(exitCode).not.toBe(0);
   });
 
+  it('blocks a networking built-in SUBPATH, which an anchored pattern would let through', async () => {
+    // `node:dns/promises` is a real module, and it has exactly the shape of
+    // `node:fs/promises` — which this codebase uses everywhere, so it is the natural thing
+    // for someone to reach for. The rule's first version anchored on `$` and would have
+    // passed it. Raised as a P2 by the codex review of this branch.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/scorecard-store.ts', OFFENDING('node:dns/promises'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
   it('still permits the filesystem, which is the whole point of the module', async () => {
     // The permit half. A ban that also broke `node:fs` would be a ban somebody deletes.
     const tree = await makeTempTree();

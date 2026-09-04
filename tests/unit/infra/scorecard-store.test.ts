@@ -140,6 +140,41 @@ describe('a failing scorecard write never changes anything (AC1, the hardest rul
     expect(warnings.messages.length).toBeLessThanOrEqual(1);
   });
 
+  it('does not throw even when the WARN CALLBACK itself throws', async () => {
+    // Raised as a P2 by the codex review of this branch, and it is the sharpest one in the
+    // story: it breaks the method's headline guarantee from the one line that exists to
+    // uphold it. `warn` is invoked inside the catch, so if `warn` throws, the exception
+    // escapes `appendRecord` — and the call site in `verify.ts` deliberately has no
+    // try/catch, so it would reach `main.ts` and become exit 3. A completed verification
+    // turned into "the environment is broken, retry" BY ITS OWN INSTRUMENTATION.
+    //
+    // Entirely reachable: `printWarning` writes to `process.stderr`, and
+    // `specwitness verify | head -1` destroys that stream. EPIPE on a broken pipe is the
+    // ordinary case, not an exotic one.
+    const root = await project();
+    await mkdir(join(root, '.specwitness', SCORECARD_FILENAME), { recursive: true });
+
+    const store = new ScorecardStore(root);
+    const exploding = (): never => {
+      throw new Error('EPIPE: broken pipe, write');
+    };
+
+    await expect(store.appendRecord(record(), exploding)).resolves.toBeUndefined();
+  });
+
+  it('does not throw when the warn callback throws on an otherwise successful append', async () => {
+    // The happy path never calls `warn`, so this asserts the shape rather than the
+    // recovery: a store that only survived a throwing `warn` on the failure path would
+    // still be one throw away from the defect above if the success path ever gained a
+    // notice.
+    const store = new ScorecardStore(await project());
+    const exploding = (): never => {
+      throw new Error('EPIPE: broken pipe, write');
+    };
+
+    await expect(store.appendRecord(record(), exploding)).resolves.toBeUndefined();
+  });
+
   it('warns exactly once per failed append, never accumulating silence', async () => {
     const root = await project();
     await mkdir(join(root, '.specwitness', SCORECARD_FILENAME), { recursive: true });

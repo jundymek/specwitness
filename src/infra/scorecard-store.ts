@@ -143,11 +143,30 @@ export class ScorecardStore {
         flag: 'a',
       });
     } catch (cause) {
-      warn(
-        `the run was verified, but its scorecard record could not be appended to ${this.#path}: ` +
-          `${describe(cause)}. The verdict and exit code are unaffected; this run is missing from ` +
-          `the dogfooding measurement.`,
-      );
+      // ⚠️ THE REPORT IS ITSELF CONTAINED, and this inner boundary is the difference
+      // between a guarantee and a claim. Raised as a P2 by the codex review of this
+      // branch: `warn` is caller-supplied and bound at the edge to `printWarning`, which
+      // writes to `process.stderr` — and `specwitness verify | head -1` destroys that
+      // stream. An EPIPE from the WARNING would have escaped this catch, reached
+      // `main.ts` and become exit 3, turning a completed verification into "the
+      // environment is broken, retry" by way of the instrumentation that exists to be
+      // invisible. A broken pipe is an ordinary way to run a CLI, not an exotic one.
+      //
+      // AND WHAT IT DOES ON FAILURE IS NOTHING, deliberately. There is no third channel:
+      // we cannot report a failure to report, and every remaining option — rethrowing,
+      // writing to stdout (which carries the `--json` document a harness parses), exiting
+      // — changes something this method promises not to change. Silence about a warning
+      // is the least-bad outcome available; silence about a VERDICT never is, and that is
+      // the distinction. The verdict is already decided and untouched by anything here.
+      try {
+        warn(
+          `the run was verified, but its scorecard record could not be appended to ${this.#path}: ` +
+            `${describe(cause)}. The verdict and exit code are unaffected; this run is missing from ` +
+            `the dogfooding measurement.`,
+        );
+      } catch {
+        // Intentionally empty. See above: there is nowhere left to say it.
+      }
     }
   }
 
