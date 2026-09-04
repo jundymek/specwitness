@@ -45,7 +45,7 @@ I want to freeze a contract,
 So that it is authoritative.
 
 Acceptance criteria, verbatim from the planning artifact:
-  1. the endpoint accepts AUTH_TOKEN=NOTAREALKEY-0123456789abcdefghij
+  1. the endpoint accepts AUTH_TOKEN=[REDACTED]
 "
 `;
 

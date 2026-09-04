@@ -5,10 +5,16 @@
  * only place AD-2's authority boundary can be stated to the model in words.
  * Two properties matter and both are tested:
  *
- *  1. THE EPIC'S REAL CONTENT REACHES THE MODEL VERBATIM. Acceptance criteria
- *     are copied exactly as the artifact wrote them. Paraphrasing them here
- *     would mean the contract was drafted from a summary of the requirement
- *     rather than the requirement, and nobody downstream could tell.
+ *  1. THE EPIC'S REAL CONTENT REACHES THE MODEL VERBATIM, SUBJECT TO REDACTION
+ *     — and story 6.8 added the second half of that sentence rather than
+ *     quietly weakening the first. Acceptance criteria are copied exactly as
+ *     the artifact wrote them: not paraphrased, not summarised, not reordered,
+ *     because drafting a contract from a summary of the requirement rather than
+ *     the requirement is the failure this property exists to prevent, and
+ *     nobody downstream could tell. What they now pass through is `redactText`,
+ *     which alters an epic only where it carries something shaped like a
+ *     credential. See the `head`/`body` split below for why a prompt is the
+ *     last place that boundary can be applied.
  *
  *  2. IDS, VERSIONS AND FINGERPRINTS ARE NOT THE MODEL'S TO CHOOSE, and the
  *     prompt says so plainly. FR-7 requires criterion ids that "survive
@@ -31,6 +37,28 @@
  */
 
 import type { EpicSpec, EpicStory } from '../domain/epic-spec.js';
+import type { RedactionOptions } from '../domain/evidence.js';
+
+import { assemblePrompt } from './prompt-assembly.js';
+
+/**
+ * The whole-prompt cap, in BYTES. Story 6.8.
+ *
+ * ⚠️ **BEFORE STORY 6.8 THIS PROMPT WAS NOT BOUNDED AT ALL**, and this number is
+ * deliberately two orders of magnitude above the verify edge's 24 000.
+ *
+ * **The cap is a runaway guard, not a content budget**, and here that distinction has the
+ * sharpest teeth in the layer. The epic below IS the requirement, and property 1 of this
+ * module requires it to reach the model in full — a contract drafted from half an epic is a
+ * SILENTLY narrowed definition of done, and unlike the plan-author path there is **no gate
+ * downstream that would notice**: `DRAFT_RESPONSE_SCHEMA` validates the shape of whatever
+ * criteria come back, not whether they cover an epic nobody fully described. So the number
+ * is set where a real epic can never reach it.
+ *
+ * Scale check, so the figure is not arbitrary: this repository's entire `epics.md` — seven
+ * epics and forty-three stories — is 57 kB, and this prompt carries ONE epic.
+ */
+export const CONTRACT_PROMPT_CAP_BYTES = 200_000;
 
 /**
  * Builds the drafting prompt for one epic.
@@ -40,8 +68,8 @@ import type { EpicSpec, EpicStory } from '../domain/epic-spec.js';
  * job; `src/providers/invoke.ts` is what makes a malformed answer impossible to
  * turn into state.
  */
-export function buildContractPrompt(epic: EpicSpec): string {
-  const sections: string[] = [
+export function buildContractPrompt(epic: EpicSpec, redaction?: RedactionOptions): string {
+  const head: string[] = [
     'You are drafting a verification contract for a software epic.',
     '',
     'A verification contract is the definition of done: the set of criteria that',
@@ -70,24 +98,46 @@ export function buildContractPrompt(epic: EpicSpec): string {
     '',
     'THE EPIC',
     '',
-    `Epic id: ${epic.id}`,
   ];
+
+  // ⚠️ EVERYTHING BELOW THIS LINE IS UNTRUSTED, AND THE SPLIT IS THE SECURITY DECISION.
+  //
+  // `head` above is fixed literals authored in this repository. The epic is not: it is
+  // whatever `src/ingest/**` parsed out of the project's own planning artifacts — titles,
+  // goals, narratives and acceptance criteria a person wrote in a markdown file. Before
+  // story 6.8 all of it reached the provider with no redaction and no bound whatsoever.
+  //
+  // An acceptance criterion that reads "the API accepts AUTH_TOKEN=hunter2" is careless
+  // rather than exotic, and a prompt is data leaving the process — this is the last
+  // boundary before it does. `explain.ts` made exactly this argument for the criterion
+  // statement in story 5.5; AD-10 says unification widens rather than narrows, so the same
+  // boundary now applies to the field this prompt carries.
+  //
+  // There is no instruction TAIL here: this prompt states all of its rules BEFORE the epic,
+  // so bounding the body cannot reach an instruction. An empty tail is the honest answer for
+  // this builder rather than a reason to invent one.
+  const body: string[] = [`Epic id: ${epic.id}`];
 
   // Absent fields are omitted rather than labelled — see the module header.
   if (epic.title !== '') {
-    sections.push(`Epic title: ${epic.title}`);
+    body.push(`Epic title: ${epic.title}`);
   }
   if (epic.goal !== '') {
-    sections.push('', 'Epic goal:', epic.goal);
+    body.push('', 'Epic goal:', epic.goal);
   }
 
-  sections.push('', `The epic has ${epic.stories.length} ${epic.stories.length === 1 ? 'story' : 'stories'}.`);
+  body.push('', `The epic has ${epic.stories.length} ${epic.stories.length === 1 ? 'story' : 'stories'}.`);
 
   for (const story of epic.stories) {
-    sections.push('', ...renderStory(story));
+    body.push('', ...renderStory(story));
   }
 
-  return `${sections.join('\n')}\n`;
+  return `${assemblePrompt({
+    head,
+    body,
+    capBytes: CONTRACT_PROMPT_CAP_BYTES,
+    ...(redaction === undefined ? {} : { redaction }),
+  })}\n`;
 }
 
 function renderStory(story: EpicStory): string[] {

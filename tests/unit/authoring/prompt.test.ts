@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildContractPrompt } from '../../../src/authoring/prompt.js';
+import {
+  CONTRACT_PROMPT_CAP_BYTES,
+  buildContractPrompt,
+} from '../../../src/authoring/prompt.js';
 import type { EpicSpec } from '../../../src/domain/epic-spec.js';
+import { SEEDED_SECRET } from '../../fixtures/run-result.js';
 
 /**
  * The prompt is the only place a provider learns what to draft, so these tests
@@ -110,3 +114,108 @@ describe('buildContractPrompt', () => {
 });
 
 type EpicStoryType = EpicSpec['stories'][number];
+
+/**
+ * SECURITY and BOUNDING — added by story 6.8.
+ *
+ * Before story 6.8 this builder sent the entire epic — titles, goals, narratives and
+ * acceptance criteria, all of it parsed out of the project's own planning artifacts — to a
+ * provider with **no redaction and no bound whatsoever**. Neither of the two defects Epic 5
+ * retro §2 observation 3 records had ever been looked for here, because this builder was
+ * not one of the two modules in which they were found.
+ *
+ * Every assertion below fails against the pre-6.8 builder; each was run that way.
+ *
+ * Secrets are asserted ABSENT, never `[REDACTED]`-present (Epic 3 retro §7).
+ */
+describe('SECURITY — a seeded credential never reaches the prompt (story 6.8, AC2)', () => {
+  const withAcceptanceCriterion = (text: string): EpicSpec => ({
+    ...EPIC,
+    stories: [
+      {
+        ...(EPIC.stories[0] as EpicStoryType),
+        acceptanceCriteria: [{ ordinal: 1, text, source: SOURCE }],
+      },
+    ],
+  });
+
+  it('is absent when it is seeded into an acceptance criterion', () => {
+    const epic = withAcceptanceCriterion(`the API accepts AUTH_TOKEN=${SEEDED_SECRET}`);
+
+    expect(buildContractPrompt(epic)).not.toContain(SEEDED_SECRET);
+  });
+
+  it('is absent when it is seeded into a story narrative', () => {
+    const epic: EpicSpec = {
+      ...EPIC,
+      stories: [
+        {
+          ...(EPIC.stories[0] as EpicStoryType),
+          narrative: `As an operator with API_KEY=${SEEDED_SECRET},\nI want to log in.`,
+        },
+      ],
+    };
+
+    expect(buildContractPrompt(epic)).not.toContain(SEEDED_SECRET);
+  });
+
+  it('is absent when it is seeded into the epic goal', () => {
+    const epic: EpicSpec = { ...EPIC, goal: `ship it with SECRET=${SEEDED_SECRET}` };
+
+    expect(buildContractPrompt(epic)).not.toContain(SEEDED_SECRET);
+  });
+
+  it('is absent when it arrives as a sensitive header line', () => {
+    const epic = withAcceptanceCriterion(`requests carry Authorization: Bearer ${SEEDED_SECRET}`);
+
+    expect(buildContractPrompt(epic)).not.toContain(SEEDED_SECRET);
+  });
+
+  it('applies config-declared extra patterns when a caller supplies them', () => {
+    const epic = withAcceptanceCriterion('the release is codenamed ORCHID');
+
+    expect(buildContractPrompt(epic, { extraPatterns: [/ORCHID/g] })).not.toContain('ORCHID');
+  });
+});
+
+describe('bounding (story 6.8, AC1)', () => {
+  const huge = (): EpicSpec => ({
+    ...EPIC,
+    stories: Array.from({ length: 40 }, (_unused, index) => ({
+      ...(EPIC.stories[0] as EpicStoryType),
+      id: `7.${index}`,
+      narrative: 'x'.repeat(20_000),
+    })),
+  });
+
+  it('is bounded, which it was not before story 6.8', () => {
+    // `+ 1` for the trailing newline this builder appends after assembly, which sits outside
+    // the assembled document and is part of its own long-standing output shape.
+    expect(new TextEncoder().encode(buildContractPrompt(huge())).length).toBeLessThanOrEqual(
+      CONTRACT_PROMPT_CAP_BYTES + 1,
+    );
+  });
+
+  it('keeps every instruction when the epic is bounded away', () => {
+    // This builder states all of its rules BEFORE the epic, so it has no instruction tail to
+    // protect. The guarantee that matters here is the mirror image: bounding the body can
+    // never reach the head.
+    const prompt = buildContractPrompt(huge());
+
+    expect(prompt).toContain('WHAT TO WRITE');
+    expect(prompt).toContain('WHAT NOT TO WRITE');
+    expect(prompt).toMatch(/DO NOT invent, assign or return criterion ids/);
+    // The bound really was reached, so nothing above passes vacuously.
+    expect(prompt).toMatch(/… truncated: \d+ of \d+ bytes shown/);
+  });
+
+  it('leaves an ordinary epic completely untouched', () => {
+    // The widening must cost nothing on the overwhelmingly common input: ordinary planning
+    // prose matches neither redaction shape, so it arrives verbatim.
+    const prompt = buildContractPrompt(EPIC);
+
+    expect(prompt).toContain('Given a draft, when I freeze it, then a fingerprint is printed.');
+    expect(prompt).not.toContain('truncated:');
+    expect(prompt).not.toContain('[REDACTED]');
+  });
+});

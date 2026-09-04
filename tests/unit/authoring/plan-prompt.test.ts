@@ -135,13 +135,13 @@ describe('bounding (AC1)', () => {
 describe('what the prompt still says (unchanged by story 6.8)', () => {
   it('carries the criteria and their metadata', () => {
     const contract = frozenContract([
-      criterion('E7-01', { statement: 'The service starts.', severity: 'blocker' }),
+      criterion('E7-01', { statement: 'The service starts.', severity: 'critical' }),
     ]);
 
     const prompt = buildPlanPrompt(contract, DECLARED);
 
     expect(prompt).toContain('--- E7-01 ---');
-    expect(prompt).toContain('severity: blocker');
+    expect(prompt).toContain('severity: critical');
     expect(prompt).toContain('The service starts.');
   });
 
