@@ -92,6 +92,19 @@ export interface ProbeFixtureOptions {
    */
   readonly fakePlanAuthorWithoutScript?: boolean;
   /**
+   * Assign the shipped `fake` provider to the `explainer` role (story 5.5).
+   *
+   * The value is the fixture SCRIPT — the array of raw response strings the fake replays,
+   * one per scripted attempt, with the last entry repeating. `[]` configures the role but
+   * writes NO script file, which is how the "provider binary missing" route is reached from
+   * the outside: the fake refuses with "has no fixture for role".
+   *
+   * Separate from `fakePlanAuthor` on purpose. Each role has its own counter in the fake, so
+   * a run that both compiles a plan and explains it draws from two independent scripts —
+   * and a test can configure an explainer without opting into auto-compilation.
+   */
+  readonly fakeExplainer?: readonly string[];
+  /**
    * Remove `.specwitness/plans` entirely, so the compiled plan has nowhere to be stored.
    *
    * REMOVED rather than replaced with a file, and the difference decides whether the case
@@ -303,6 +316,7 @@ function config(extras: {
   readonly port: number;
   readonly service: boolean;
   readonly fakePlanAuthor: boolean;
+  readonly fakeExplainer: boolean;
 }): string {
   const lines = ['version: 1', '', 'project:', '  baseBranch: master', ''];
 
@@ -342,13 +356,17 @@ function config(extras: {
     '',
   );
 
-  if (extras.fakePlanAuthor) {
+  if (extras.fakePlanAuthor || extras.fakeExplainer) {
+    // ONE `ai:` block whichever roles are wanted. Emitting two would be invalid YAML, and
+    // the roles are independent: `configSchema` requires every named role to reference a
+    // declared provider, so both point at the same `hermetic` entry.
     lines.push(
       'ai:',
       '  providers:',
       '    hermetic: { adapter: fake, mode: fake-provider }',
       '  roles:',
-      '    plan-author: hermetic',
+      ...(extras.fakePlanAuthor ? ['    plan-author: hermetic'] : []),
+      ...(extras.fakeExplainer ? ['    explainer: hermetic'] : []),
       '',
     );
   }
@@ -643,7 +661,7 @@ export async function buildProbeFixture(
 
     await writeFile(
       join(root, '.specwitness', 'config.yaml'),
-      config({ gates, port, service, fakePlanAuthor }),
+      config({ gates, port, service, fakePlanAuthor, fakeExplainer: options.fakeExplainer !== undefined }),
       'utf8',
     );
 
@@ -652,6 +670,17 @@ export async function buildProbeFixture(
       await writeFile(
         join(root, 'fake-provider', 'plan-author.json'),
         fakePlanDraft(human),
+        'utf8',
+      );
+    }
+
+    // An EMPTY script array configures the role but writes no file, so the fake refuses
+    // with "has no fixture for role" — the AC2 route that is only reachable from outside.
+    if (options.fakeExplainer !== undefined && options.fakeExplainer.length > 0) {
+      await mkdir(join(root, 'fake-provider'), { recursive: true });
+      await writeFile(
+        join(root, 'fake-provider', 'explainer.json'),
+        `${JSON.stringify(options.fakeExplainer, null, 2)}\n`,
         'utf8',
       );
     }

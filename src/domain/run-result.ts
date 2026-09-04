@@ -58,6 +58,42 @@ export interface ProviderUsage {
 }
 
 /**
+ * ONE criterion's non-authoritative root-cause hypothesis (story 5.5, FR-11, AD-2, AD-10).
+ *
+ * **NOTHING MECHANICAL READS THIS.** No verdict, no status, no count, no exit code and no
+ * classification derives from it. It is text a human — or a repair agent — reads, and it
+ * is the only free-form provider prose a run carries outside `Evidence.explanation`.
+ *
+ * WHY IT IS NOT A FIELD ON `DerivedCriterionResult`, which is where a reader would first
+ * look for it. Three reasons, and the third is the story's whole point:
+ *
+ *  1. `DerivedCriterionResult` is produced by exactly one function
+ *     (`deriveCriterionResult`), from observed attempts. A field written into it after the
+ *     fact by a provider would make that no longer true.
+ *  2. `aggregate()` is handed `criteria` and `gates`. A hypothesis living on a criterion is
+ *     a hypothesis inside the verdict function's reach; one living here is not — so "an
+ *     explanation can never influence a verdict" is a property of the SHAPE rather than a
+ *     rule somebody has to keep remembering.
+ *  3. It makes the story's headline acceptance criterion mechanically checkable: with the
+ *     hypothesis in a side channel, the serialized `criteria` array is byte-for-byte
+ *     identical with and without `--explain`, rather than merely equivalent.
+ *
+ * `criterionId` is matched against the run's OWN criteria when the explanation is
+ * attached; an id the run does not carry is dropped. A provider cannot introduce a
+ * criterion, and cannot re-point a hypothesis at one it was not shown.
+ */
+export interface CriterionExplanation {
+  /** Always the id of a criterion this same `RunResult` carries. */
+  readonly criterionId: string;
+  /**
+   * AD-10's labeled NON-AUTHORITATIVE text. Redacted and bounded at capture, exactly as
+   * every other captured string is, because it is persisted and rendered exactly as they
+   * are — and because it is UNTRUSTED provider output.
+   */
+  readonly explanation: string;
+}
+
+/**
  * The environment summary FR-29 requires the terminal report to print.
  *
  * Small and factual on purpose. A renderer must never compute or look any of this up
@@ -157,4 +193,23 @@ export interface RunResult {
   readonly environment: RunEnvironment;
   /** Absent only when the run died before or at the integrity stage. */
   readonly contract?: ContractSummary;
+  /**
+   * Non-authoritative root-cause hypotheses, one per explained criterion (story 5.5).
+   *
+   * ABSENT on every run that was not explicitly explained — which is every run, unless
+   * `verify --explain` was passed AND an `explainer` role is configured AND the provider
+   * answered with a schema-valid payload. `--explain` is opt-in precisely so that FR-18's
+   * "a frozen contract plus a compiled plan execute with zero provider calls" survives
+   * this field's existence.
+   *
+   * The array is the ONE key this story adds to the model, and it is deliberately a
+   * SIBLING of `criteria` rather than a member of it — see `CriterionExplanation` for why
+   * that placement is what makes the inertness claim checkable rather than merely stated.
+   *
+   * Read by exactly two things: the terminal renderer, which prints it under a heading
+   * that says it is a hypothesis, and `schemas/result.ts`, which persists it. Nothing
+   * else — and above all not `aggregate`, not `deriveCriterionResult` and not
+   * `exitCodeForOutcome`.
+   */
+  readonly explanations?: readonly CriterionExplanation[];
 }

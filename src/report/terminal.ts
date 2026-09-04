@@ -45,7 +45,7 @@ import {
   GATE_STATUSES,
   type NeedsHumanReason,
 } from '../domain/result.js';
-import type { RunResult } from '../domain/run-result.js';
+import type { CriterionExplanation, RunResult } from '../domain/run-result.js';
 import type { StageTimelineEntry } from '../domain/stage.js';
 import { MARK_WIDTH, criterionMark, gateMark, stageMark, verdictLine } from './format.js';
 
@@ -498,6 +498,42 @@ function flakinessSummary(counts: FlakinessCounts): string {
   return parts.join(' · ');
 }
 
+/**
+ * The heading of the hypotheses block (story 5.5).
+ *
+ * "Clearly labeled non-authoritative" is in the acceptance criterion, not a nicety, and
+ * the reason is a fact about readers rather than about formatting: **an unlabelled
+ * hypothesis printed beside a verdict becomes a finding in the reader's mind.** So the
+ * label is on the heading — where somebody skimming cannot miss it — and repeated on every
+ * line, so a hypothesis quoted out of the report into a ticket carries its own status with
+ * it.
+ *
+ * Exported so a test asserts the exact words rather than a paraphrase of them.
+ */
+export const EXPLANATION_HEADING =
+  'Root-cause hypotheses  [NON-AUTHORITATIVE — AI-written guesses, not evidence]';
+
+/** The second half of the label: what it is not. Printed once, under the heading. */
+export const EXPLANATION_DISCLAIMER =
+  '  These did not affect the verdict, the criterion statuses or the exit code.';
+
+/**
+ * One hypothesis, with the id it belongs to and its continuation lines aligned.
+ *
+ * Model prose has no line discipline, so it is re-indented here rather than printed raw:
+ * an unindented second line reads as a new report row, and a report row is the one thing
+ * a hypothesis must never look like. Nothing is re-redacted and nothing is re-truncated —
+ * both happened at capture (AD-10), and `src/report/**` cannot reach a file to show more
+ * even if it wanted to.
+ */
+function explanationLines(entry: CriterionExplanation): string[] {
+  const [first = '', ...rest] = entry.explanation.split('\n');
+  return [
+    `  ${entry.criterionId.padEnd(ID_WIDTH)} (hypothesis) ${first}`,
+    ...rest.map((line) => `  ${' '.repeat(ID_WIDTH)}              ${line}`),
+  ];
+}
+
 /** The pointers alone, for entries whose text the report does not inline. */
 function pointerLines(texts: readonly BoundedText[], indent: string): string[] {
   return texts
@@ -574,6 +610,18 @@ export function renderTerminal(result: RunResult): string {
         ? ['  (none captured)']
         : result.evidence.flatMap(evidenceLines),
     ),
+
+    // LAST OF THE SECTIONS, and the position is a decision (story 5.5). Everything above
+    // is mechanically derived from what the run observed; this is the one block that is
+    // not, so it sits furthest from all of it. A reader who stops before here has read
+    // only facts. The whole block is ABSENT — not empty — on every run that was not
+    // explained, which is every run by default.
+    ...(result.explanations === undefined || result.explanations.length === 0
+      ? []
+      : section(EXPLANATION_HEADING, [
+          EXPLANATION_DISCLAIMER,
+          ...result.explanations.flatMap(explanationLines),
+        ])),
 
     '',
     verdictLine(result.outcome),

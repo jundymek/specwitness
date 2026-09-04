@@ -102,6 +102,7 @@ import { createDoctorEffects } from '../doctor/effects.js';
 import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
 import { armInterruptNotice } from '../verify/interrupt.js';
+import { explainVerifiedRun } from '../verify/explain.js';
 import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
 
@@ -114,6 +115,7 @@ interface VerifyOptions {
   readonly head?: string;
   readonly json?: boolean;
   readonly ai?: boolean;
+  readonly explain?: boolean;
 }
 
 export function register(program: Command): void {
@@ -130,6 +132,11 @@ export function register(program: Command): void {
     // calls whether or not it is passed, so what `--no-ai` actually guarantees is that the
     // command will not compile one behind your back.
     .option('--no-ai', 'refuse to compile a plan; verify only what is already planned (FR-18, Q66)')
+    // Story 5.5. OPT-IN, and the default matters more than the feature: without the flag
+    // this command reaches no explainer at all, so FR-18's zero-provider-call guarantee is
+    // untouched by the flag's existence. What it buys is a NON-AUTHORITATIVE hypothesis
+    // beside each failed criterion; it can change no status, no verdict and no exit code.
+    .option('--explain', 'ask the explainer role for a non-authoritative failure hypothesis (FR-11)')
     .action(async (epic: string, options: VerifyOptions) => {
       // Recording is the LAST act, per `cli/exit.ts`: anything that throws
       // before this point is classified by main's catch instead.
@@ -153,6 +160,7 @@ async function verify(
   // before anything is read, spawned or created. 64 sits outside 0–3 so a typo
   // can never be mistaken for a verdict (ADR-002).
   const epic = normalizeEpicId(epicArgument);
+  assertExplainIsCompatible(options);
   const explicitRoot = requireFlagValue('--root', options.root);
   const baseFlag = requireFlagValue('--base', options.base);
   const headFlag = requireFlagValue('--head', options.head);
@@ -458,20 +466,125 @@ async function verify(
     },
   });
 
+  // ==========================================================================
+  // THE EXPLAINER — story 5.5. Opt-in, after the run, and provably inert.
+  // ==========================================================================
+  //
+  // WHY IT IS HERE AND NOT IN THE PIPELINE. `src/pipeline/**` may not import
+  // `src/authoring/**` (AD-1, `pipeline-layer`), and it should not want to: a
+  // stage that could reach a provider would be a stage that could let one
+  // influence what it recorded. The run is FINISHED and its outcome fixed
+  // before this line — every status, every gate, every timestamp — so there is
+  // nothing left for a hypothesis to affect even in principle.
+  //
+  // WHAT CHANGES AND WHAT CANNOT. `explainVerifiedRun` returns a new
+  // `RunResult` differing in exactly two fields: the `explanations` array, and
+  // one appended `providerUsage` entry recording the call (Q65, FR-15 — a
+  // subscription cost this product exists to make visible). `outcome`,
+  // `criteria`, `gates`, `evidence`, `stages` and `contract` are carried
+  // through by a spread, so `serializeRunResult`'s bytes are identical with and
+  // without `--explain` once those two keys are set aside. That is asserted
+  // mechanically rather than argued: see `tests/unit/authoring/explain-inert.test.ts`.
+  //
+  // IT NEVER FAILS THE RUN. `explainVerifiedRun` has no error arm; on every
+  // failure route it returns the input object itself and a note. The exit code
+  // below is computed from `result.outcome`, which no branch here can reach.
+  let published = result;
+  if (options.explain === true) {
+    const explained = await explainVerifiedRun({
+      result,
+      config,
+      clock,
+      warn: (message: string) => process.stderr.write(`${message}\n`),
+    });
+    published = explained.result;
+    if (explained.note !== undefined) {
+      // A WARNING, never an ERROR: the verification succeeded and answered the
+      // question it was asked. Only the optional extra is missing, and saying
+      // so with `ERROR:` would tell the operator — and every log scraper they
+      // own — that SpecWitness malfunctioned when it did precisely its job.
+      printWarning(explained.note);
+    }
+
+    if (published !== result) {
+      // A THIRD write, through the SAME sole writer and the SAME serializer
+      // (AD-8, AD-11). The persist stage wrote a crash-durable snapshot at
+      // position 10 and `onComplete` wrote the finished document after
+      // teardown; this republishes it with the hypotheses attached, so the
+      // stored run and what is rendered below are the same bytes (Q53).
+      //
+      // Guarded on identity rather than on the flag: on every failure route
+      // `explainVerifiedRun` returns the input object itself, so a run that
+      // could not be explained is not rewritten at all — the stored bytes are
+      // then not merely equivalent to the unexplained ones, they were never
+      // touched.
+      const write = await store.writeResult(created.runId, published);
+      if (!write.durable) {
+        printWarning(
+          `the run result was written but could not be made durable: ${write.barrier ?? 'the directory fsync did not complete'}`,
+        );
+      }
+    }
+  }
+
   // AD-11: one model, many renderers. Nothing is computed here.
   if (options.json === true) {
     // stdout carries the JSON document and NOTHING else, so `verify --json | jq`
     // works with no filtering. These bytes are byte-identical to the persisted
     // `result.json` — both come from `serializeRunResult` (Q53).
-    process.stdout.write(renderJson(result));
-    process.stderr.write(renderTerminal(result));
+    process.stdout.write(renderJson(published));
+    process.stderr.write(renderTerminal(published));
   } else {
-    process.stdout.write(renderTerminal(result));
+    process.stdout.write(renderTerminal(published));
   }
 
+  // `result`, NOT `published`, and deliberately so: this reports the failing
+  // STAGE that ended the run, and no stage can have been the explainer.
   reportInfraFailure(result);
 
+  // THE EXIT CODE COMES FROM THE PIPELINE'S OWN OUTCOME. `published.outcome`
+  // is the same object — `attachExplanations` spreads it through untouched —
+  // but reading it from `result` says out loud that the explainer is not on
+  // the path to an exit code, which is the property AD-2 asks for here.
   return exitCodeForOutcome(result.outcome);
+  }
+}
+
+/**
+ * `--no-ai --explain` is REFUSED, exit 64 (story 5.5).
+ *
+ * The two flags contradict each other and there is no reading under which both are
+ * honoured: `--no-ai` is the operator asserting this run makes no provider call, and
+ * `--explain` asks for one. Three answers were available and only one of them is honest.
+ *
+ *   - Silently drop `--explain`. Rejected. People misread flag pairs, and a pair whose
+ *     combination quietly means something other than what it says is the same class of
+ *     defect as a verdict that quietly means something other than what it says. The
+ *     operator would believe they had asked for a hypothesis and would get none, with
+ *     nothing on screen to say why.
+ *   - Silently drop `--no-ai`. Rejected outright and not seriously considered: it would
+ *     spend provider quota under the flag whose entire purpose is to forbid that.
+ *   - REFUSE and name both flags. Costs one error message and cannot be misread.
+ *
+ * `UsageError` is exit 64, which sits OUTSIDE 0-3 so a flag mistake can never be mistaken
+ * for a verdict (ADR-002). Raised before anything is read, resolved, spawned or created —
+ * so a contradictory invocation cannot leave a run directory behind.
+ *
+ * Note what this does NOT do: it does not consult the config, and it does not care whether
+ * an `explainer` role is assigned. A missing role is AC2's "absent with a note" and is a
+ * perfectly successful run; a contradictory flag pair is a usage error. Those are different
+ * conditions and they get different answers.
+ */
+function assertExplainIsCompatible(options: VerifyOptions): void {
+  // Commander turns `--no-ai` into `ai === false` and leaves it `true` otherwise.
+  if (options.explain === true && options.ai === false) {
+    throw new UsageError(
+      '--explain and --no-ai contradict each other: --explain asks the explainer role for a ' +
+        'hypothesis, which is a provider call, and --no-ai forbids this run from making one',
+      'drop --no-ai to allow the explanation, or drop --explain to keep the run AI-free — ' +
+        'note that --no-ai also refuses to compile a missing plan, so the two flags are not ' +
+        'interchangeable',
+    );
   }
 }
 
