@@ -366,11 +366,34 @@ async function listFiles(directory: string): Promise<string[]> {
   return out;
 }
 
-/** Reads a file as UTF-8, or returns `null` when it is not valid UTF-8 text. */
-async function readTextOrNull(path: string): Promise<string | null> {
+/**
+ * Reads a fixture file as UTF-8 text, REFUSING anything that is not.
+ *
+ * A NON-TEXT FILE IS THE SAME HOLE AS A SYMLINK, in a different shape. It is copied into the
+ * executable project by `cp`, and every static guard in this file works on text — so a
+ * binary, or a script in an encoding these scans cannot read, would be RUN and never READ:
+ * no port substitution, no loopback scan, no fetching-tool scan, no credential-store scan.
+ * Returning `null` and moving on, which is what this function used to do, made that silent.
+ *
+ * Refused rather than allowlisted, for the same reason symlinks are: nothing a corpus
+ * fixture legitimately needs today is unreadable. When a fixture genuinely does need a
+ * binary — a seeded database, an image for a browser probe — that is a conversation about
+ * how to keep it inspectable, not a file that quietly opts out of every check. The failure
+ * message says so.
+ */
+async function readFixtureText(path: string): Promise<string> {
   const bytes = await readFile(path);
   const text = bytes.toString('utf8');
-  return Buffer.from(text, 'utf8').equals(bytes) ? text : null;
+  if (!Buffer.from(text, 'utf8').equals(bytes)) {
+    throw new Error(
+      `corpus: ${path} is not UTF-8 text. A fixture may not contain one: it would be copied ` +
+        'into the executable project and skipped by every hermeticity scan and by the port ' +
+        'substitution - running content that nothing can read. If a fixture genuinely needs ' +
+        'binary content, that is a conversation about keeping it inspectable, not a file ' +
+        'that opts out of the checks.',
+    );
+  }
+  return text;
 }
 
 /**
@@ -383,10 +406,7 @@ async function readTextOrNull(path: string): Promise<string | null> {
 export async function portPlaceholderNames(projectDirectory: string): Promise<string[]> {
   const names = new Set<string>();
   for (const file of await listFiles(projectDirectory)) {
-    const text = await readTextOrNull(file);
-    if (text === null) {
-      continue;
-    }
+    const text = await readFixtureText(file);
     for (const match of text.matchAll(PORT_PLACEHOLDER)) {
       const name = match[1];
       if (name !== undefined) {
@@ -470,8 +490,8 @@ export async function materializeFixture(
     const ports = await allocatePorts(await portPlaceholderNames(fixture.projectDirectory));
 
     for (const file of await listFiles(projectRoot)) {
-      const text = await readTextOrNull(file);
-      if (text === null || !text.includes('{{PORT:')) {
+      const text = await readFixtureText(file);
+      if (!text.includes('{{PORT:')) {
         continue;
       }
       const substituted = text.replace(PORT_PLACEHOLDER, (whole, name: string) => {
@@ -1003,10 +1023,7 @@ function hostOfAuthority(authority: string): string {
 export async function nonLoopbackHosts(projectDirectory: string): Promise<string[]> {
   const found = new Set<string>();
   for (const file of await listFiles(projectDirectory)) {
-    const text = await readTextOrNull(file);
-    if (text === null) {
-      continue;
-    }
+    const text = await readFixtureText(file);
     for (const match of text.matchAll(URL_IN_TEXT)) {
       const authority = match[1];
       if (authority === undefined) {
@@ -1043,10 +1060,7 @@ const FORBIDDEN_FIXTURE_REFERENCES = [
 export async function machineStateReferences(projectDirectory: string): Promise<string[]> {
   const found: string[] = [];
   for (const file of await listFiles(projectDirectory)) {
-    const text = await readTextOrNull(file);
-    if (text === null) {
-      continue;
-    }
+    const text = await readFixtureText(file);
     for (const needle of FORBIDDEN_FIXTURE_REFERENCES) {
       if (text.includes(needle)) {
         found.push(`${relative(projectDirectory, file)}: ${needle}`);
@@ -1118,10 +1132,7 @@ const NETWORK_CAPABLE_COMMANDS = [
 export async function networkCapableCommands(projectDirectory: string): Promise<string[]> {
   const found: string[] = [];
   for (const file of await listFiles(projectDirectory)) {
-    const text = await readTextOrNull(file);
-    if (text === null) {
-      continue;
-    }
+    const text = await readFixtureText(file);
     text.split('\n').forEach((line, index) => {
       for (const pattern of NETWORK_CAPABLE_COMMANDS) {
         if (pattern.test(line)) {

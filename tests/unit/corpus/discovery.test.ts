@@ -167,6 +167,28 @@ describe('a symbolic link inside a fixture is refused', () => {
   });
 });
 
+describe('a non-text file inside a fixture is refused', () => {
+  // The symlink hole in a different shape: a binary is copied into the executable project
+  // by `cp` and is unreadable by every static guard, so it would be RUN and never READ.
+  // Skipping it silently — which is what the scanners used to do — is what made that
+  // invisible.
+  async function binaryProject(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'specwitness-corpus-binary-'));
+    roots.push(root);
+    await mkdir(join(root, 'project'), { recursive: true });
+    await writeFile(join(root, 'project', 'payload.bin'), Buffer.from([0x00, 0xff, 0xfe, 0x01]));
+    return join(root, 'project');
+  }
+
+  it('is refused by every scanner', async () => {
+    const projectDirectory = await binaryProject();
+
+    await expect(nonLoopbackHosts(projectDirectory)).rejects.toThrow(/not UTF-8 text/);
+    await expect(networkCapableCommands(projectDirectory)).rejects.toThrow(/not UTF-8 text/);
+    await expect(machineStateReferences(projectDirectory)).rejects.toThrow(/not UTF-8 text/);
+  });
+});
+
 describe('the hermeticity scanners over checked-in fixture text', () => {
   /** A project directory containing one file with the given text. */
   async function project(text: string): Promise<string> {
