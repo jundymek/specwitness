@@ -83,6 +83,26 @@ try {
   process.exit(1);
 }
 
+/**
+ * ⚠️ THE REPORT ITSELF IS VALIDATED BEFORE IT IS BELIEVED.
+ *
+ * A `?? []` fallback here would be this script's own green-for-nothing: an object with no
+ * `testResults` — a reporter format change, a truncated write, a `{}` from a crashed run —
+ * would report "every suite executed" and exit 0, which is precisely the reassuring silence
+ * this step exists to break. So a report that is not a non-empty array of test files, or
+ * that contains no test at all, is an ERROR rather than a clean bill of health.
+ */
+if (!Array.isArray(report?.testResults) || report.testResults.length === 0) {
+  process.stderr.write(
+    `ERROR: ${reportPath} is not a vitest JSON report with test results ` +
+      `(testResults: ${JSON.stringify(report?.testResults)?.slice(0, 80) ?? 'absent'})\n` +
+      'HINT: this step cannot tell "nothing was skipped" from "nothing was reported", and ' +
+      'must not guess. Check that `pnpm test:ci` ran and wrote the report, and that the ' +
+      "reporter's output shape has not changed.\n",
+  );
+  process.exit(1);
+}
+
 /** vitest writes jest-compatible statuses; a skipped test is `pending` or `skipped`. */
 const isSkipped = (status) => status === 'pending' || status === 'skipped';
 
@@ -91,7 +111,10 @@ const suites = new Map();
 let skippedTests = 0;
 let totalTests = 0;
 
-for (const file of report.testResults ?? []) {
+for (const file of report.testResults) {
+  // The inner `?? []` stays: a file that failed to COLLECT legitimately reports no
+  // assertions, and that is a test failure the suite itself surfaces, not this step's
+  // business. The outer guard above is the one that matters.
   for (const assertion of file.assertionResults ?? []) {
     totalTests += 1;
     if (!isSkipped(assertion.status)) {
@@ -107,6 +130,18 @@ for (const file of report.testResults ?? []) {
     entry.count += 1;
     suites.set(key, entry);
   }
+}
+
+if (totalTests === 0) {
+  // Same argument one level down: a report listing files but no tests is a report of a run
+  // that did not happen, and "0 of 0 skipped" is the most misleading true sentence
+  // available.
+  process.stderr.write(
+    `ERROR: ${reportPath} lists ${report.testResults.length} file(s) but no tests at all\n` +
+      'HINT: a run that executed nothing is not a run with no skips. Check that the suite ' +
+      'actually ran before this step.\n',
+  );
+  process.exit(1);
 }
 
 const rows = [...suites.values()].sort(

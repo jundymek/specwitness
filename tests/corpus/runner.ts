@@ -18,10 +18,21 @@
  *     `providerUsage` must be empty in every run document, AND `claude`/`codex` TRIPWIRES
  *     are placed first on `PATH` — an invocation leaves a marker file and the suite fails.
  *     Asserted, not assumed.
- *  2. **No network beyond localhost.** Services bind 127.0.0.1 on a port allocated moments
- *     earlier; `nonLoopbackHosts` reports any checked-in fixture naming a host that is not
- *     loopback, and the suite fails on a non-empty answer. Nothing here resolves a name, fetches a dependency or downloads
- *     a browser.
+ *  2. **No network beyond localhost — enforced in three places, and NOT airtight.** Static:
+ *     `nonLoopbackHosts` refuses a checked-in fixture naming a host that is not loopback,
+ *     and `networkCapableCommands` refuses one that declares `curl`, `wget`, `git clone`,
+ *     `npm install` or anything else whose purpose is to fetch. Runtime:
+ *     `nonLoopbackEvidenceTargets` reads the URLs the run ACTUALLY recorded in its own
+ *     evidence, so a hostname assembled at runtime is caught where a text scan could not
+ *     see it.
+ *     **The honest limit, stated because overclaiming here would be worse than the gap:**
+ *     none of this is a network sandbox. A fixture that opened a raw socket from inside a
+ *     gate script would not be caught by any of the three. Closing that properly means
+ *     running each fixture inside a network namespace (Linux) or an interception layer
+ *     (macOS has no equivalent), which is platform-divergent infrastructure this story
+ *     deliberately does not build. What is claimed is: no fixture asks for the network in
+ *     text, no fixture declares a tool whose job is to fetch, and no run reached a
+ *     non-loopback URL through a probe.
  *  3. **No dependence on the developer's machine.** The CLI runs with a CONSTRUCTED
  *     environment (`extendEnv: false`): `HOME` and `TMPDIR` point inside the fixture's own
  *     temp workspace, so `~/.claude/`, `~/.codex/` and every other credential store are not
@@ -42,7 +53,7 @@
 
 import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -228,27 +239,57 @@ export interface MaterializedFixture {
 }
 
 /**
- * A port nothing is listening on, right now.
+ * One ephemeral loopback port per name, and **no two names get the same port**.
  *
  * Bound and released rather than taken from a range: the auto-review runs `pnpm test` in
  * this worktree CONCURRENTLY with the agent (harness defect H-8), and two workers picking
  * from a range collide. The window between release and the service binding is a genuine
  * race and is accepted — a fixed port races with certainty instead of occasionally.
+ *
+ * ⚠️ **EVERY SOCKET IS HELD UNTIL THE WHOLE ALLOCATION IS DONE**, and that is the point of
+ * allocating as a batch rather than calling a `freePort()` helper in a loop. Releasing each
+ * socket before asking for the next lets the OS hand the SAME port back for a second name,
+ * and two services in one fixture would then be told to bind one port — a nondeterministic
+ * failure in the shared infrastructure every wave-2 fixture is built on, of the kind that
+ * gets diagnosed as "the corpus is flaky". The current fixtures allocate one port each and
+ * so cannot expose it, which is exactly why it is closed now rather than when it bites.
  */
-export async function freePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (address === null || typeof address === 'string') {
-        server.close(() => reject(new Error('corpus: could not allocate a loopback port')));
-        return;
-      }
-      const { port } = address;
-      server.close(() => resolve(port));
-    });
-  });
+export async function allocatePorts(
+  names: readonly string[],
+): Promise<Record<string, number>> {
+  const held: Server[] = [];
+  const ports: Record<string, number> = {};
+
+  try {
+    for (const name of names) {
+      const server = createServer();
+      held.push(server);
+      ports[name] = await new Promise<number>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => {
+          const address = server.address();
+          if (address === null || typeof address === 'string') {
+            reject(new Error(`corpus: could not allocate a loopback port for '${name}'`));
+            return;
+          }
+          resolve(address.port);
+        });
+      });
+    }
+  } finally {
+    // Released only once every port is decided. A `finally` rather than a happy-path close,
+    // so a mid-allocation failure does not leave listeners behind holding ports.
+    await Promise.all(
+      held.map(
+        async (server) =>
+          await new Promise<void>((resolve) => {
+            server.close(() => resolve());
+          }),
+      ),
+    );
+  }
+
+  return ports;
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -321,6 +362,15 @@ export async function portPlaceholderNames(projectDirectory: string): Promise<st
 }
 
 /**
+ * Wraps a literal in single quotes for POSIX sh, escaping any single quote it contains.
+ *
+ * Inside single quotes a shell expands nothing at all, which is the property wanted here.
+ */
+function shellQuote(literal: string): string {
+  return `'${literal.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
  * The provider tripwires.
  *
  * `claude` and `codex` executables placed FIRST on `PATH`, which record that they were
@@ -334,9 +384,15 @@ async function writeProviderTripwires(binRoot: string, markersRoot: string): Pro
   await mkdir(markersRoot, { recursive: true });
 
   for (const name of ['claude', 'codex']) {
+    // The marker path is SHELL-QUOTED, not JSON-quoted. `JSON.stringify` produces a
+    // DOUBLE-quoted string, and inside double quotes a shell still expands `$`, a
+    // backtick and a backslash. The path comes from `mkdtemp` under whatever `TMPDIR`
+    // the machine has, which is not ours to make assumptions about. The exposure is
+    // small and the rule is not: in this repository a string travelling toward a shell
+    // is a finding (AD-3), and a test harness is not an exemption.
     const script =
       '#!/bin/sh\n' +
-      `printf '%s\\n' "$*" >> ${JSON.stringify(join(markersRoot, `${name}.invoked`))}\n` +
+      `printf '%s\\n' "$*" >> ${shellQuote(join(markersRoot, `${name}.invoked`))}\n` +
       `echo "corpus tripwire: the ${name} CLI was invoked; the corpus makes zero provider calls" >&2\n` +
       'exit 3\n';
     const path = join(binRoot, name);
@@ -375,10 +431,7 @@ export async function materializeFixture(
 
     // Ports are allocated from the placeholder names found in the CHECKED-IN tree, then
     // substituted into the COPY. The checked-in file keeps its placeholder forever.
-    const ports: Record<string, number> = {};
-    for (const name of await portPlaceholderNames(fixture.projectDirectory)) {
-      ports[name] = await freePort();
-    }
+    const ports = await allocatePorts(await portPlaceholderNames(fixture.projectDirectory));
 
     for (const file of await listFiles(projectRoot)) {
       const text = await readTextOrNull(file);
@@ -864,6 +917,102 @@ export async function machineStateReferences(projectDirectory: string): Promise<
     }
   }
   return found.sort();
+}
+
+/**
+ * Binaries whose purpose is to reach the network, or to fetch something.
+ *
+ * A fixture declaring one of these is refused. This is the "subprocess such as `curl`" hole
+ * in a pure URL scan: a config can name a fetching tool without naming a host, and the host
+ * then arrives from an argument, a script or an environment variable.
+ *
+ * Word-boundary matched against the DECLARED command text, so `node commands/curl-parser.js`
+ * is not refused for containing the letters.
+ */
+const NETWORK_CAPABLE_COMMANDS = [
+  /\bcurl\b/,
+  /\bwget\b/,
+  /\bnc\b/,
+  /\bncat\b/,
+  /\bnetcat\b/,
+  /\bssh\b/,
+  /\bscp\b/,
+  /\brsync\b/,
+  /\bgit\s+(clone|fetch|pull|push|remote)\b/,
+  /\b(npm|pnpm|yarn|pip|pip3|gem|cargo|go)\s+(install|add|get|fetch|ci)\b/,
+  /\bnpx\b/,
+  /\bplaywright\s+install\b/,
+];
+
+/**
+ * Commands a fixture declares whose purpose is to reach the network.
+ *
+ * Static, like `nonLoopbackHosts`, and for the same reason: a corpus fixture is committed
+ * executable content (AD-3), so the cheapest place to refuse a fetching tool is where it
+ * enters the repository. It is not a sandbox and does not claim to be one.
+ */
+export async function networkCapableCommands(projectDirectory: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const file of await listFiles(projectDirectory)) {
+    const text = await readTextOrNull(file);
+    if (text === null) {
+      continue;
+    }
+    for (const line of text.split('\n')) {
+      // Only DECLARED commands, i.e. config lines that hand something to the product to
+      // run. A fixture application's own source may legitimately contain any word at all.
+      if (!/^\s*(-\s*\{?\s*)?(run|id)\s*:/.test(line) && !/run:/.test(line)) {
+        continue;
+      }
+      for (const pattern of NETWORK_CAPABLE_COMMANDS) {
+        if (pattern.test(line)) {
+          found.push(`${relative(projectDirectory, file)}: ${line.trim()}`);
+          break;
+        }
+      }
+    }
+  }
+  return found.sort();
+}
+
+/**
+ * Non-loopback URLs the run ACTUALLY reached, read from its own recorded evidence.
+ *
+ * The RUNTIME half of the localhost-only guarantee, and the half a text scan cannot do: a
+ * fixture that assembled `https://` + a hostname at runtime leaves no literal URL in any
+ * checked-in file, but the http and browser executors record the URL they used
+ * (`src/schemas/result.ts` — `HttpEvidenceSchema.request.url`, `BrowserEvidenceSchema.url`),
+ * and that is an observation of what happened rather than of what was written down.
+ *
+ * Still not a sandbox: it sees what a PROBE did, not what a gate script did. The limit is
+ * stated in this module's header rather than papered over.
+ */
+export function nonLoopbackEvidenceTargets(document: RunResultDocument): string[] {
+  const found = new Set<string>();
+
+  for (const evidence of document.evidence) {
+    const url =
+      evidence.kind === 'http'
+        ? evidence.request.url
+        : evidence.kind === 'browser'
+          ? evidence.url
+          : undefined;
+    if (url === undefined) {
+      continue;
+    }
+    const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(url)?.[1];
+    if (authority === undefined) {
+      continue;
+    }
+    const host = authority.startsWith('[')
+      ? authority.slice(0, authority.indexOf(']') + 1) || authority
+      : (authority.split(':')[0] ?? authority);
+    if (!LOOPBACK_HOSTS.has(host)) {
+      found.add(url);
+    }
+  }
+
+  return [...found].sort();
 }
 
 /** Marker files left by the `claude`/`codex` tripwires. Empty means no provider ran. */

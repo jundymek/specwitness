@@ -33,6 +33,8 @@ import {
   hashCorpusTree,
   leakedWorktreeContainers,
   machineStateReferences,
+  networkCapableCommands,
+  nonLoopbackEvidenceTargets,
   nonLoopbackHosts,
   providerTripwireMarkers,
   renderFailure,
@@ -96,6 +98,14 @@ describe('the Golden Verification Corpus', () => {
             expect(run.observed.document.providerUsage).toEqual([]);
           }
 
+          // AC1, the RUNTIME half of localhost-only: every URL the run actually recorded
+          // in its own evidence is loopback. A hostname assembled at runtime leaves no
+          // literal URL in any checked-in file, so the static scan below cannot see it —
+          // this can, because it reads what happened rather than what was written down.
+          if (run.observed.document !== null) {
+            expect(nonLoopbackEvidenceTargets(run.observed.document)).toEqual([]);
+          }
+
           // AD-8: the run leaves no worktree container behind under its own TMPDIR.
           expect(await leakedWorktreeContainers(run.materialized)).toEqual([]);
         },
@@ -112,6 +122,19 @@ describe('the Golden Verification Corpus', () => {
       expect(
         await nonLoopbackHosts(fixture.projectDirectory),
         `fixture '${fixture.name}' names a host that is not loopback`,
+      ).toEqual([]);
+    }
+  });
+
+  it('declares no command whose purpose is to reach the network', async () => {
+    // The "subprocess such as `curl`" hole in a pure URL scan: a config can name a fetching
+    // tool without naming a host, and the host then arrives from an argument or an
+    // environment variable. Refused where committed executable content enters the
+    // repository — which is also where a reviewer is looking.
+    for (const fixture of fixtures) {
+      expect(
+        await networkCapableCommands(fixture.projectDirectory),
+        `fixture '${fixture.name}' declares a command that can fetch`,
       ).toEqual([]);
     }
   });

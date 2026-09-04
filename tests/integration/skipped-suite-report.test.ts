@@ -136,6 +136,38 @@ describe('the skipped-suite report', () => {
     expect(summary).toContain('1 of 1 tests did not run');
   });
 
+  it('FAILS on a report with no testResults, rather than reporting no skips', async () => {
+    // THIS STEP'S OWN GREEN-FOR-NOTHING. A `{}` — a reporter format change, a truncated
+    // write, a crashed run — must not be read as "every suite executed". The step cannot
+    // tell "nothing was skipped" from "nothing was reported", and must not guess.
+    const dir = await mkdtemp(join(tmpdir(), 'specwitness-skip-report-'));
+    directories.push(dir);
+    const reportPath = join(dir, 'report.json');
+    await writeFile(reportPath, '{}', 'utf8');
+
+    const { exitCode, stderr } = await run(reportPath);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('not a vitest JSON report with test results');
+  });
+
+  it('FAILS on a report listing files but no tests at all', async () => {
+    // "0 of 0 tests skipped" is the most misleading true sentence available.
+    const dir = await mkdtemp(join(tmpdir(), 'specwitness-skip-report-'));
+    directories.push(dir);
+    const reportPath = join(dir, 'report.json');
+    await writeFile(
+      reportPath,
+      JSON.stringify({ testResults: [{ name: '/repo/a.test.ts', assertionResults: [] }] }),
+      'utf8',
+    );
+
+    const { exitCode, stderr } = await run(reportPath);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('no tests at all');
+  });
+
   it('FAILS when the report is missing, rather than reporting no skips', async () => {
     const { exitCode, stderr } = await run('/definitely/not/a/report.json');
 
