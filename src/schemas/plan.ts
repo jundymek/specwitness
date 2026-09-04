@@ -188,7 +188,7 @@ const Fingerprint = z
  * declared key could have matched this pattern (raised by story 4.1's agent at cohort
  * intent-sync).
  */
-const Identifier = z
+export const Identifier = z
   .string()
   .min(1)
   .max(128)
@@ -198,7 +198,7 @@ const Identifier = z
   });
 
 /** Non-empty once trimmed. `min(1)` alone accepts "   ", which says nothing to a reader. */
-const Prose = z.string().refine((value) => value.trim().length > 0, {
+export const Prose = z.string().refine((value) => value.trim().length > 0, {
   message: 'must not be empty or only whitespace',
 });
 
@@ -226,7 +226,7 @@ const Prose = z.string().refine((value) => value.trim().length > 0, {
  *
  * Raised by the fifth Codex review pass.
  */
-const RelativePath = z
+export const RelativePath = z
   .string()
   .regex(/^\/(?![/\\])[^\s\u0000-\u001f\\]*$/, {
     message:

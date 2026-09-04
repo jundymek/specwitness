@@ -1,0 +1,3 @@
+[
+  "{\"proposals\": [{\"probeId\": \"submit-order\", \"mechanics\": {\"url\": \"https://prod.example.com/orders\"}}]}"
+]

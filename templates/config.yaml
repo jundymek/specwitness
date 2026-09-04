@@ -68,6 +68,19 @@ project:
 # observations:
 #   company-count: { run: ./scripts/specwitness/company-count.sh }
 
+# Bounded retries per probe class, for environments that are genuinely flaky.
+# EVERY SURFACE DEFAULTS TO 0 and the whole block is optional, because a run
+# must be deterministic unless you asked otherwise. A probe that fails and then
+# passes is reported as a PASS marked `flaky`, with every attempt and its
+# evidence recorded — retries change how often something is tried, never what
+# the answer means. Maximum 5 per surface; a larger number is rejected rather
+# than quietly reduced, so what you wrote is always what you get.
+# retries:
+#   http: 0
+#   browser: 0
+#   observation: 0
+#   shell: 0
+
 # Local AI CLIs used to AUTHOR verification artifacts. Verdicts are always
 # computed mechanically — no model is ever asked whether your epic passes.
 # SpecWitness shells out to CLIs you already have installed and never talks to

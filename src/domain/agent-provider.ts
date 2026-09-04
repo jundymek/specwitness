@@ -43,7 +43,7 @@ import type { ProcessRunner } from './process-runner.js';
  * union and config's `AiRole` are bidirectionally assignable, so renaming a role
  * in either place stops compiling instead of silently diverging.
  */
-export type AgentRole = 'contract-author' | 'plan-author' | 'explainer';
+export type AgentRole = 'contract-author' | 'plan-author' | 'explainer' | 'mechanics-adapter';
 
 /** The success arm of a structural validation. */
 export interface ValidationSuccess<T> {

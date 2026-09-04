@@ -25,9 +25,9 @@
  */
 
 import type { Severity, Verifiability } from './contract.js';
-import { redactText } from './evidence.js';
-import type { EvidenceRef, RedactionOptions } from './evidence.js';
-import type { CriterionResult, CriterionStatus } from './result.js';
+import { boundedText, redactText } from './evidence.js';
+import type { BoundedText, EvidenceRef, RedactionOptions } from './evidence.js';
+import type { CriterionResult, CriterionStatus, NeedsHumanReason } from './result.js';
 
 /** The four probe surfaces (AD-13). All implement the same executor interface. */
 export const PROBE_SURFACES = ['http', 'browser', 'observation', 'shell'] as const;
@@ -66,9 +66,41 @@ export interface AssertionEvaluation {
  * look is not the same as a probe that looked and saw a violation, and the day those two
  * are conflated is the day a flaky environment starts blocking mergeable branches.
  */
+/**
+ * Why the probe could not observe, as a STRUCTURED value rather than a sentence.
+ *
+ * Story 5.6, closing DECISIONS.md D12 by owner decision. Optional and closed: a stored
+ * `result.json` from before this existed still parses, and an executor that does not know
+ * which case it is in simply omits it.
+ *
+ * WHY IT EXISTS. `execError` means "could not look", and until now that was one bucket
+ * holding two very different things: **a step could not find the element it was told to
+ * act on** (cosmetic drift — the page answered, and the answer was that nothing matched)
+ * and **the browser died** (a broken environment). Story 5.6 may adapt the first and must
+ * never adapt the second, and telling them apart by matching the adapter's prose is the
+ * technique this codebase rejects (`src/cli/commands/verify.ts` says so in terms).
+ *
+ * So the distinction is RECORDED AT THE SITE THAT KNOWS IT and every later reader branches
+ * on this field. Nothing infers it afterwards.
+ *
+ * - `step-target-missing` — a scenario step named a selector, and the page reported that
+ *   nothing matched it. The page ANSWERED. This is the only reason 5.6's adaptation flow
+ *   will act on.
+ * - `unreachable` — the page could not answer at all: the browser crashed, closed, or
+ *   never launched. Never adaptable.
+ * - `other` — anything else that could not look. Never adaptable, and deliberately not
+ *   subdivided: a taxonomy grows by ADR, not by a story needing one more case.
+ */
+export type ProbeExecErrorReason = 'step-target-missing' | 'unreachable' | 'other';
+
 export interface ProbeExecError {
   readonly message: string;
   readonly hint?: string;
+  /**
+   * Absent when the executor cannot tell. **Absence is never adaptable** — a reader that
+   * needs the distinction must find it stated, never assume it.
+   */
+  readonly reason?: ProbeExecErrorReason;
 }
 
 /** What one probe attempt produced (AD-13's `ProbeAttempt`). */
@@ -145,6 +177,105 @@ export interface DerivedCriterionResult extends CriterionResult {
   readonly actual?: string;
   /** At least one reference on every non-pass result (FR-28). */
   readonly evidence?: readonly EvidenceRef[];
+  /**
+   * What every attempt did, when there was more than one (story 5.4, AD-9, FR-32).
+   *
+   * PRESENT ONLY WHEN A CRITERION TOOK MORE THAN ONE ATTEMPT, and that is a decision
+   * rather than an omission. Retries default to 0 for every surface, so in the shipped
+   * default configuration every criterion has exactly one attempt whose outcome,
+   * `expected`/`actual` and evidence ARE the fields above — repeating them here would
+   * double every stored run to say nothing a reader could not already see. The record
+   * exists exactly where it carries information the result cannot: on the attempts the
+   * derivation threw away.
+   *
+   * IT IS THE ONLY PLACE A FLAKY PASS'S FAILED ATTEMPT SURVIVES on the criterion. The
+   * pass branch below returns early with no `expected`, no `actual` and no `evidence`,
+   * because a pass has nothing to put there — so without this, `flaky: true` would be a
+   * marker pointing at nothing, and a flake nobody can investigate is a flake everybody
+   * learns to skim past. That is the failure FR-32 exists to prevent, arriving one step
+   * later than expected.
+   */
+  readonly attempts?: readonly CriterionAttemptRecord[];
+  /**
+   * WHY this criterion is `needs_human` — Q39's two compile-time triggers, told apart.
+   *
+   * Present only on `needs_human` results, and only when a caller recorded it. They are
+   * different kinds of fact with different remedies (`domain/plan.ts:102-119`), and the
+   * difference is actionable rather than decorative: `not-safely-automatable` means the
+   * plan-author could not map an AUTOMATED criterion to a probe it would stand behind, and
+   * sharpening such a criterion often makes it automatable. `human-verifiability` means
+   * the contract's author wrote that no machine may answer it, and no amount of sharpening
+   * will change that. A report that collapses the two tells a reviewer to attempt the
+   * impossible or to give up on the tractable.
+   *
+   * CARRIED, NEVER INFERRED. In the `verifiability: human` branch this value is derivable
+   * from the contract — and deriving it is still refused, because it would put a fact in
+   * the result whose source is this function rather than a recorded input. The plan gate
+   * (`schemas/plan.ts:1103-1124`) already refuses any plan whose reason disagrees with its
+   * contract, with its own message; duplicating that judgement here would create a second
+   * place for the two to disagree.
+   */
+  readonly needsHumanReason?: NeedsHumanReason;
+  /**
+   * The plan's reviewer guidance: what a person must actually check.
+   *
+   * Present only on `needs_human` results. Story 5.3 exists because this was missing: the
+   * plan schema requires guidance on every `needs-human` arm, the plan-author is instructed
+   * to write it, and it was dropped at `pipeline/stages/probes.ts` — so a NEEDS_HUMAN
+   * criterion reached a human with the contract's statement and nothing else. NEEDS_HUMAN
+   * is exit 2, and exit 2 is a STOP; a stop that does not say what to look at is a stop
+   * people learn to override.
+   *
+   * `BoundedText` rather than a bare string because this is UNTRUSTED PROVIDER TEXT that
+   * gets both treatments. It is redacted for the same reason `expected`/`actual` are — it
+   * is persisted to result.json and printed to a terminal exactly like evidence is — and it
+   * is bounded because, unlike those two, it is model-written prose with no length
+   * discipline, printed into a report an agent may be reading (FR-29).
+   */
+  readonly reviewerGuidance?: BoundedText;
+}
+
+/**
+ * One attempt, as the persisted run and the terminal report record it.
+ *
+ * Deliberately NOT `ProbeAttempt`. That type carries raw observations and every assertion
+ * evaluation, redacted by nobody, and is an execution input rather than a report; this is
+ * the auditable summary — what the attempt came out as, how long it took, what it was
+ * compared against, and where its artifact is. Everything textual here has been through
+ * `redactText` at the same boundary as the criterion's own diagnostics, because an
+ * attempt whose text took a different route is a leak the other attempts' clean output
+ * would disguise.
+ */
+export interface CriterionAttemptRecord {
+  /** 1-based, copied from the attempt rather than from the array index. */
+  readonly attempt: number;
+  /**
+   * Which probe of the criterion this attempt belongs to.
+   *
+   * NOT decoration, and the reason is a defect codex review found in the first version of
+   * this story. A criterion may declare several probes and reports ONE result, so
+   * `probes.ts`'s `select` chooses a representative — and `flaky` is deliberately carried
+   * up from ANY probe, because "FR-32 is about VISIBILITY". The attempt records must be
+   * carried up the same way, or a criterion whose SECOND probe flaked reports
+   * `flaky: true` beside the FIRST probe's (absent) records: a document that contradicts
+   * itself, with the failed attempt's detail lost. Once records from several probes share
+   * one array, `attempt` alone stops identifying an attempt — 1, 1, 2 — so the probe is
+   * named.
+   *
+   * Optional because `deriveCriterionResult` is total and may be called without one; the
+   * probes stage always supplies it.
+   */
+  readonly probeId?: string;
+  /** What this attempt alone came out as, before retry orchestration is considered. */
+  readonly outcome: AttemptOutcome;
+  /** Whole milliseconds, from the injected `Clock` (AD-9). */
+  readonly durationMs: number;
+  /** What this attempt required, when it evaluated something and was unsatisfied. */
+  readonly expected?: string;
+  /** What this attempt observed — or, for an `error`, why it could not observe. */
+  readonly actual?: string;
+  /** This attempt's own artifacts. Attempt 2 never overwrites attempt 1's files. */
+  readonly evidence?: readonly EvidenceRef[];
 }
 
 /**
@@ -177,10 +308,92 @@ export interface DerivationOptions extends RedactionOptions {
    * mistake rather than a legitimate case.)
    */
   readonly plannedNeedsHuman?: boolean;
+  /**
+   * The probe these attempts came from, stamped onto every attempt record (story 5.4).
+   *
+   * See `CriterionAttemptRecord.probeId`: a criterion may have several probes and one
+   * result, so records that travel up through `select` need to say which probe they
+   * describe. It rides in the options bag rather than as a fourth parameter for the reason
+   * this interface exists at all — one options bag reaching the single producer.
+   */
+  readonly probeId?: string;
+  /**
+   * The plan's recorded reason for carrying this criterion as needs-human.
+   *
+   * Threaded here rather than beside `RedactionOptions` for the reason the type's own
+   * header gives: one options bag reaching the single producer. `plannedNeedsHuman` above
+   * is the worked precedent — story 4.7 added it the same way, and every existing call
+   * site kept compiling unchanged.
+   *
+   * Note this is INDEPENDENT of `plannedNeedsHuman`. A `verifiability: human` criterion
+   * takes the first branch below and never sets that flag, but still has a reason worth
+   * reporting; a `not-safely-automatable` deferral sets both.
+   */
+  readonly needsHumanReason?: NeedsHumanReason;
+  /**
+   * The plan's reviewer guidance, RAW.
+   *
+   * Redaction and bounding are this function's job, not the caller's, and that placement
+   * is the point rather than a convenience: AD-10 says redaction happens at capture, and
+   * `deriveCriterionResult` is where `expected`/`actual` are already redacted. A caller
+   * that had to remember to redact is a caller that eventually forgets, and the field it
+   * forgets on is the one carrying arbitrary text from a provider CLI.
+   */
+  readonly reviewerGuidance?: string;
 }
 
 /** How one attempt came out, before retry orchestration is considered. */
-type AttemptOutcome = Exclude<CriterionStatus, 'skipped'>;
+/**
+ * The reviewer-facing half of a `needs_human` result: why, and what to check.
+ *
+ * Story 5.3. Split out rather than inlined because BOTH `needs_human` returns must carry
+ * it identically — the contract's `verifiability: human` and the plan's own refusal are
+ * different triggers reaching the same reader, and a reviewer should not be able to tell
+ * from the shape of the report which door the criterion came through.
+ *
+ * REDACTED AND BOUNDED HERE, at derivation, which is where `expected`/`actual` are already
+ * redacted and for the same stated reason: this text is persisted to result.json and
+ * printed to a terminal exactly like evidence is, so it is otherwise a path by which a
+ * captured credential reaches a stored run unredacted. `boundedText` does both in one call
+ * — it redacts first, then caps — so there is no second redaction entry point for this
+ * field and no way to get one without the other.
+ *
+ * Empty guidance is OMITTED rather than carried as an empty `BoundedText`. `Prose` has a
+ * minimum length so a parsed plan cannot produce it, but an empty guidance line rendered
+ * beneath a criterion reads as a missing value rather than an absent one, and a reviewer
+ * cannot tell those apart.
+ */
+function humanGuidance(
+  options: DerivationOptions | undefined,
+): Pick<DerivedCriterionResult, 'needsHumanReason' | 'reviewerGuidance'> {
+  const guidance =
+    options?.reviewerGuidance === undefined || options.reviewerGuidance === ''
+      ? undefined
+      : boundedText(options.reviewerGuidance, options);
+
+  return {
+    ...(options?.needsHumanReason === undefined ? {} : { needsHumanReason: options.needsHumanReason }),
+    ...(guidance === undefined ? {} : { reviewerGuidance: guidance }),
+  };
+}
+
+export type AttemptOutcome = Exclude<CriterionStatus, 'skipped'>;
+
+/**
+ * The same union as a value, so `src/schemas/` can mirror it without re-listing literals.
+ *
+ * `satisfies` pins it to the type, so a member that is not an attempt outcome fails to
+ * compile; `tests/unit/domain/criterion-attempts.test.ts` covers the other direction — a
+ * status added to `CRITERION_STATUSES` and forgotten here. `skipped` is excluded because
+ * an attempt that ran is by definition not skipped: the criterion may be, the attempt
+ * cannot.
+ */
+export const ATTEMPT_OUTCOMES = [
+  'pass',
+  'fail',
+  'needs_human',
+  'error',
+] as const satisfies readonly AttemptOutcome[];
 
 function outcomeOf(attempt: ProbeAttempt): AttemptOutcome {
   if (attempt.execError !== undefined) {
@@ -240,14 +453,14 @@ export function deriveCriterionResult(
   // redesign of a recorded decision, and review caught it: if Epic 4/5 wants a probe to
   // adjudicate a human criterion, the way to get that is an ADR, not a branch here.
   if (criterion.verifiability === 'human') {
-    return { ...base, status: 'needs_human' };
+    return { ...base, status: 'needs_human', ...humanGuidance(options) };
   }
 
   // THE PLAN'S OWN REFUSAL DECIDES SECOND, and also before attempts. See
   // `DerivationOptions.plannedNeedsHuman`: this is Q39's other trigger, and without it a
   // criterion the plan-author declined to automate reported PASS at exit 0.
   if (options?.plannedNeedsHuman === true) {
-    return { ...base, status: 'needs_human' };
+    return { ...base, status: 'needs_human', ...humanGuidance(options) };
   }
 
   const final = attempts.at(-1);
@@ -261,8 +474,18 @@ export function deriveCriterionResult(
   const flaky =
     status === 'pass' && attempts.slice(0, -1).some((earlier) => outcomeOf(earlier) !== 'pass');
 
+  // Story 5.4. Built for EVERY status including `pass`, and spread into both returns below
+  // rather than into one, because the flaky case is precisely the one that returns early:
+  // a pass carries no expected, no actual and no evidence, so this is the only place the
+  // attempt it was flaky ABOUT is recorded at all. See `DerivedCriterionResult.attempts`
+  // for why a single attempt gets no record.
+  const record =
+    attempts.length > 1
+      ? { attempts: attempts.map((each) => attemptRecord(each, options)) }
+      : {};
+
   if (status === 'pass') {
-    return flaky ? { ...base, status, flaky: true } : { ...base, status };
+    return flaky ? { ...base, status, flaky: true, ...record } : { ...base, status, ...record };
   }
 
   // FR-28: every non-pass result carries expected vs actual plus at least one evidence
@@ -277,14 +500,7 @@ export function deriveCriterionResult(
   // a captured credential reaches a stored run unredacted, sitting right beside the
   // evidence fields that are protected. AD-10 says redaction happens at capture; this is
   // capture.
-  const firstUnsatisfied = final.assertionEvaluations.find((evaluation) => !evaluation.satisfied);
-  const redact = (value: string | undefined): string | undefined =>
-    value === undefined ? undefined : redactText(value, options);
-
-  const expected = redact(firstUnsatisfied?.expected);
-  const actual = redact(
-    status === 'error' ? final.execError?.message : firstUnsatisfied?.actual,
-  );
+  const { expected, actual } = diagnostics(final, status, options);
 
   return {
     ...base,
@@ -292,5 +508,60 @@ export function deriveCriterionResult(
     ...(expected === undefined ? {} : { expected }),
     ...(actual === undefined ? {} : { actual }),
     ...(final.evidence.length === 0 ? {} : { evidence: final.evidence }),
+    ...record,
+  };
+}
+
+/**
+ * What one attempt was required to see and what it saw, redacted.
+ *
+ * Extracted so the criterion's own diagnostics and every per-attempt record are produced
+ * by ONE function. Two copies of this would be two redaction boundaries, and the second
+ * one is the one that eventually forgets — a leak the first attempt's clean output would
+ * disguise, which is exactly the shape Epic 3's retrospective §7 warns about.
+ */
+function diagnostics(
+  attempt: ProbeAttempt,
+  outcome: AttemptOutcome,
+  options: DerivationOptions | undefined,
+): { expected?: string; actual?: string } {
+  const firstUnsatisfied = attempt.assertionEvaluations.find(
+    (evaluation) => !evaluation.satisfied,
+  );
+  const redact = (value: string | undefined): string | undefined =>
+    value === undefined ? undefined : redactText(value, options);
+
+  return {
+    expected: redact(firstUnsatisfied?.expected),
+    actual: redact(
+      outcome === 'error' ? attempt.execError?.message : firstUnsatisfied?.actual,
+    ),
+  };
+}
+
+/**
+ * One attempt as the report and the persisted run record it (story 5.4).
+ *
+ * Notice what this does NOT do: it never looks at any other attempt, and it never
+ * produces a `CriterionStatus`. `outcome` is what THIS attempt alone came out as —
+ * `deriveCriterionResult` above is still the single producer of the criterion's status
+ * (AD-13), and the flake rule is still the one Epic 4 wrote and proved. Recording an
+ * attempt is bookkeeping; deciding what a criterion is remains one function's job.
+ */
+function attemptRecord(
+  attempt: ProbeAttempt,
+  options: DerivationOptions | undefined,
+): CriterionAttemptRecord {
+  const outcome = outcomeOf(attempt);
+  const { expected, actual } = diagnostics(attempt, outcome, options);
+
+  return {
+    attempt: attempt.attempt,
+    ...(options?.probeId === undefined ? {} : { probeId: options.probeId }),
+    outcome,
+    durationMs: attempt.durationMs,
+    ...(expected === undefined ? {} : { expected }),
+    ...(actual === undefined ? {} : { actual }),
+    ...(attempt.evidence.length === 0 ? {} : { evidence: attempt.evidence }),
   };
 }

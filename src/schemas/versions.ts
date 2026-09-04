@@ -12,6 +12,7 @@
  *   - story 1.6 adds `runManifest`
  *   - Epic 2 adds `contract` and `plan`
  *   - Epic 3 adds `jsonReport` (story 3.5 — done)
+ *   - Epic 5 adds `explanation` (story 5.5) and `adaptation` (story 5.6)
  *
  * Deliberately NOT here: any assert/validate-and-throw helper. What a version
  * MISMATCH means is artifact-specific — a run manifest wants "a newer
@@ -92,6 +93,41 @@ export const SCHEMA_VERSIONS = Object.freeze({
    * contract", answered by the contract fingerprint it stores.
    */
   plan: 1,
+
+  /**
+   * The explainer payload contract, story 5.5 — the shape of an `explainer` provider's
+   * response AND of the `explanations` array a run persists from it.
+   *
+   * The one-line addition this file's header promises. It is registered here for the same
+   * reason `epicSpec` is registered while nothing writes one to disk: the seam is
+   * versioned from the day it exists, so the day the payload grows a field there is
+   * already a number to move.
+   *
+   * NOTE WHAT DID NOT MOVE. `jsonReport` above is UNCHANGED. Story 5.5 adds one optional
+   * key (`explanations`) to the persisted run document, which is the additive case this
+   * file describes — every `result.json` written before it still parses, asserted in
+   * `tests/unit/schemas/result-explanation.test.ts`. The repo's precedent is commit
+   * `ec23ce1` (the optional stage `hint`), story 5.3's `needsHumanReason` /
+   * `reviewerGuidance`, and story 5.4's `flakiness`; none of them bumped it either.
+   */
+  explanation: 1,
+
+  /**
+   * The mechanics-adaptation payload a provider returns under `--adapt`
+   * (`src/schemas/adaptation.ts`), story 5.6.
+   *
+   * NOT a persisted artifact: nothing writes an adaptation payload to disk, and
+   * the adapted plan is an in-memory COPY that is deliberately never written
+   * back (`.specwitness/plans/<epic>.yaml` stays byte-identical across an
+   * adapted run). It is registered here anyway for the reason `epicSpec` is —
+   * the seam is versioned from day one, because the day the permitted mechanics
+   * surface changes, the shape must already be identifiable.
+   *
+   * Version 1 accepts `path` and `scenario` and NOTHING else. Widening it is a
+   * change to what a provider may alter at runtime, which is an ADR and an
+   * AD-2 conversation, never a routine bump.
+   */
+  adaptation: 1,
 } as const satisfies Record<string, number>);
 
 /** Keys of the registry. Derived — never hand-maintained. */

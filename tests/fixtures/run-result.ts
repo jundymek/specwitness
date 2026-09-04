@@ -35,6 +35,7 @@ import {
   httpEvidence,
   observationEvidence,
   providerEvidence,
+  boundedText,
   type Evidence,
 } from '../../src/domain/evidence.js';
 import type { RunResult } from '../../src/domain/run-result.js';
@@ -181,6 +182,30 @@ export function fullyPopulatedRunResult(): RunResult {
         flaky: true,
         statement: 'The health endpoint responds within the configured timeout.',
         severity: 'normal',
+        // Story 5.4. The flaky pass carries its ATTEMPTS, because a `pass` result has no
+        // expected, no actual and no evidence of its own — so this is the only place the
+        // attempt it was flaky about survives, and a snapshot of a document without it
+        // could not notice the field changing. Note attempt 1's evidence path differs from
+        // attempt 2's: a retry that overwrote the failed attempt's artifact would leave
+        // `flaky: true` pointing at a file showing a pass.
+        attempts: [
+          {
+            attempt: 1,
+            probeId: 'health-endpoint',
+            outcome: 'fail',
+            durationMs: 5100,
+            expected: 'status 200 within 2000ms',
+            actual: 'status 503',
+            evidence: [{ kind: 'http', path: 'probes/http-e7-02-01.response.txt' }],
+          },
+          {
+            attempt: 2,
+            probeId: 'health-endpoint',
+            outcome: 'pass',
+            durationMs: 380,
+            evidence: [{ kind: 'http', path: 'probes/http-e7-02-02.response.txt' }],
+          },
+        ],
       },
       {
         criterionId: 'E7-03',
@@ -196,6 +221,19 @@ export function fullyPopulatedRunResult(): RunResult {
         status: 'needs_human',
         statement: 'The error message reads clearly to a first-time user.',
         severity: 'normal',
+        // Story 5.3. Pinned here DELIBERATELY, so the snapshot guards the reviewer-guidance
+        // shape the way it already guards every other field: a rename, a reorder or a
+        // silent drop of either key changes what every harness consumer parses, and the
+        // snapshot is the thing that refuses to let that merge unnoticed.
+        //
+        // Built through the real `boundedText` constructor rather than written out as an
+        // object literal, for the same reason the seeded credential below goes through the
+        // real evidence constructors: the fixture must exercise the path production uses,
+        // or it pins a shape nothing actually produces.
+        needsHumanReason: 'human-verifiability',
+        reviewerGuidance: boundedText(
+          'read the message aloud to somebody who has never seen this tool',
+        ),
       },
       {
         criterionId: 'E7-05',

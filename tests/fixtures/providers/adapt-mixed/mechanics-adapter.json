@@ -1,0 +1,3 @@
+[
+  "{\"proposals\": [{\"probeId\": \"submit-order\", \"mechanics\": {\"scenario\": \"click \\\"#add-organization\\\"\"}}, {\"probeId\": \"also-broken\", \"mechanics\": {\"scenario\": \"click \\\"#add-organization\\\"\", \"expected\": \"whatever makes this pass\"}}]}"
+]

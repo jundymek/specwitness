@@ -8,8 +8,12 @@
  * created this file and each sibling adds its own line after 4.4 merges (agreed at cohort
  * intent-sync); on a rebase conflict here, take the epic branch's side and re-add your line.
  *
- * `browser` is declared in `PROBE_SURFACES` and has no executor: Epic 5 owns it, and
- * nothing in Epic 4 adds `@playwright/test`.
+ * `browser` WAS declared in `PROBE_SURFACES` with no executor throughout Epic 4 — "Epic 5
+ * owns it, and nothing in Epic 4 adds `@playwright/test`". Story 5.2 filled the last
+ * reserved slot, so this barrel now names all FOUR surfaces and the sentence that said
+ * otherwise is corrected here rather than left standing: a barrel naming three surfaces of
+ * four reads as a complete list, which is worse than no barrel at all (see 4.7's note
+ * below, which learned exactly that).
  *
  * ============================================================================
  * COMPLETED BY 4.7, AND WHY IT COULD NOT STAY THREE `export *` LINES
@@ -52,6 +56,20 @@ export {
   type ObservationExecutorDeps,
   type ResolvedObservationCommand,
 } from './observation.js';
+
+export {
+  BROWSER_PROBE_TIMEOUT_MS,
+  BROWSER_RUNNER_OVERHEAD_MS,
+  BROWSER_STEP_TIMEOUT_MS,
+  BrowserSurfaceExecutor,
+  type BrowserEvidenceBinaryWriter,
+  type BrowserEvidenceRecorder,
+  type BrowserEvidenceWriter,
+  type BrowserExecutorDeps,
+  type BrowserProbeParams,
+  type BrowserRuntimeEnvironment,
+  type RunPathResolver,
+} from './browser.js';
 
 export {
   SHELL_PROBE_TIMEOUT_MS,

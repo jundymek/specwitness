@@ -20,6 +20,10 @@ import { execa } from 'execa';
 
 import type { Clock } from '../../domain/ports.js';
 import { SystemClock } from '../../infra/clock.js';
+import {
+  resolvePlaywrightEnvironment,
+  type PlaywrightEnvironment,
+} from '../../infra/playwright-env.js';
 import { createProcessRunner } from '../../infra/process-runner.js';
 
 import { createProviderProbe, type ProbeProvider } from './provider-probe.js';
@@ -68,6 +72,22 @@ export interface DoctorEffects {
    * probe and invocation cannot classify a missing binary differently.
    */
   probeProvider: ProbeProvider;
+  /**
+   * Which Playwright a browser probe would drive, at what version, with which
+   * browsers, from where (story 5.1).
+   *
+   * READ-ONLY AND OFFLINE. It resolves; it never downloads. The merged
+   * capability check says why in terms — a diagnostic command that silently
+   * pulled hundreds of megabytes would be a bad citizen — and provisioning
+   * lives behind `provisionPlaywright`, which `doctor` does not call.
+   *
+   * Delegates to `src/infra/playwright-env.ts` rather than asking
+   * `resolvesFrom` a second question, for the same reason `probeProvider`
+   * delegates to the provider adapters: a diagnostic that resolved the
+   * environment differently from the code that drives it would drift, which is
+   * the exact failure a diagnostic must not have.
+   */
+  playwrightEnvironment(projectRoot: string): Promise<PlaywrightEnvironment>;
 }
 
 interface SpawnFailure extends Error {
@@ -261,7 +281,11 @@ export function createDoctorEffects(clock: Clock = new SystemClock()): DoctorEff
     resolvesFrom,
     probePort,
     probeProvider: createProviderProbe(createProcessRunner(clock)),
+    async playwrightEnvironment(projectRoot: string): Promise<PlaywrightEnvironment> {
+      return await resolvePlaywrightEnvironment({ projectRoot });
+    },
   };
 }
 
 export type { ProviderAuth, ProviderProbe } from './provider-probe.js';
+export type { PlaywrightEnvironment } from '../../infra/playwright-env.js';

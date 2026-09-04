@@ -4,6 +4,7 @@ import {
   countCriterionStatuses,
   countFlaky,
   countGateStatuses,
+  summarizeFlakiness,
 } from '../../../src/domain/result-counts.js';
 import type { DerivedCriterionResult } from '../../../src/domain/criterion-result.js';
 import type { GateResult } from '../../../src/domain/result.js';
@@ -100,5 +101,102 @@ describe('countFlaky', () => {
 
   it('is zero when nothing was flaky', () => {
     expect(countFlaky([criterion('E3-01', 'pass')])).toBe(0);
+  });
+});
+
+/**
+ * Story 5.4 — the numbers FR-33's scorecard record needs ("retry/flake counts").
+ *
+ * They are DERIVED here for the same reason every other count is: the terminal report and
+ * the persisted document must not be able to disagree about a number whose entire purpose
+ * is visibility. Both call this one function.
+ */
+describe('summarizeFlakiness', () => {
+  /** A criterion that took `outcomes.length` attempts, ending as `status`. */
+  function retried(
+    criterionId: string,
+    status: DerivedCriterionResult['status'],
+    outcomes: readonly ('pass' | 'fail' | 'error')[],
+    flaky?: boolean,
+  ): DerivedCriterionResult {
+    return {
+      ...criterion(criterionId, status, flaky),
+      attempts: outcomes.map((outcome, index) => ({
+        attempt: index + 1,
+        outcome,
+        durationMs: 1,
+      })),
+    };
+  }
+
+  it('is all zeroes for a run in which nothing was retried', () => {
+    expect(summarizeFlakiness([criterion('E5-01', 'pass'), criterion('E5-02', 'fail')])).toEqual({
+      flakyCriteria: 0,
+      retriedCriteria: 0,
+      extraAttempts: 0,
+    });
+  });
+
+  it('counts flaky criteria, retried criteria and the attempts beyond the first', () => {
+    const summary = summarizeFlakiness([
+      criterion('E5-01', 'pass'),
+      retried('E5-02', 'pass', ['fail', 'pass'], true),
+      retried('E5-03', 'fail', ['fail', 'fail', 'fail']),
+      retried('E5-04', 'error', ['error', 'error']),
+    ]);
+
+    expect(summary).toEqual({
+      // Only E5-02 passed on retry.
+      flakyCriteria: 1,
+      // Three criteria took more than one attempt, whatever they came out as: a retried
+      // FAILURE is exactly as interesting to a scorecard as a retried pass, because it is
+      // the number that says how much repetition this project is buying.
+      retriedCriteria: 3,
+      // 1 + 2 + 1.
+      extraAttempts: 4,
+    });
+  });
+
+  it('agrees with countFlaky, which is the one number two renderers both print', () => {
+    const criteria = [
+      retried('E5-01', 'pass', ['fail', 'pass'], true),
+      retried('E5-02', 'pass', ['error', 'pass'], true),
+      criterion('E5-03', 'pass'),
+    ];
+
+    expect(summarizeFlakiness(criteria).flakyCriteria).toBe(countFlaky(criteria));
+  });
+
+  it('counts a flaky criterion that carries no attempt record as flaky but not retried', () => {
+    // The last line of defence, and NOT hypothetical: codex review found a real path to
+    // exactly this state — a multi-probe criterion whose SECOND probe flaked while the
+    // CHOSEN probe passed cleanly, so `flaky` was carried up and the records were not.
+    // `probes.ts`'s `select` now carries both, and
+    // `tests/integration/probes-retries.test.ts` produces that criterion end to end. This
+    // stays because losing a flake is the one direction this function may not fail in.
+    expect(summarizeFlakiness([criterion('E5-01', 'pass', true)])).toEqual({
+      flakyCriteria: 1,
+      retriedCriteria: 0,
+      extraAttempts: 0,
+    });
+  });
+
+  it('counts attempts from EVERY probe of a criterion, not only the representative one', () => {
+    const twoProbes: DerivedCriterionResult = {
+      ...criterion('E5-05', 'pass', true),
+      attempts: [
+        { attempt: 1, probeId: 'clean-probe', outcome: 'pass', durationMs: 1 },
+        { attempt: 1, probeId: 'flaky-probe', outcome: 'fail', durationMs: 1 },
+        { attempt: 2, probeId: 'flaky-probe', outcome: 'pass', durationMs: 1 },
+      ],
+    };
+
+    // Three records, one criterion, two probes — so the repetition actually spent is 1
+    // (the flaky probe's second attempt), not 2 (records minus one).
+    expect(summarizeFlakiness([twoProbes])).toEqual({
+      flakyCriteria: 1,
+      retriedCriteria: 1,
+      extraAttempts: 1,
+    });
   });
 });

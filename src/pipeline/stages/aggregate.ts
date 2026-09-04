@@ -32,12 +32,70 @@
  */
 
 import { deriveCriterionResult } from '../../domain/criterion-result.js';
-import type { DerivedCriterionResult } from '../../domain/criterion-result.js';
+import type { DerivationOptions, DerivedCriterionResult } from '../../domain/criterion-result.js';
+import type { RedactionOptions } from '../../domain/evidence.js';
+import type { PlanCriterion } from '../../domain/plan.js';
 import { aggregate } from '../../domain/verdict.js';
 import type { Stage } from '../stage.js';
 import { stageOk } from '../stage.js';
 
-export function createAggregateStage(): Stage {
+/**
+ * What this stage needs in order to materialise a criterion the probes stage never reached.
+ *
+ * OPTIONAL, and the stage is correct without it — every field below only enriches a result
+ * whose STATUS is decided elsewhere. A pipeline assembled without a plan still completes
+ * its criterion set exactly as before.
+ *
+ * Story 5.3 added it, and the defect it closes is worth stating because the shape recurs.
+ * The probes stage forwards the plan's reviewer `reason` and `guidance` into the
+ * derivation — but ADR-003 means a gate failure skips that stage ENTIRELY and jumps here.
+ * A `verifiability: human` criterion then materialised through `deriveCriterionResult(c, [])`
+ * with no options: still `needs_human`, because the clause is unconditional, but stripped of
+ * the guidance a reviewer needs. So exactly the runs where a person is told "you must decide
+ * this" alongside a failing gate were the runs that told them nothing about how — the very
+ * failure 5.3 exists to remove, surviving on the one path 5.3 did not cover.
+ *
+ * Found by review rather than by the story's own tests, which asserted the channel only on
+ * the path where it happened to work — the same shape of mistake this file's header already
+ * records about the criterion set itself.
+ */
+export interface AggregateStageDeps {
+  /**
+   * The compiled plan's criteria, so a criterion materialised here carries the same
+   * reviewer guidance the probes stage would have given it. Same value the probes stage
+   * receives; the edge binds both from one plan.
+   */
+  readonly criteria?: readonly PlanCriterion[];
+  /** Config-declared extra redaction patterns (AD-10), as the probes stage threads them. */
+  readonly redaction?: RedactionOptions;
+}
+
+export function createAggregateStage(deps: AggregateStageDeps = {}): Stage {
+  const planned = new Map((deps.criteria ?? []).map((entry) => [entry.criterionId, entry]));
+
+  /**
+   * The derivation options for a criterion nothing resolved.
+   *
+   * It NEVER passes `plannedNeedsHuman`, and that omission is deliberate rather than an
+   * oversight. Passing it would turn a plan-deferred criterion from `skipped` into
+   * `needs_human` on the gate-failure path — a change to what the derivation DECIDES on a
+   * path ADR-003 governs, which is 4.7 territory and not story 5.3's to take quietly. This
+   * function only carries reviewer text onto results whose status is already `needs_human`;
+   * a criterion that derives to `skipped` reaches neither needs-human branch and so carries
+   * neither field, which is asserted.
+   */
+  const optionsFor = (criterionId: string): DerivationOptions => {
+    const entry = planned.get(criterionId);
+    if (entry === undefined || entry.disposition !== 'needs-human') {
+      return { ...deps.redaction };
+    }
+    return {
+      ...deps.redaction,
+      needsHumanReason: entry.reason,
+      reviewerGuidance: entry.guidance,
+    };
+  };
+
   return {
     name: 'aggregate',
     run: async (context) => {
@@ -49,7 +107,9 @@ export function createAggregateStage(): Stage {
       // should read in. A criterion some probe resolved keeps its result; one nothing
       // reached derives from zero attempts, which is `skipped`.
       const complete = context.run.contractCriteria.map(
-        (criterion) => resolved.get(criterion.criterionId) ?? deriveCriterionResult(criterion, []),
+        (criterion) =>
+          resolved.get(criterion.criterionId) ??
+          deriveCriterionResult(criterion, [], optionsFor(criterion.criterionId)),
       );
 
       // A result for a criterion the contract does not declare is kept rather than

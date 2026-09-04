@@ -24,6 +24,14 @@ export type GateConfig = SpecwitnessConfig['gates'][number];
 export type ServiceConfig = NonNullable<SpecwitnessConfig['services'][string]>;
 export type ReadinessConfig = NonNullable<ServiceConfig['ready']>;
 export type AiConfig = SpecwitnessConfig['ai'];
+/**
+ * The per-probe-class retry counts (story 5.4). Every surface is always present and
+ * zero-valued when the project declared nothing, so no caller writes `?? 0` — the same
+ * discipline `domain/result-counts.ts` states for counts, and for the same reason: a
+ * caller who has to remember a fallback will eventually forget it, and here forgetting
+ * would mean an undefined retry count reaching an attempt loop.
+ */
+export type RetriesConfig = SpecwitnessConfig['retries'];
 export type ProviderConfig = NonNullable<NonNullable<AiConfig['providers']>[string]>;
 
 /** The AI roles a project may assign; kebab-case per the spec and addendum section D. */

@@ -66,6 +66,7 @@
  */
 
 import type { ProbeSurface } from './criterion-result.js';
+import type { NeedsHumanReason } from './result.js';
 
 /**
  * How an assertion compares what it observed with what the plan expected.
@@ -103,29 +104,20 @@ export type AssertionComparison = (typeof ASSERTION_COMPARISONS)[number];
 /**
  * Why a criterion is carried as needs-human rather than compiled into probes.
  *
- * These are Q39's TWO — and only two — NEEDS_HUMAN triggers, seen from compile time. They
- * are kept distinct because they are different kinds of fact with different remedies:
+ * DEFINED IN `domain/result.ts` and re-exported here, where the plan's own consumers have
+ * always found it. It moved when story 5.3 carried the reason onto `DerivedCriterionResult`
+ * so a report could tell a reviewer WHY a criterion is theirs to answer: this module
+ * already imports `ProbeSurface` from `criterion-result.ts`, so a `criterion-result.ts`
+ * import of the reason the other way would be a cycle — and a cycle means the layer
+ * boundary is already gone. The result taxonomy is a true leaf that imports nothing at
+ * all, which makes it the one home both directions can reach.
  *
- * - `human-verifiability` — a fact about the CONTRACT. Its author wrote
- *   `verifiability: human`, meaning no machine may answer it. `domain/contract.ts` is
- *   unconditional about this and `deriveCriterionResult` enforces it before it even looks
- *   at attempts. Compilation must never emit a probe for such a criterion; the plan carries
- *   reviewer guidance instead.
- * - `not-safely-automatable` — a fact about COMPILATION (Q38). The criterion is
- *   `verifiability: automated`, but the plan-author could not map it to a probe it was
- *   willing to stand behind. It is recorded, surfaced in the report, and **never silently
- *   dropped and never guessed into a probe**. A criterion missing from a plan altogether is
- *   the failure mode this value exists to prevent: it would simply disappear from
- *   verification, and nothing would report its absence.
- *
- * Execution-time uncertainty is NEITHER of these — it is criterion `error` (Q39).
+ * The vocabulary itself is unchanged, and so is its meaning: Q39's TWO — and only two —
+ * NEEDS_HUMAN triggers, both seen from compile time. Execution-time uncertainty is
+ * NEITHER; it is criterion `error`.
  */
-export const NEEDS_HUMAN_REASONS = Object.freeze([
-  'human-verifiability',
-  'not-safely-automatable',
-] as const);
-
-export type NeedsHumanReason = (typeof NEEDS_HUMAN_REASONS)[number];
+export { NEEDS_HUMAN_REASONS } from './result.js';
+export type { NeedsHumanReason } from './result.js';
 
 /**
  * HTTP methods an http probe may use.

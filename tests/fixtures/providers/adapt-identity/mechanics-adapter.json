@@ -1,0 +1,3 @@
+[
+  "{\"proposals\": [{\"probeId\": \"submit-order\", \"mechanics\": {\"scenario\": \"click \\\"#x\\\"\"}, \"id\": \"a-different-probe\", \"surface\": \"shell\", \"criterionId\": \"E7-99\"}]}"
+]

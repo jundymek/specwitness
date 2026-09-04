@@ -1,0 +1,1014 @@
+/**
+ * The browser surface executor, driven against a REAL headless browser — story 5.2.
+ *
+ * Nothing here is mocked. A real fixture app on a real ephemeral socket, a real Playwright
+ * runner spawned through the real `ProcessRunner`, a real chromium. Every classification
+ * test PRODUCES the state it asserts on rather than asserting over a mocked outcome value:
+ * the launch failure points the runner at a browser registry that contains no browser, and
+ * the timeout uses a server that accepts the socket and never answers.
+ *
+ * ⚠️ **A SKIPPED TEST AND A SKIPPED CRITERION ARE DIFFERENT THINGS.** This file skips
+ * loudly, with a counted reason, on a machine with no usable Playwright. The PRODUCTION
+ * code has NO skip path: every route by which a browser probe could produce no attempts is
+ * an `InfraError` or an `execError`. Conflating the two is Epic 4 retro §2 observation 2
+ * arriving a third time, and this story exists to make it impossible.
+ */
+
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+
+import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
+
+import { deriveCriterionResult } from '../../../src/domain/criterion-result.js';
+import type { ContractCriterionRef, ProbeAttempt } from '../../../src/domain/criterion-result.js';
+import type { ProcessOutcome } from '../../../src/domain/process-runner.js';
+import type { BrowserEvidence } from '../../../src/domain/evidence.js';
+import { InfraError } from '../../../src/domain/errors.js';
+import { BrowserSurfaceExecutor } from '../../../src/surfaces/browser.js';
+import {
+  announceBrowserAvailability,
+  clock,
+  createEvidenceSink,
+  createRecordingRunner,
+  describeWithBrowser,
+  ordersPage,
+  playwrightEnvironment,
+  readSinkFile,
+  startFixtureApp,
+  SUITE_SPAWN_TIMEOUT_MS,
+  type EvidenceSink,
+  type FixtureApp,
+} from './helpers/browser-fixture.js';
+
+const CRITERION: ContractCriterionRef = {
+  criterionId: 'E5-02',
+  statement: 'the orders page shows the customer their orders',
+  severity: 'critical',
+  verifiability: 'automated',
+};
+
+/** Generous: a browser launch on a loaded machine is slow, and a false timeout is a lie. */
+const TEST_TIMEOUT_MS = 120_000;
+
+let app: FixtureApp;
+const sinks: EvidenceSink[] = [];
+
+beforeAll(async () => {
+  await announceBrowserAvailability();
+
+  app = await startFixtureApp((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+
+    if (url.pathname === '/orders') {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(
+        ordersPage(
+          '<h1 id="heading">Orders</h1>' +
+            '<p id="count">3</p>' +
+            '<div id="banner" style="display:none">hidden banner</div>' +
+            '<input id="search" />' +
+            '<button id="apply" onclick="document.getElementById(\'heading\').textContent = ' +
+            "'Filtered: ' + document.getElementById('search').value\">Apply</button>",
+        ),
+      );
+      return;
+    }
+
+    if (url.pathname === '/second') {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(ordersPage('<h1 id="heading">Second page</h1>'));
+      return;
+    }
+
+    response.writeHead(404, { 'content-type': 'text/html' });
+    response.end(ordersPage('<h1 id="heading">Not found</h1>'));
+  });
+}, TEST_TIMEOUT_MS);
+
+afterAll(async () => {
+  await app.close();
+});
+
+afterEach(async () => {
+  await Promise.all(sinks.splice(0).map(async (sink) => await sink.cleanup()));
+});
+
+interface RunInput {
+  readonly scenario?: string;
+  readonly path?: string;
+  readonly assertions: readonly {
+    description: string;
+    target: unknown;
+    comparison: string;
+    expected: string;
+  }[];
+  readonly baseUrl?: string;
+  readonly browsersPath?: string;
+  readonly stepTimeoutMs?: number;
+  readonly timeoutMs?: number;
+  readonly attempt?: number;
+  /**
+   * Forces ONLY the process-outcome fields of an otherwise completely real run.
+   *
+   * Used by exactly one test, and the reason it exists is worth stating rather than hiding:
+   * the state under test is "the driver wrote its result file, and THEN the process died" —
+   * a race whose window is the few milliseconds between the `finally` block's last write and
+   * the process exiting. Producing that deterministically would mean timing a kill into that
+   * window, which is precisely the kind of flaky test this suite must not contain.
+   *
+   * Everything else stays real: a real browser launches, a real page is read, real artifacts
+   * are written, and the driver really does report `ok: true`. Only the runner's verdict on
+   * its own child is overridden — which IS the state, not a simulation of the outcome the
+   * assertion checks.
+   */
+  readonly forceProcessOutcome?: { outcome: ProcessOutcome; exitCode: number | null };
+  /**
+   * Makes the injected BINARY evidence writer reject, as `RunStore` does on a full disk, a
+   * permissions change, or a containment refusal. Everything else stays real.
+   */
+  readonly failEvidenceBytes?: boolean;
+  /**
+   * Rewrites the driver's result file after a fully real run, to reach the one state that
+   * cannot be produced deterministically from outside: the page WAS observed and the trace
+   * was not written. Everything else stays real — a real browser, a real page, a real
+   * result file — and only the `trace` flag the driver itself wrote is flipped.
+   */
+  readonly dropTraceFromResult?: boolean;
+  /**
+   * Deletes the trace file after a fully real run, so the driver honestly reports
+   * `trace: true` and reading it back fails. That is the gap a driver-flag check misses.
+   */
+  readonly deleteTraceFile?: boolean;
+}
+
+interface Executed {
+  readonly attempt: ProbeAttempt;
+  readonly sink: EvidenceSink;
+  readonly spawns: readonly {
+    binary: string;
+    args: readonly string[];
+    env: { set?: Record<string, string> };
+  }[];
+}
+
+async function execute(input: RunInput): Promise<Executed> {
+  const environment = await playwrightEnvironment();
+  if (!environment.ready) {
+    throw new Error('the suite should have skipped: no usable Playwright');
+  }
+
+  const sink = await createEvidenceSink();
+  sinks.push(sink);
+  const recording = createRecordingRunner();
+  const forced = input.forceProcessOutcome;
+  const dropTrace = input.dropTraceFromResult === true;
+  const deleteTrace = input.deleteTraceFile === true;
+  const runner =
+    forced === undefined && !dropTrace && !deleteTrace
+      ? recording
+      : {
+          run: async (options: Parameters<typeof recording.run>[0]) => {
+            const result = await recording.run(options);
+            if (dropTrace) {
+              // The driver wrote this file itself, moments ago. Flip only its trace flag.
+              const resultPath = options.env.set?.['SPECWITNESS_BROWSER_RESULT'];
+              if (resultPath !== undefined) {
+                const { readFile, writeFile } = await import('node:fs/promises');
+                const written = JSON.parse(await readFile(resultPath, 'utf8')) as {
+                  trace?: boolean;
+                };
+                await writeFile(
+                  resultPath,
+                  JSON.stringify({ ...written, trace: false }),
+                  'utf8',
+                );
+              }
+            }
+            if (deleteTrace) {
+              const tracePath = options.env.set?.['SPECWITNESS_BROWSER_TRACE'];
+              if (tracePath !== undefined) {
+                const { rm } = await import('node:fs/promises');
+                await rm(tracePath, { force: true });
+              }
+            }
+            return { ...result, ...(forced ?? {}) };
+          },
+        };
+
+  const executor = new BrowserSurfaceExecutor({
+    clock,
+    runner,
+    cwd: process.cwd(),
+    environment: {
+      ...environment,
+      ...(input.browsersPath === undefined ? {} : { browsersPath: input.browsersPath }),
+    },
+    writeEvidence: sink.writeEvidence,
+    writeEvidenceBytes:
+      input.failEvidenceBytes === true
+        ? async () => {
+            throw new InfraError(
+              'could not durably write the evidence file',
+              'check free space and permissions on the run directory',
+            );
+          }
+        : sink.writeEvidenceBytes,
+    resolveRunPath: sink.resolveRunPath,
+    recordEvidence: sink.recordEvidence,
+    stepTimeoutMs: input.stepTimeoutMs ?? 15_000,
+    timeoutMs: input.timeoutMs ?? SUITE_SPAWN_TIMEOUT_MS,
+  });
+
+  const attempt = await executor.execute({
+    criterionId: CRITERION.criterionId,
+    surface: 'browser',
+    params: {
+      probe: {
+        id: 'orders',
+        surface: 'browser',
+        mechanics: {
+          serviceId: 'web',
+          path: input.path ?? '/orders',
+          scenario: input.scenario ?? '# nothing to interact with',
+        },
+        assertions: input.assertions,
+      },
+      baseUrl: input.baseUrl ?? app.baseUrl,
+      ...(input.attempt === undefined ? {} : { attempt: input.attempt }),
+    },
+  });
+
+  const configRef = attempt.evidence.find((ref) => ref.path.endsWith('.config.cjs'));
+  if (configRef !== undefined && GENERATED_CONFIG_TEXT === '') {
+    GENERATED_CONFIG_TEXT = await readSinkFile(sink, configRef.path);
+  }
+
+  return { attempt, sink, spawns: recording.spawns };
+}
+
+/**
+ * The generated Playwright config, as a real run writes it into the run directory.
+ *
+ * Read from disk rather than imported: the constant is module-private on purpose, and what
+ * matters is what actually reaches the runner.
+ */
+let GENERATED_CONFIG_TEXT = '';
+
+const HEADING_IS_ORDERS = {
+  description: 'the heading reads Orders',
+  target: { source: 'text', selector: '#heading' },
+  comparison: 'equals',
+  expected: 'Orders',
+};
+
+describeWithBrowser('the browser surface reads what the page actually shows', () => {
+  it(
+    'evaluates all four merged assertion targets, satisfied — and derives PASS',
+    async () => {
+      const { attempt } = await execute({
+        assertions: [
+          HEADING_IS_ORDERS,
+          {
+            description: 'the title is Orders',
+            target: { source: 'title' },
+            comparison: 'equals',
+            expected: 'Orders',
+          },
+          {
+            description: 'the url is the orders page',
+            target: { source: 'url' },
+            comparison: 'contains',
+            expected: '/orders',
+          },
+          {
+            description: 'the banner is hidden',
+            target: { source: 'visible', selector: '#banner' },
+            comparison: 'equals',
+            expected: 'false',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeUndefined();
+      // EVERY assertion produces an evaluation, including the satisfied ones (FR-28).
+      expect(attempt.assertionEvaluations).toHaveLength(4);
+      expect(attempt.assertionEvaluations.every((e) => e.satisfied)).toBe(true);
+      // Every one carries BOTH sides, so the record of what was checked is complete.
+      for (const evaluation of attempt.assertionEvaluations) {
+        expect(evaluation.expected).toBeDefined();
+        expect(evaluation.actual).toBeDefined();
+      }
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('pass');
+      expect(attempt.attempt).toBe(1);
+      expect(Number.isInteger(attempt.durationMs)).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'an assertion that looked and saw wrong is FAIL, not error (AC2, the product side)',
+    async () => {
+      const { attempt } = await execute({
+        assertions: [
+          {
+            description: 'the heading reads Invoices',
+            target: { source: 'text', selector: '#heading' },
+            comparison: 'equals',
+            expected: 'Invoices',
+          },
+        ],
+      });
+
+      // ⚠️ THE MIRROR IMAGE of the classification headline: a real product defect must not
+      // be disguised as an environment problem, which would exit 3 instead of 1.
+      expect(attempt.execError).toBeUndefined();
+      expect(attempt.assertionEvaluations[0]?.satisfied).toBe(false);
+      expect(attempt.assertionEvaluations[0]?.actual).toBe('Orders');
+
+      const derived = deriveCriterionResult(CRITERION, [attempt]);
+      expect(derived.status).toBe('fail');
+      expect(derived.expected).toBe('Invoices');
+      expect(derived.actual).toBe('Orders');
+      expect(derived.evidence?.length ?? 0).toBeGreaterThan(0);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it.each([
+    ['equals', 'Orders'],
+    ['notEquals', 'Orders'],
+    ['contains', 'Ord'],
+    ['notContains', 'Ord'],
+    ['greaterThan', '1'],
+    ['lessThan', '9'],
+  ])(
+    'a selector matching nothing is UNSATISFIED for %s — never a pass minted from an absence',
+    async (comparison, expected) => {
+      // ⚠️ Including the NEGATIVE comparisons, which is the whole point: a missing element
+      // does not satisfy `notEquals`, and it does not satisfy `notContains` either. Both are
+      // expectations ABOUT a value, and a value that does not exist cannot meet one. The
+      // alternative mints a PASS out of an absence — the one direction this product must
+      // never fail in (`http.ts:180-186`, the same rule on a different surface).
+      const { attempt } = await execute({
+        assertions: [
+          {
+            description: `the missing element ${comparison} ${expected}`,
+            target: { source: 'text', selector: '#no-such-element' },
+            comparison,
+            expected,
+          },
+        ],
+      });
+
+      // And it is NOT an execError: the page answered, and the answer was that nothing
+      // matched. That is a fact about the product.
+      expect(attempt.execError).toBeUndefined();
+      expect(attempt.assertionEvaluations[0]?.satisfied).toBe(false);
+      expect(attempt.assertionEvaluations[0]?.actual).toContain('no element matches');
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('fail');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'the scenario really drives the page — fill and click change what is asserted on',
+    async () => {
+      // Without this, every assertion above would pass equally well against an executor that
+      // navigated and ignored the scenario entirely. This is the test that proves the
+      // interaction happened.
+      const { attempt } = await execute({
+        scenario: ['fill "#search" "widgets"', 'click "#apply"'].join('\n'),
+        assertions: [
+          {
+            description: 'the heading reflects the filter that was applied',
+            target: { source: 'text', selector: '#heading' },
+            comparison: 'equals',
+            expected: 'Filtered: widgets',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeUndefined();
+      expect(attempt.assertionEvaluations[0]?.actual).toBe('Filtered: widgets');
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('pass');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a scenario goto navigates within the resolved origin',
+    async () => {
+      const { attempt, sink } = await execute({
+        scenario: 'goto "/second"',
+        assertions: [
+          {
+            description: 'the second page loaded',
+            target: { source: 'text', selector: '#heading' },
+            comparison: 'equals',
+            expected: 'Second page',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeUndefined();
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('pass');
+
+      // The step was compiled to an ABSOLUTE url built from the origin the CALLER resolved,
+      // never from anything the plan wrote.
+      const payloadRef = attempt.evidence.find((ref) => ref.path.endsWith('.payload.json'));
+      const payload = JSON.parse(await readSinkFile(sink, payloadRef?.path ?? '')) as {
+        steps: { verb: string; url: string }[];
+      };
+      expect(payload.steps[0]?.url).toBe(`${app.baseUrl}/second`);
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describeWithBrowser('AD-6/AD-7: could not look is ERROR, and never FAIL', () => {
+  it(
+    'a browser that cannot launch is execError => criterion ERROR, with zero assertions',
+    async () => {
+      // PRODUCED, not mocked: the runner is pointed at a browser registry that contains no
+      // browser at all, so chromium genuinely fails to launch.
+      const empty = join(process.cwd(), 'node_modules', '.specwitness-no-browsers-here');
+      await rm(empty, { recursive: true, force: true });
+
+      const { attempt } = await execute({
+        browsersPath: empty,
+        assertions: [HEADING_IS_ORDERS],
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.execError?.hint).toBeTruthy();
+      // ⚠️ ZERO assertion evaluations. `outcomeOf` makes the exec error outrank any
+      // assertion anyway, so emitting one here would manufacture product evidence out of an
+      // infrastructure failure — the defect this module refuses everywhere.
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+
+      const derived = deriveCriterionResult(CRITERION, [attempt]);
+      // ⚠️ THE HEADLINE ASSERTION OF THE STORY: error, NOT fail. A flaky environment must
+      // never start blocking mergeable branches.
+      expect(derived.status).toBe('error');
+      expect(derived.status).not.toBe('fail');
+      // FR-28: a non-pass result carries at least one reference.
+      expect(derived.evidence?.length ?? 0).toBeGreaterThan(0);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a timeout BEFORE the first assertion is execError => criterion ERROR',
+    async () => {
+      // PRODUCED, not mocked: a server that accepts the socket and never answers, with a
+      // millisecond navigation timeout. Nothing was adjudicated, so nothing may be reported
+      // as adjudicated.
+      const silent = await startFixtureApp(() => {
+        /* accept the connection and never respond */
+      });
+      try {
+        const { attempt } = await execute({
+          baseUrl: silent.baseUrl,
+          stepTimeoutMs: 250,
+          assertions: [HEADING_IS_ORDERS],
+        });
+
+        expect(attempt.execError).toBeDefined();
+        expect(attempt.assertionEvaluations).toHaveLength(0);
+        expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+      } finally {
+        await silent.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a read that THROWS is execError, not an unsatisfied assertion (codex P1)',
+    async () => {
+      // ⚠️ THE DOOR NOBODY WAS WATCHING. An earlier generated driver wrapped every read in a
+      // try/catch and turned any Playwright exception into an ABSENT VALUE — so a page that
+      // crashed, closed or timed out WHILE BEING READ produced an unsatisfied assertion and
+      // the criterion reported product FAIL instead of infrastructure `error`. Found by the
+      // codex review of this branch, and it is exactly the misclassification the whole story
+      // exists to prevent.
+      //
+      // PRODUCED, not mocked: an unparseable selector makes `locator.count()` throw a real
+      // Playwright exception — the same exception class, through the same code path, as a
+      // crashed or closed page. A renderer crash reaches this branch by construction, since
+      // there is now no catch anywhere inside a read.
+      const { attempt } = await execute({
+        assertions: [
+          {
+            description: 'a selector this executor cannot evaluate',
+            target: { source: 'text', selector: 'h1:::not-a-selector[' },
+            comparison: 'equals',
+            expected: 'anything',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeDefined();
+      // ZERO assertions: nothing was adjudicated, so nothing may be reported as adjudicated.
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+
+      const derived = deriveCriterionResult(CRITERION, [attempt]);
+      expect(derived.status).toBe('error');
+      expect(derived.status).not.toBe('fail');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it.each([
+    ['a run killed after writing its result', 'timed-out' as ProcessOutcome, null],
+    ['a runner that exited non-zero', 'completed' as ProcessOutcome, 1],
+  ])(
+    'refuses to adjudicate %s, even though the driver reported success (codex P1)',
+    async (_label, outcome, exitCode) => {
+      // ⚠️ A VERDICT REQUIRES BOTH HALVES: the driver said it observed the page, AND the
+      // process that ran it finished cleanly. The driver writes its result inside a
+      // `finally`, so `ok: true` can be on disk while the process is subsequently killed,
+      // torn down, or exits non-zero for a reason the driver never saw. Reading only the file
+      // would adjudicate assertions from a terminated run and could report PASS for a browser
+      // that was killed. Found by the codex re-review of this branch.
+      const { attempt } = await execute({
+        assertions: [HEADING_IS_ORDERS],
+        forceProcessOutcome: { outcome, exitCode },
+      });
+
+      // The page really WAS read — the assertion would have been satisfied — and it is still
+      // refused, because the run did not complete.
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a step whose element never appears is execError, not a product FAIL',
+    async () => {
+      // The distinction this row of the table exists for: the scenario could not be
+      // PERFORMED, which is different from an assertion that was not met. Nothing was
+      // adjudicated either way.
+      const { attempt } = await execute({
+        scenario: 'click "#no-such-button"',
+        stepTimeoutMs: 500,
+        assertions: [HEADING_IS_ORDERS],
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.execError?.message).toContain('step 1');
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describeWithBrowser('AD-3: the page may not leave the declared service origin', () => {
+  it(
+    'a click that navigates off-origin is execError, and reads nothing from that host',
+    async () => {
+      // ⚠️ THE HOLE A PATH RULE CANNOT REACH, and it is a real one: `goto` is validated as
+      // service-relative before any I/O, but a CLICK follows whatever the page put in an
+      // href — and the page is written by the system under verification. A provider-authored
+      // step like click "a[href='https://production.example']" would otherwise drive the
+      // verifier at an undeclared host and then read that page as evidence. Found by the
+      // codex review of this branch.
+      //
+      // PRODUCED, not mocked: a SECOND fixture server on its own ephemeral port is a
+      // genuinely different origin, and the first server serves a real link to it. The
+      // navigation is refused before the request leaves, so the second server never sees it.
+      const other = await startFixtureApp((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end(ordersPage('<h1 id="heading">Undeclared host</h1>'));
+      });
+
+      try {
+        const linking = await startFixtureApp((_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(
+            ordersPage(`<a id="away" href="${other.baseUrl}/elsewhere">go</a>`),
+          );
+        });
+
+        try {
+          const { attempt } = await execute({
+            baseUrl: linking.baseUrl,
+            path: '/orders',
+            scenario: 'click "#away"',
+            assertions: [
+              {
+                description: 'the heading of whatever page we end up on',
+                target: { source: 'text', selector: '#heading' },
+                comparison: 'equals',
+                expected: 'Undeclared host',
+              },
+            ],
+          });
+
+          // It is an INFRASTRUCTURE failure, not a product observation: the probe could not
+          // be completed safely, so nothing was adjudicated.
+          expect(attempt.execError).toBeDefined();
+          expect(attempt.execError?.message).toContain('declared service origin');
+          expect(attempt.assertionEvaluations).toHaveLength(0);
+          expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+
+          // And nothing from the undeclared host became evidence — the assertion that would
+          // have been SATISFIED there was never evaluated at all.
+          expect(JSON.stringify(attempt.assertionEvaluations)).not.toContain('Undeclared host');
+        } finally {
+          await linking.close();
+        }
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'STOPS INTERACTING the moment it leaves the origin — the beacon is never reached',
+    async () => {
+      // ⚠️ THIS TEST EXISTS BECAUSE THE FIRST VERSION OF THE ONE ABOVE WAS VACUOUS. Removing
+      // the per-STEP origin check left that test green, because the check before the READS
+      // caught the same violation — so the suite proved the probe would not REPORT on an
+      // undeclared host, and proved nothing about whether it would keep DRIVING one. Those
+      // are different hazards: a scenario that clicks away and then fills a field is typing
+      // into a host the project never declared.
+      //
+      // So this drives two steps and asserts the second never happened, observed from the
+      // undeclared server's own request log rather than from anything the executor reports.
+      const beaconHits: string[] = [];
+      const other = await startFixtureApp((request, response) => {
+        beaconHits.push(request.url ?? '');
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end(ordersPage('<a id="beacon" href="/beacon">deeper</a>'));
+      });
+
+      try {
+        const linking = await startFixtureApp((_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(ordersPage(`<a id="away" href="${other.baseUrl}/first">go</a>`));
+        });
+
+        try {
+          const { attempt } = await execute({
+            baseUrl: linking.baseUrl,
+            path: '/orders',
+            scenario: ['click "#away"', 'click "#beacon"'].join('\n'),
+            assertions: [HEADING_IS_ORDERS],
+          });
+
+          expect(attempt.execError).toBeDefined();
+          expect(attempt.execError?.message).toContain('declared service origin');
+
+          // ⚠️ THE STRONGEST FORM OF THIS ASSERTION, and it only became available once the
+          // guard moved from DETECTION to PREVENTION. An earlier version expected `/first`
+          // to have been hit — the navigation happened and was noticed afterwards — and
+          // only `/beacon` to be absent. With context-level interception the request is
+          // never sent at all, so the undeclared server's log is EMPTY. That is the property
+          // worth having: for a verification tool, contacting an undeclared host IS the
+          // harm, and noticing afterwards does not undo it.
+          expect(beaconHits, 'a request reached an undeclared host').toEqual([]);
+          expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+        } finally {
+          await linking.close();
+        }
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a WebSocket to an undeclared host is refused before the handshake',
+    async () => {
+      // ⚠️ A WEBSOCKET HANDSHAKE IS NOT AN HTTP ROUTE, so `context.route` never sees it — a
+      // page could open a socket straight past the guard that covers everything else. Raised
+      // by the codex review AFTER the interception fix, which is the point worth keeping: a
+      // boundary is only as good as the transports it actually covers.
+      //
+      // PRODUCED, not mocked: a real second server on its own port, and a real page that
+      // really calls `new WebSocket(...)` at it. The server records every connection
+      // attempt, including the HTTP upgrade request, so "never contacted" is observed from
+      // the undeclared side rather than claimed by the executor.
+      const upgrades: string[] = [];
+      const other = await startFixtureApp((request, response) => {
+        upgrades.push(request.url ?? '');
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end('nope');
+      });
+
+      try {
+        const wsUrl = other.baseUrl.replace('http://', 'ws://');
+        const app = await startFixtureApp((_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(
+            ordersPage(
+              '<h1 id="heading">Orders</h1>' +
+                `<script>try { new WebSocket('${wsUrl}/socket'); } catch (e) {}</script>`,
+            ),
+          );
+        });
+
+        try {
+          const { attempt } = await execute({
+            baseUrl: app.baseUrl,
+            path: '/orders',
+            // A wait long enough for the socket attempt to have been made and refused.
+            scenario: '# the page opens the socket on load',
+            assertions: [HEADING_IS_ORDERS],
+          });
+
+          // The undeclared host is never contacted — no upgrade request ever arrives.
+          expect(upgrades, 'a WebSocket reached an undeclared host').toEqual([]);
+          // Whether the socket attempt also fails the ATTEMPT depends on timing (the page
+          // opens it during load), so the assertion that matters is the one above: nothing
+          // left the machine for an undeclared origin. If it was seen in time, it is an
+          // execError; if not, the criterion is adjudicated normally from the page — either
+          // way no traffic escaped.
+          if (attempt.execError !== undefined) {
+            expect(attempt.execError.message).toContain('declared service origin');
+            expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+          }
+        } finally {
+          await app.close();
+        }
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'blocks service workers, which routing alone does not cover',
+    () => {
+      // Requests a SERVICE WORKER handles never reach context routing, so a page that
+      // registers one could fetch an undeclared origin straight past every other guard.
+      // Asserted on the generated config itself, because the property is a context OPTION
+      // rather than a behaviour a fixture page can exercise without shipping a worker.
+      expect(GENERATED_CONFIG_TEXT).toContain("serviceWorkers: 'block'");
+    },
+  );
+
+  it(
+    'a target=_blank popup cannot reach an undeclared host either',
+    async () => {
+      // ⚠️ THE BYPASS A PAGE-LEVEL CHECK MISSES ENTIRELY, and the reason the guard sits on
+      // the CONTEXT. A target=_blank link opens a SECOND page, so a check that inspects the
+      // original page sees an origin that never moved — the popup could talk to the outside
+      // while the probe reported PASS. Raised by the codex review after the first origin fix.
+      const popupHits: string[] = [];
+      const other = await startFixtureApp((request, response) => {
+        popupHits.push(request.url ?? '');
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end(ordersPage('<h1 id="heading">Undeclared host</h1>'));
+      });
+
+      try {
+        const linking = await startFixtureApp((_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(
+            ordersPage(
+              `<a id="away" target="_blank" href="${other.baseUrl}/popup">go</a>`,
+            ),
+          );
+        });
+
+        try {
+          const { attempt } = await execute({
+            baseUrl: linking.baseUrl,
+            path: '/orders',
+            scenario: 'click "#away"',
+            assertions: [HEADING_IS_ORDERS],
+          });
+
+          // The undeclared host is never contacted, popup or not.
+          expect(popupHits, 'a popup reached an undeclared host').toEqual([]);
+          expect(attempt.execError).toBeDefined();
+          expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+        } finally {
+          await linking.close();
+        }
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describeWithBrowser('evidence: two channels, both artifacts, and one honest limitation', () => {
+  it(
+    'stores a real trace and a real screenshot, refs them, and records the typed member',
+    async () => {
+      const { attempt, sink } = await execute({ assertions: [HEADING_IS_ORDERS] });
+
+      // CHANNEL 1: refs on the attempt, every one run-RELATIVE (Q48).
+      const paths = attempt.evidence.map((ref) => ref.path);
+      expect(attempt.evidence.every((ref) => ref.kind === 'browser')).toBe(true);
+      expect(paths.every((path) => !path.startsWith('/'))).toBe(true);
+      expect(paths.some((path) => path.endsWith('.trace.zip'))).toBe(true);
+      expect(paths.some((path) => path.endsWith('.screenshot.png'))).toBe(true);
+      expect(paths.some((path) => path.endsWith('.payload.json'))).toBe(true);
+
+      // CHANNEL 2: the typed MEMBER. An executor that refs its files and forgets this ships
+      // reports carrying gate evidence and NO probe evidence, silently, with every surface
+      // suite green — no surface test drives a renderer.
+      expect(sink.members).toHaveLength(1);
+      const member = sink.members[0] as BrowserEvidence;
+      expect(member.kind).toBe('browser');
+      expect(member.trace?.path).toMatch(/\.trace\.zip$/);
+      expect(member.screenshot?.path).toMatch(/\.screenshot\.png$/);
+      expect(member.url).toContain('/orders');
+
+      // The artifacts are REAL FILES with their real magic bytes — the whole reason
+      // `writeEvidenceBytes` exists. Routed through the UTF-8 text writer, both would be
+      // the right size and the wrong bytes, and no viewer could open either.
+      const files = await sink.files();
+      const trace = files.find((path) => path.endsWith('.trace.zip'));
+      const screenshot = files.find((path) => path.endsWith('.screenshot.png'));
+      expect(trace).toBeDefined();
+      expect(screenshot).toBeDefined();
+
+      const { readFile } = await import('node:fs/promises');
+      expect((await readFile(trace as string)).subarray(0, 2).toString('latin1')).toBe('PK');
+      expect([...(await readFile(screenshot as string)).subarray(1, 4)].map((b) => String.fromCharCode(b)).join('')).toBe('PNG');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'records a member even when the browser never launched — the union permits it honestly',
+    async () => {
+      // The per-attempt rule, and where this surface sits relative to the other three.
+      // `BrowserEvidence.url` is known before anything is spawned and both artifact fields
+      // are optional, so an attempt that produced nothing is representable without inventing
+      // anything — unlike `HttpResponseRecord.status`, a bare `number`, which is why http
+      // records nothing on that route.
+      const empty = join(process.cwd(), 'node_modules', '.specwitness-no-browsers-here-2');
+      await rm(empty, { recursive: true, force: true });
+
+      const { attempt, sink } = await execute({
+        browsersPath: empty,
+        assertions: [HEADING_IS_ORDERS],
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(sink.members).toHaveLength(1);
+      const member = sink.members[0] as BrowserEvidence;
+      expect(member.url).toContain('/orders');
+      expect(member.trace).toBeUndefined();
+      expect(member.screenshot).toBeUndefined();
+      // And the limitation is stated where a reader of the evidence meets it.
+      expect(member.explanation).toContain('cannot be scrubbed by a text redactor');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'REFUSES a clean pass when the evidence writer could not persist the artifact (codex P2)',
+    async () => {
+      // ⚠️ TWO FAILURES, NOT ONE — the defect shape this story keeps meeting. An earlier
+      // version wrapped BOTH "Playwright never produced the artifact" and "the persistence
+      // boundary refused" in one catch that returned `undefined`, so a probe could report a
+      // clean PASS while the evidence it is required to carry was silently never written.
+      // Found by the codex auto-review of this branch.
+      //
+      // A failing byte writer is now a SpecWitness infrastructure failure and propagates,
+      // exactly as the text writer beside it already did.
+      const failure = await execute({
+        assertions: [HEADING_IS_ORDERS],
+        failEvidenceBytes: true,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+
+      expect(failure, 'a silently evidence-less PASS was produced').toBeInstanceOf(InfraError);
+      expect((failure as InfraError).message).toContain('durably write');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'still tolerates an artifact Playwright never produced — the other half of that pair',
+    async () => {
+      // The distinction the fix preserves: a browser that never launched produces no trace
+      // and no screenshot, and that is a fact about the run rather than a failure to record
+      // it. It stays an `execError` about the browser, NOT a thrown InfraError about a file.
+      const empty = join(process.cwd(), 'node_modules', '.specwitness-no-browsers-here-3');
+      await rm(empty, { recursive: true, force: true });
+
+      const { attempt, sink } = await execute({
+        browsersPath: empty,
+        assertions: [HEADING_IS_ORDERS],
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(sink.members).toHaveLength(1);
+      const member = sink.members[0] as BrowserEvidence;
+      expect(member.trace).toBeUndefined();
+      expect(member.screenshot).toBeUndefined();
+      expect(member.explanation).toContain('no trace was captured');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'REFUSES a pass when the page was observed but no trace landed (codex P1)',
+    async () => {
+      // AC1 requires a trace stored as evidence (Q32). An attempt that observed the page and
+      // produced no trace has not met the story's own evidence bar, and reporting PASS there
+      // is the evidence-less green that the persistence fix beside it also refuses.
+      const { attempt } = await execute({
+        assertions: [HEADING_IS_ORDERS],
+        dropTraceFromResult: true,
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.execError?.message).toContain('no Playwright trace was captured');
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'REFUSES a pass when the trace was written but cannot be read back (codex P1)',
+    async () => {
+      // The gap a DRIVER-FLAG check misses: the driver honestly reports `trace: true`, and
+      // reading `trace.zip` back then fails, so no trace is stored. Basing the required-trace
+      // check on the STORED ARTIFACT rather than on the flag is what closes it — the stored
+      // result is the only thing that knows whether a file actually exists.
+      const { attempt } = await execute({
+        assertions: [HEADING_IS_ORDERS],
+        deleteTraceFile: true,
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.execError?.message).toContain('no Playwright trace was captured');
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('error');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'scales the aggregate test bound with the number of bounded operations (codex P2)',
+    async () => {
+      // ⚠️ A FIXED AGGREGATE KILLS VALID WORK. With the bound fixed at `stepTimeoutMs +
+      // overhead`, a scenario whose every operation finished inside its own documented 30s
+      // bound could still be terminated by the aggregate — converting honest work into a
+      // spurious exit 3, which is this module's own headline misclassification arriving
+      // through the timeout arithmetic. Found by the codex review of this branch.
+      const step = 5_000;
+      const overhead = 30_000;
+
+      const one = await execute({
+        stepTimeoutMs: step,
+        assertions: [HEADING_IS_ORDERS],
+      });
+      const many = await execute({
+        stepTimeoutMs: step,
+        scenario: ['click "#apply"', 'click "#apply"', 'click "#apply"'].join('\n'),
+        assertions: [
+          HEADING_IS_ORDERS,
+          { description: 'title', target: { source: 'title' }, comparison: 'equals', expected: 'Orders' },
+        ],
+      });
+
+      const boundOf = (spawns: readonly { env: { set?: Record<string, string> } }[]): number =>
+        Number(spawns[0]?.env.set?.['SPECWITNESS_BROWSER_TIMEOUT'] ?? '0');
+
+      // 1 navigation + 0 steps + 1 read = 2 operations.
+      expect(boundOf(one.spawns as never)).toBe(2 * step + overhead);
+      // 1 navigation + 3 steps + 2 reads = 6 operations.
+      expect(boundOf(many.spawns as never)).toBe(6 * step + overhead);
+      // The aggregate is at least the sum of the parts, which is the property that matters.
+      expect(boundOf(many.spawns as never)).toBeGreaterThan(boundOf(one.spawns as never));
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'stamps the attempt into every filename, so attempt 2 cannot overwrite attempt 1',
+    async () => {
+      // `deriveCriterionResult` reads the FINAL attempt, so an overwritten trace would make
+      // a flaky pass point at evidence that no longer shows the failure it was flaky about —
+      // the single most confusing artifact this epic could produce.
+      const first = await execute({ assertions: [HEADING_IS_ORDERS], attempt: 1 });
+      const second = await execute({ assertions: [HEADING_IS_ORDERS], attempt: 2 });
+
+      expect(first.attempt.attempt).toBe(1);
+      expect(second.attempt.attempt).toBe(2);
+      expect(first.attempt.evidence[0]?.path).toMatch(/-01\.json$/);
+      expect(second.attempt.evidence[0]?.path).toMatch(/-02\.json$/);
+    },
+    TEST_TIMEOUT_MS,
+  );
+});

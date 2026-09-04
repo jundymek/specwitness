@@ -28,6 +28,7 @@ import type { ContractCriterionRef, DerivedCriterionResult } from '../domain/cri
 import type { Evidence } from '../domain/evidence.js';
 import type { Clock } from '../domain/ports.js';
 import type { GateResult } from '../domain/result.js';
+import type { RunAdaptation } from '../domain/adaptation.js';
 import type { RunOutcome } from '../domain/run-outcome.js';
 import type {
   ContractSummary,
@@ -86,6 +87,14 @@ export interface RunAccumulator {
   contractCriteria: ContractCriterionRef[];
   /** Written by the AGGREGATE stage and by nothing else (AD-6). */
   outcome?: RunOutcome;
+  /**
+   * Written by the PROBES stage and by nothing else (story 5.6).
+   *
+   * Absent unless an adaptation was attempted. The probes stage is the only place that can
+   * fill it: adaptation needs the verification worktree, the resolved services and the
+   * bound evidence sink, all of which exist only while that stage is running.
+   */
+  adaptation?: RunAdaptation;
 }
 
 /** What every stage is handed. Ports arrive here; a stage constructs no adapter. */

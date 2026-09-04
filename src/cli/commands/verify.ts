@@ -51,7 +51,7 @@
  * `tests/integration/verify-no-ai.test.ts`.
  */
 
-import { relative } from 'node:path';
+import { join, relative } from 'node:path';
 
 import type { Command } from 'commander';
 
@@ -68,8 +68,10 @@ import {
   resolvePlanPath,
   writePlanFileAtomically,
 } from '../../authoring/plan-file.js';
+import { createMechanicsAdapter } from '../../authoring/adaptation.js';
 import { compilePlan } from '../../authoring/plan.js';
 import { loadConfig, resolveRoleProvider, type SpecwitnessConfig } from '../../config/index.js';
+import type { MechanicsAdapter } from '../../domain/adaptation-port.js';
 import { ConfigError, InfraError, UsageError } from '../../domain/errors.js';
 import { normalizeEpicId } from '../../domain/ids.js';
 import type { Plan } from '../../domain/plan.js';
@@ -80,6 +82,7 @@ import type { RefResolution, RefRole, RepoRoot, RootResolution, Vcs } from '../.
 import { SystemClock } from '../../infra/clock.js';
 import { RandomIds } from '../../infra/ids.js';
 import { createProcessRunner, terminateProcessGroup } from '../../infra/process-runner.js';
+import { resolvePlaywrightEnvironment } from '../../infra/playwright-env.js';
 import { RunStore } from '../../infra/run-store.js';
 import { createGitVcs } from '../../infra/vcs.js';
 import { runPipeline } from '../../pipeline/run-pipeline.js';
@@ -101,7 +104,8 @@ import { createDoctorEffects } from '../doctor/effects.js';
 import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
 import { armInterruptNotice } from '../verify/interrupt.js';
-import { createProbeDispatcher } from '../verify/probe-dispatch.js';
+import { explainVerifiedRun, publishExplainedRun } from '../verify/explain.js';
+import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
 
 /** Injected at build time by tsup, and by vitest for source-level runs. */
@@ -113,6 +117,8 @@ interface VerifyOptions {
   readonly head?: string;
   readonly json?: boolean;
   readonly ai?: boolean;
+  readonly explain?: boolean;
+  readonly adapt?: boolean;
 }
 
 export function register(program: Command): void {
@@ -129,6 +135,19 @@ export function register(program: Command): void {
     // calls whether or not it is passed, so what `--no-ai` actually guarantees is that the
     // command will not compile one behind your back.
     .option('--no-ai', 'refuse to compile a plan; verify only what is already planned (FR-18, Q66)')
+    // Story 5.5. OPT-IN, and the default matters more than the feature: without the flag
+    // this command reaches no explainer at all, so FR-18's zero-provider-call guarantee is
+    // untouched by the flag's existence. What it buys is a NON-AUTHORITATIVE hypothesis
+    // beside each failed criterion; it can change no status, no verdict and no exit code.
+    .option('--explain', 'ask the explainer role for a non-authoritative failure hypothesis (FR-11)')
+    // Story 5.6. OPT-IN, and the default is silence: without it no adapter is wired into
+    // the probes stage at all, so there is no provider in scope on the probe path and a
+    // default run cannot spend quota (FR-18, Q66, AD-9's "determinism is the default").
+    .option(
+      '--adapt',
+      'let a provider propose new probe MECHANICS for a browser probe that failed on ' +
+        'element-not-found; assertions and expected values can never be changed (FR-18)',
+    )
     .action(async (epic: string, options: VerifyOptions) => {
       // Recording is the LAST act, per `cli/exit.ts`: anything that throws
       // before this point is classified by main's catch instead.
@@ -152,6 +171,27 @@ async function verify(
   // before anything is read, spawned or created. 64 sits outside 0–3 so a typo
   // can never be mistaken for a verdict (ADR-002).
   const epic = normalizeEpicId(epicArgument);
+  assertExplainIsCompatible(options);
+
+  // ⚠️ `--no-ai --adapt` IS REFUSED, NOT SILENTLY NO-OPED. Story 5.6, and it is a
+  // `UsageError` (exit 64) raised before anything is read, spawned or created — the same
+  // treatment a malformed epic id gets, and for the same reason: 64 sits outside 0-3 so a
+  // flag mistake can never be mistaken for a verdict (ADR-002).
+  //
+  // The alternative was letting `--no-ai` win and quietly dropping `--adapt`. A flag pair
+  // whose combination silently discards one of them is a flag pair people misread, and the
+  // one being discarded here is the one that spends subscription quota and changes what
+  // gets executed. An operator who typed both wants to be told, not guessed at. 5.5 reached
+  // the same answer independently for `--no-ai --explain`.
+  if (options.ai === false && options.adapt === true) {
+    throw new UsageError(
+      '--no-ai and --adapt cannot be combined',
+      'adaptation asks a provider to propose new probe mechanics, which is exactly what ' +
+        '--no-ai refuses. Drop --adapt for a zero-provider-call run, or drop --no-ai to ' +
+        'allow the one invocation adaptation costs',
+    );
+  }
+
   const explicitRoot = requireFlagValue('--root', options.root);
   const baseFlag = requireFlagValue('--base', options.base);
   const headFlag = requireFlagValue('--head', options.head);
@@ -252,6 +292,22 @@ async function verify(
 
   assertCouldEverAdjudicate(config, loaded);
 
+  // ⚠️ BUILT HERE, ABOVE `resolvePlan`, BECAUSE IT NEEDS NO PROVIDER — which is exactly the
+  // rule the block above states: "A NEW PRECONDITION THAT NEEDS NO PROVIDER GOES ABOVE
+  // HERE". Story 5.6, and it was the FOURTH review finding against that same line.
+  //
+  // Resolving and constructing the adapter is pure config work. Doing it after `resolvePlan`
+  // meant that `--adapt` with an unassigned role AND no plan on disk would compile a plan
+  // first — spending subscription quota and writing a file — and only then refuse with a
+  // configuration error. Raised as a P2 by the codex review of this branch.
+  //
+  // Built ONLY under `--adapt`, so `adapt` is `undefined` on every default run and the
+  // probes stage is handed no provider at all. It REFUSES rather than no-ops when the role
+  // is unassigned, for the reason the `--no-ai` clash is refused: an operator who asked for
+  // adaptation must be able to tell "nothing needed adapting" from "adaptation was never
+  // possible", and a silent no-op makes those two indistinguishable.
+  const adapt = options.adapt === true ? buildMechanicsAdapter(config, clock) : undefined;
+
   // The `--no-ai` refusal and the auto-compilation both have to happen while
   // there is still no run directory, no worktree and no process group in
   // existence — a refusal afterwards would leave a `result.json` on disk
@@ -271,10 +327,16 @@ async function verify(
 
   assertSomethingToAdjudicate(config, planning.plan);
 
+
   // Creates the run directory and fsyncs its manifest BEFORE any resource is
   // acquired (AD-8), so a `kill -9` from here on still leaves a record that
   // `specwitness clean` can reap.
   const created = await store.createRun({ epic });
+
+  // Which Playwright a browser probe would drive, if this plan has one (story 5.1).
+  // Resolution performs no network I/O and never spawns; it answers `absent` rather than
+  // throwing, which is what lets a run with no browser probes proceed untouched.
+  const playwright = await resolvePlaywrightEnvironment({ projectRoot });
 
   const environment: RunEnvironment = {
     nodeVersion: process.version,
@@ -293,6 +355,17 @@ async function verify(
     store.recordProcessGroup(created.runId, pgid);
   const writeEvidence = (relativeName: string, contents: string): Promise<string> =>
     store.writeEvidenceFile(created.runId, relativeName, contents);
+  // The BINARY twin (story 5.2). A Playwright trace is a `.zip` and a screenshot is a
+  // `.png`; the text writer encodes as UTF-8 and would corrupt both. AD-8 keeps `RunStore`
+  // the sole writer beneath `.specwitness/runs/`, so the browser executor copies bytes in
+  // through here rather than letting the Playwright subprocess write into the run.
+  const writeEvidenceBytes = (relativeName: string, contents: Uint8Array): Promise<string> =>
+    store.writeEvidenceBytes(created.runId, relativeName, contents);
+  // Playwright's own CLI is a separate process and has to OPEN the generated spec and
+  // config, which Q30/Q31 require to live in the run directory. Resolving the absolute
+  // path is this layer's job precisely so the executor never constructs one.
+  const resolveRunPath = (runRelativePath: string): string =>
+    join(created.dir, runRelativePath);
 
   // ONE registry, shared by the services stage and by teardown. Binding services
   // without a way to reap them is the composition `StageDependencies` makes
@@ -376,8 +449,25 @@ async function verify(
                 runner,
                 clock,
                 writeEvidence,
+                writeEvidenceBytes,
+                resolveRunPath,
+                // Story 5.1's answer, resolved ONCE. Read-only, offline, no spawn - so it
+                // costs a run with no browser probes almost nothing, and it is `verify`
+                // that resolves rather than `doctor` because `doctor` REPORTS and hints
+                // while never downloading. An `absent` answer is passed through rather
+                // than thrown here: only a run that actually reaches a browser probe
+                // should fail on it, and the executor refuses in 5.1's own words - never
+                // a skip, because a criterion that checked nothing must not report PASS.
+                playwright,
                 onProcessGroup: recordProcessGroup,
               }),
+              // Story 5.4. Zero for every surface unless the project declared otherwise,
+              // so a run stays deterministic unless somebody asked for repetition (AD-9).
+              retries: createRetryPolicy(config),
+              // Story 5.6. Spread, so a default run's `ProbesStageDeps` has NO `adapt` key
+              // rather than an explicit `undefined` — the difference is what makes "no
+              // provider is in scope on the probe path" true of the object itself.
+              ...(adapt === undefined ? {} : { adapt }),
             },
           }),
       // Write 1 of two: the crash-durable snapshot, at position 10 of 11. It is
@@ -428,20 +518,128 @@ async function verify(
     },
   });
 
+  // ==========================================================================
+  // THE EXPLAINER — story 5.5. Opt-in, after the run, and provably inert.
+  // ==========================================================================
+  //
+  // WHY IT IS HERE AND NOT IN THE PIPELINE. `src/pipeline/**` may not import
+  // `src/authoring/**` (AD-1, `pipeline-layer`), and it should not want to: a
+  // stage that could reach a provider would be a stage that could let one
+  // influence what it recorded. The run is FINISHED and its outcome fixed
+  // before this line — every status, every gate, every timestamp — so there is
+  // nothing left for a hypothesis to affect even in principle.
+  //
+  // WHAT CHANGES AND WHAT CANNOT. `explainVerifiedRun` returns a new
+  // `RunResult` differing in exactly two fields: the `explanations` array, and
+  // one appended `providerUsage` entry recording the call (Q65, FR-15 — a
+  // subscription cost this product exists to make visible). `outcome`,
+  // `criteria`, `gates`, `evidence`, `stages` and `contract` are carried
+  // through by a spread, so `serializeRunResult`'s bytes are identical with and
+  // without `--explain` once those two keys are set aside. That is asserted
+  // mechanically rather than argued: see `tests/unit/authoring/explain-inert.test.ts`.
+  //
+  // IT NEVER FAILS THE RUN. `explainVerifiedRun` has no error arm; on every
+  // failure route it returns the input object itself and a note. The exit code
+  // below is computed from `result.outcome`, which no branch here can reach.
+  let published = result;
+  if (options.explain === true) {
+    const explained = await explainVerifiedRun({
+      result,
+      config,
+      clock,
+      warn: (message: string) => process.stderr.write(`${message}\n`),
+    });
+    published = explained.result;
+    if (explained.note !== undefined) {
+      // A WARNING, never an ERROR: the verification succeeded and answered the
+      // question it was asked. Only the optional extra is missing, and saying
+      // so with `ERROR:` would tell the operator — and every log scraper they
+      // own — that SpecWitness malfunctioned when it did precisely its job.
+      printWarning(explained.note);
+    }
+
+    if (published !== result) {
+      // A THIRD write, through the SAME sole writer and the SAME serializer
+      // (AD-8, AD-11). The persist stage wrote a crash-durable snapshot at
+      // position 10 and `onComplete` wrote the finished document after
+      // teardown; this republishes it with the hypotheses attached, so the
+      // stored run and what is rendered below are the same bytes (Q53).
+      //
+      // Guarded on identity rather than on the flag: on every failure route
+      // `explainVerifiedRun` returns the input object itself, so a run that
+      // could not be explained is not rewritten at all — the stored bytes are
+      // then not merely equivalent to the unexplained ones, they were never
+      // touched.
+      //
+      // AND IT IS CONTAINED against a write that throws — see `publishExplainedRun`,
+      // which is its own function precisely so that failure handling is testable.
+      published = await publishExplainedRun({
+        explained: published,
+        original: result,
+        writeResult: async (toStore) => await store.writeResult(created.runId, toStore),
+        warn: printWarning,
+      });
+    }
+  }
+
   // AD-11: one model, many renderers. Nothing is computed here.
   if (options.json === true) {
     // stdout carries the JSON document and NOTHING else, so `verify --json | jq`
     // works with no filtering. These bytes are byte-identical to the persisted
     // `result.json` — both come from `serializeRunResult` (Q53).
-    process.stdout.write(renderJson(result));
-    process.stderr.write(renderTerminal(result));
+    process.stdout.write(renderJson(published));
+    process.stderr.write(renderTerminal(published));
   } else {
-    process.stdout.write(renderTerminal(result));
+    process.stdout.write(renderTerminal(published));
   }
 
+  // `result`, NOT `published`, and deliberately so: this reports the failing
+  // STAGE that ended the run, and no stage can have been the explainer.
   reportInfraFailure(result);
 
+  // THE EXIT CODE COMES FROM THE PIPELINE'S OWN OUTCOME. `published.outcome`
+  // is the same object — `attachExplanations` spreads it through untouched —
+  // but reading it from `result` says out loud that the explainer is not on
+  // the path to an exit code, which is the property AD-2 asks for here.
   return exitCodeForOutcome(result.outcome);
+  }
+}
+
+/**
+ * `--no-ai --explain` is REFUSED, exit 64 (story 5.5).
+ *
+ * The two flags contradict each other and there is no reading under which both are
+ * honoured: `--no-ai` is the operator asserting this run makes no provider call, and
+ * `--explain` asks for one. Three answers were available and only one of them is honest.
+ *
+ *   - Silently drop `--explain`. Rejected. People misread flag pairs, and a pair whose
+ *     combination quietly means something other than what it says is the same class of
+ *     defect as a verdict that quietly means something other than what it says. The
+ *     operator would believe they had asked for a hypothesis and would get none, with
+ *     nothing on screen to say why.
+ *   - Silently drop `--no-ai`. Rejected outright and not seriously considered: it would
+ *     spend provider quota under the flag whose entire purpose is to forbid that.
+ *   - REFUSE and name both flags. Costs one error message and cannot be misread.
+ *
+ * `UsageError` is exit 64, which sits OUTSIDE 0-3 so a flag mistake can never be mistaken
+ * for a verdict (ADR-002). Raised before anything is read, resolved, spawned or created —
+ * so a contradictory invocation cannot leave a run directory behind.
+ *
+ * Note what this does NOT do: it does not consult the config, and it does not care whether
+ * an `explainer` role is assigned. A missing role is AC2's "absent with a note" and is a
+ * perfectly successful run; a contradictory flag pair is a usage error. Those are different
+ * conditions and they get different answers.
+ */
+function assertExplainIsCompatible(options: VerifyOptions): void {
+  // Commander turns `--no-ai` into `ai === false` and leaves it `true` otherwise.
+  if (options.explain === true && options.ai === false) {
+    throw new UsageError(
+      '--explain and --no-ai contradict each other: --explain asks the explainer role for a ' +
+        'hypothesis, which is a provider call, and --no-ai forbids this run from making one',
+      'drop --no-ai to allow the explanation, or drop --explain to keep the run AI-free — ' +
+        'note that --no-ai also refuses to compile a missing plan, so the two flags are not ' +
+        'interchangeable',
+    );
   }
 }
 
@@ -533,6 +731,46 @@ interface PlanResolution {
  * silently rewrites a committed, reviewed artifact — `specwitness plan` is where that
  * decision is made, and its own four overwrite rules are written for it.
  */
+/**
+ * Builds the mechanics adapter for `--adapt` (story 5.6).
+ *
+ * SEPARATE FROM THE PLAN-AUTHOR RESOLUTION ABOVE, deliberately. They are different roles
+ * with different authority: a plan-author drafts an artifact a human reviews and commits,
+ * while this one changes what is executed inside a run that is already under way. A project
+ * that assigned one has not thereby assigned the other, and conflating them would let
+ * `ai.roles.plan-author` silently grant a permission nobody asked for.
+ *
+ * REFUSES rather than warning-and-continuing when the role is unassigned. The precedent
+ * above warns for a missing `plan-author` because that path has a legitimate degraded mode
+ * (gates-only, every criterion `skipped`). There is no degraded mode here: `--adapt` was
+ * typed, so the operator is waiting for adaptation, and a run that quietly did none would
+ * be indistinguishable from a run where nothing needed adapting.
+ */
+function buildMechanicsAdapter(config: SpecwitnessConfig, clock: Clock): MechanicsAdapter {
+  const resolved = resolveRoleProvider(config, 'mechanics-adapter');
+  if (resolved === undefined) {
+    throw new ConfigError(
+      'no provider is assigned to the "mechanics-adapter" role, so --adapt cannot propose anything',
+      "assign one under 'ai.roles.mechanics-adapter' in .specwitness/config.yaml, or drop " +
+        '--adapt to run the plan exactly as compiled',
+    );
+  }
+
+  const provider = providerForRole(resolved, {
+    processRunner: createProcessRunner(clock),
+    clock,
+    warn: (message: string) => process.stderr.write(`${message}\n`),
+  });
+  if (provider === undefined) {
+    throw new ConfigError(
+      `the "mechanics-adapter" role names provider "${resolved.name}", which could not be built`,
+      "check 'ai.providers' in .specwitness/config.yaml",
+    );
+  }
+
+  return createMechanicsAdapter({ provider, clock });
+}
+
 async function resolvePlan(input: {
   readonly projectRoot: string;
   readonly epic: string;
