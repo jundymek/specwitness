@@ -27,6 +27,7 @@ import {
   promptField,
 } from '../../../src/authoring/prompt-assembly.js';
 import { InfraError } from '../../../src/domain/errors.js';
+import { redactText, type RedactionOptions } from '../../../src/domain/evidence.js';
 import { SEEDED_SECRET } from '../../fixtures/run-result.js';
 
 const encoder = new TextEncoder();
@@ -324,5 +325,103 @@ describe("onOverflow: 'refuse' — fail closed instead of silently dropping cont
 
     expect(prompt).toMatch(/… truncated: \d+ of \d+ bytes shown/);
     expect(prompt.endsWith(tail.join('\n'))).toBe(true);
+  });
+});
+
+/**
+ * ⚠️ EXACTLY ONE REDACTION PASS. Raised as a P1 by the codex review, and correct.
+ *
+ * The report: *"When `RedactionOptions.extraPatterns` is not idempotent, `redactText`
+ * transforms the input here and `boundedText` immediately applies the same patterns again
+ * (and repeats this in the marker loop) … a broad pattern can make the first redacted value
+ * fit the authoritative builders' budget, then expand on the second pass and be silently
+ * truncated despite `onOverflow: 'refuse'`."*
+ *
+ * The first version of `boundWithMarker` called `redactText` itself and then handed the
+ * result to `boundedText`, **which redacts again internally**. That is harmless for the
+ * BUILT-IN patterns, which `evidence.ts:427` documents as idempotent — `[REDACTED]` contains
+ * no sensitive assignment, so redacting twice is redacting once.
+ *
+ * It is NOT harmless for `extraPatterns`, which are **arbitrary project-supplied regexes**
+ * with no idempotence guarantee at all. `/E/g` is enough to show it: the replacement
+ * `[REDACTED]` itself contains an `E`, so a second pass rewrites the marker and the text
+ * grows. And it grew on the wrong side of the fail-closed check — `assemblePrompt` measures
+ * ONE pass to decide whether to refuse, so a second, larger pass slipped past the refusal and
+ * was silently truncated. That is precisely the guarantee `onOverflow: 'refuse'` exists to
+ * make, defeated by the redaction it depends on.
+ *
+ * The fix is to pass the ORIGINAL text to `boundedText` every time, so each candidate gets
+ * exactly one pass and every measurement describes the same string.
+ */
+describe('redaction is applied exactly once (codex P1)', () => {
+  // Deliberately non-idempotent: `[REDACTED]` contains an E, so a second pass eats its own
+  // marker. A project would not write this on purpose — the point is that nothing STOPS it,
+  // and a redactor must not depend on the good behaviour of a pattern it did not write.
+  const EXPANDING: RedactionOptions = { extraPatterns: [/E/g] };
+
+  it('does not apply an extra pattern twice', () => {
+    const once = redactText('EEE', EXPANDING);
+
+    const prompt = assemblePrompt({
+      head: [],
+      body: ['EEE'],
+      capBytes: 24_000,
+      redaction: EXPANDING,
+    });
+
+    expect(prompt).toBe(once);
+  });
+
+  it('never silently truncates under refuse, even with an expanding pattern', () => {
+    // THE SECURITY CONSEQUENCE the P1 named. Before the fix the overflow check measured one
+    // pass, the body was then built with two, and the larger result was quietly cut — inside
+    // the mode whose whole purpose is that content is never quietly cut.
+    const body = 'E'.repeat(200);
+    const once = redactText(body, EXPANDING);
+    const cap = new TextEncoder().encode(once).length + 50;
+
+    const prompt = assemblePrompt({
+      head: [],
+      body: [body],
+      capBytes: cap,
+      redaction: EXPANDING,
+      onOverflow: 'refuse',
+    });
+
+    // Either it fits and is whole, or it refuses. What it must never do is return truncated
+    // content from refusal mode.
+    expect(prompt).not.toContain('truncated:');
+    expect(prompt).toBe(once);
+  });
+
+  it('refuses when ONE pass genuinely does not fit, with an expanding pattern', () => {
+    // The other half: the refusal still fires on the honest measurement.
+    expect(() =>
+      assemblePrompt({
+        head: [],
+        body: ['E'.repeat(200)],
+        capBytes: 100,
+        redaction: EXPANDING,
+        onOverflow: 'refuse',
+      }),
+    ).toThrow(InfraError);
+  });
+
+  it('bounds on one pass in truncate mode too, so the marker describes real bytes', () => {
+    const body = 'E'.repeat(400);
+    const once = redactText(body, EXPANDING);
+    const cap = 500;
+
+    const prompt = assemblePrompt({
+      head: [],
+      body: [body],
+      capBytes: cap,
+      redaction: EXPANDING,
+    });
+
+    expect(new TextEncoder().encode(prompt).length).toBeLessThanOrEqual(cap);
+    // `truncationMarker` reports "N of M bytes shown"; M must be the size of ONE redaction
+    // pass, because that is the document the caller would otherwise have received.
+    expect(prompt).toContain(`of ${new TextEncoder().encode(once).length} bytes shown`);
   });
 });

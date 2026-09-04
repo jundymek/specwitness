@@ -286,12 +286,26 @@ function boundWithMarker(
     return '';
   }
 
-  // Redacted once, up front. `boundedText` redacts again internally and `redactText` is
-  // idempotent (`evidence.ts:427`), so the repeated passes below cost time and change
-  // nothing — but doing it here makes the ordering visible instead of implied.
-  const redacted = redactText(raw, redaction);
-
-  let bounded = boundedText(redacted, { ...redaction, capBytes });
+  // ⚠️ EVERY `boundedText` CALL BELOW STARTS FROM `raw`, NEVER FROM A REDACTED STRING, so
+  // each candidate receives EXACTLY ONE redaction pass. Raised as a P1 by the codex review
+  // of story 6.8, and correct.
+  //
+  // The first version redacted here and handed the RESULT to `boundedText`, which redacts
+  // again internally. That is harmless for the BUILT-IN patterns, which `evidence.ts:427`
+  // documents as idempotent — `[REDACTED]` contains no sensitive assignment, so twice is
+  // once.
+  //
+  // It is NOT harmless for `extraPatterns`, which are arbitrary project-supplied regexes
+  // with no idempotence guarantee whatsoever. `/E/g` is enough to break it: the replacement
+  // `[REDACTED]` itself contains an `E`, so a second pass rewrites the marker and the text
+  // GROWS — `EEE` became `[R[REDACTED]DACT[REDACTED]D]…`.
+  //
+  // And it grew on the wrong side of the fail-closed check. `assemblePrompt` measures ONE
+  // pass to decide whether to refuse, so a larger second pass slipped past the refusal and
+  // was silently truncated — defeating `onOverflow: 'refuse'` by way of the very redaction
+  // it depends on. A redactor must not rely on the good behaviour of a pattern it did not
+  // write.
+  let bounded = boundedText(raw, { ...redaction, capBytes });
   let marker = truncationMarker(bounded);
   if (marker === '') {
     return bounded.text;
@@ -306,7 +320,8 @@ function boundWithMarker(
       return '';
     }
 
-    const candidate = boundedText(redacted, { ...redaction, capBytes: limit });
+    // From `raw` again, for the reason above: one pass per candidate, always.
+    const candidate = boundedText(raw, { ...redaction, capBytes: limit });
     const candidateMarker = truncationMarker(candidate);
     if (candidateMarker === '') {
       // Unreachable — `limit < capBytes` and the content was already too long for
