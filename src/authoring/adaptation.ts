@@ -22,23 +22,31 @@
  *    `amend.ts`), which makes it the only legal home for a provider-mediated change to a
  *    plan.
  *
- * ⚠️ **DEPCRUISE DOES NOT VALIDATE THIS PLACEMENT, AND SAYING SO WOULD BE A VACUOUS
- * GUARD.** `.dependency-cruiser.cjs` has rules whose `from` matches `^src/domain/`,
- * `^src/schemas/`, `^src/ingest/`, `^src/pipeline/`, `^src/report/` and the adapters — and
- * **none matching `^src/authoring/`**. Planting `authoring -> infra` here cruises clean.
- * Verified directly rather than assumed, after the epic-5 supervisor raised it.
+ * ⚠️ **THE PARAGRAPH THAT USED TO BE HERE IS NOW FALSE, AND STORY 6.8 REPLACED IT RATHER
+ * THAN DELETING IT.** Story 5.6 recorded, correctly at the time, that
+ * `.dependency-cruiser.cjs` had rules matching `^src/domain/`, `^src/schemas/`,
+ * `^src/ingest/`, `^src/pipeline/`, `^src/report/` and the adapters — and **none matching
+ * `^src/authoring/`** — so planting `authoring -> infra` here cruised clean. That was
+ * carried to the Epic 5 retrospective as action item **e5-C**.
  *
- * What actually holds the placement is the argument itself, which stands without a rule:
+ * **THE RULE NOW EXISTS.** Story 6.1 added `authoring-layer`
+ * (`.dependency-cruiser.cjs:194-229`), and `tests/unit/dependency-rules.test.ts:650-700`
+ * pins both directions. Story 6.8 re-verified it rather than trusting a PR body: planting
+ * `import { createRunStore } from '../infra/run-store.js'` in this directory made
+ * `pnpm depcruise` report `error authoring-layer: src/authoring/__probe-infra.ts →
+ * src/infra/run-store.ts` and exit 1; removing it returned exit 0.
+ *
+ * A stale security-shaped claim is worse than no claim at all — a reader who believes this
+ * layer is unfenced will either add a guard that already exists or, worse, decline to rely
+ * on one that does. The correction is deliberate and behaviour-free: no code in this file
+ * changed with it.
+ *
+ * The placement argument still stands on its own and does not depend on the rule:
  * `src/domain/**` is pure and cannot invoke a provider; `src/pipeline/**` may not import
- * `src/authoring/**` (that half IS enforced, by `pipeline-layer`); and `authoring` is where
- * `plan.ts` and `amend.ts` already compose providers through the one merged gate. The one
- * plant that DOES fire from here is `authoring -> cli`, caught by `nothing-imports-cli`,
- * which is a real guard about a different question.
- *
- * The missing layer rule is NOT authored here: writing one late in a closing wave is how a
- * boundary gets drawn wrong, and it is out of this story's scope. It is carried to the epic
- * retrospective as an owner item, with this module and 5.5's as the evidence that the layer
- * now has several modules and no rule.
+ * `src/authoring/**` (enforced by `pipeline-layer`); and `authoring` is where `plan.ts` and
+ * `amend.ts` already compose providers through the one merged gate. `authoring -> cli` is
+ * caught separately by `nothing-imports-cli`, which is a real guard about a different
+ * question.
  *
  * ============================================================================
  * A REFUSAL IS A VALUE. NOTHING HERE THROWS INTO THE PIPELINE.
@@ -76,6 +84,14 @@
  *    candidate is built, though they come from the project's own plan;
  *  - the contract's **statement** — redacted and bounded by the caller too.
  *
+ * **AND SINCE STORY 6.8, ALSO BY THE BUILDER ITSELF.** `buildAdaptationPrompt` runs every
+ * candidate through the layer's shared `assemblePrompt`, which redacts whatever it is given.
+ * That changes no byte on the path above — redaction is idempotent — and it changes WHERE
+ * the guarantee lives, which is the part that was fragile: it used to hold for the one
+ * caller that exists and for no other, so a second caller, or a test, could send an
+ * unredacted candidate and nothing would notice. Defence in depth; the caller keeps its own
+ * redaction and should.
+ *
  * ⚠️ **AND THE STATEMENT IS THE ONE I GOT WRONG, TWICE OVER.** An earlier version sent it
  * as-is, arguing it was committed specification content rather than a captured value, *and
  * that 5.5's explainer sent it on the same footing*. The second half was simply false about
@@ -112,6 +128,7 @@ import type {
 } from '../domain/adaptation-port.js';
 import type { MechanicsPatch } from '../domain/adaptation-apply.js';
 import type { AgentProvider, AgentRequest } from '../domain/agent-provider.js';
+import type { RedactionOptions } from '../domain/evidence.js';
 import type { Clock } from '../domain/ports.js';
 import type { ProviderUsage } from '../domain/run-result.js';
 import { attemptInvoke, type InvokeOptions } from '../providers/invoke.js';
@@ -132,6 +149,18 @@ export interface AdaptationDeps {
    * a fresh session billed against a real subscription.
    */
   readonly options?: InvokeOptions;
+  /**
+   * The run's redaction options (AD-10), forwarded to the shared prompt assembly.
+   *
+   * OPTIONAL AND CURRENTLY UNSET BY ITS CALLER, which is worth stating rather than leaving
+   * for a reader to discover. `src/pipeline/stages/probes.ts` already redacts every
+   * candidate field WITH the run's options before building one, so the config-declared
+   * extra patterns do reach this flow's content — they simply arrive already applied. This
+   * seam exists so the builder's own pass uses the same options rather than only the
+   * built-in patterns, which matters the moment anything constructs a candidate by another
+   * route. Story 6.8; wiring it at the edge is not that story's scope.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /** The gate's own accounting, translated into the run's audit shape (FR-15, Q65). */
@@ -182,7 +211,7 @@ export function createMechanicsAdapter(deps: AdaptationDeps): MechanicsAdapter {
   return async (candidates: readonly AdaptationCandidate[]): Promise<AdaptationDecision> => {
     const request: AgentRequest<MechanicsAdaptation> = {
       role: ADAPTATION_ROLE,
-      prompt: buildAdaptationPrompt(candidates),
+      prompt: buildAdaptationPrompt(candidates, deps.redaction),
       responseSchema: MechanicsAdaptationSchema,
       // `jsonSchema` is deliberately NOT set. The gate derives it from `responseSchema` in
       // one place, so two callers cannot disagree about what a CLI is steered towards —
