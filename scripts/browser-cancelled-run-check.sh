@@ -21,9 +21,10 @@
 # hold is the shape of defect this whole story exists to remove.
 #
 # ⚠️ AND IT CLEANS UP AFTER ITSELF. Because it deliberately creates an orphan, a survivor it
-# merely reported would be a browser tree this job left on a shared runner. Step 5 reaps what
-# step 4 found — after the evidence is captured, and without changing the exit code, so a leak
-# that had to be reaped still fails the step.
+# merely reported would be a browser tree this job left on a shared runner. Step 4 passes
+# `--reap` to the scanner, which terminates the surviving process GROUPS after the evidence is
+# captured and without changing the exit code, so a leak that had to be reaped still fails the
+# step. Step 5 re-scans so the log says what was left afterwards rather than asserting it.
 #
 # ⚠️ WHAT IS DELIBERATELY *NOT* KILLED, AND WHY THE FIRST VERSION OF THIS SCRIPT WAS WRONG.
 #
@@ -171,78 +172,33 @@ else
   done
 fi
 
-echo "==> [4/5] what survived?"
+echo "==> [4/5] what survived, and reaping it"
+# ⚠️ `--reap` IS THE POINT, not a nicety. This script DELIBERATELY CREATES an orphan, so
+# detecting one and walking away would leave a browser tree running on a shared runner - the
+# exact condition AC4 exists to prevent, caused by the check for it. `browser-fixture.ts`:
+# "A leaked browser tree is the worst leak this product can produce, and it lives until reboot."
+#
+# The reaping lives in browser-leak-check.mjs rather than here, and that is deliberate: it
+# signals process GROUPS, so it carries the same refusals `assertSignallableProcessGroup` makes
+# (src/infra/process-runner.ts:364-376) - an integer greater than 1, never our own group,
+# because `kill -TERM -1` signals every process on the machine. Those refusals are the
+# security-critical half of this story and they belong somewhere a test can reach them, which a
+# shell loop was not. `tests/integration/browser-leak-check.test.ts` exercises all three.
+#
+# Reaping runs after the report and does NOT change the exit code: a leak that had to be reaped
+# is still a leak, and still fails this check.
 survivors="${work}/survivors.txt"
 node "${leak_check_args[@]}" \
   --baseline "${baseline}" \
   --wait-seconds "${WAIT_SECONDS}" \
   --write-survivors "${survivors}" \
+  --reap \
   --label "after a run killed with SIGKILL (no afterEach ran)"
 result=$?
 
-# ⚠️ REAP WHAT WE FOUND — raised as a P1 by the Codex review of this branch, and correct.
-#
-# This script DELIBERATELY CREATES an orphan. Detecting one and walking away would leave a
-# browser tree running on a shared runner — the exact condition AC4 exists to prevent, caused
-# by the check for it. `browser-fixture.ts`: "A leaked browser tree is the worst leak this
-# product can produce, and it lives until reboot."
-#
-# Ordered AFTER the scan on purpose: the evidence is printed and written first, so reaping can
-# never erase the finding. The exit code is captured before this runs and is NOT changed by it —
-# a leak that had to be reaped is still a leak, and still fails the step.
-#
-# SIGTERM to the GROUP, a grace period, then SIGKILL to the GROUP: the same shape as
-# `terminateProcessGroup` in src/infra/process-runner.ts, and to the group rather than the pid
-# because a browser is a tree.
-echo "==> [5/5] reaping anything that survived"
-if [ ! -s "${survivors}" ]; then
-  echo "    nothing to reap"
-else
-  own_pgid="$(ps -o pgid= -p $$ | tr -d ' ')"
-  reaped=""
-  while read -r pid pgid; do
-    [ -z "${pid:-}" ] && continue
-
-    # ⚠️ THE SAME REFUSALS `assertSignallableProcessGroup` MAKES, and for the same reasons.
-    # `src/infra/process-runner.ts:364-376` states them: a pgid must be an integer greater
-    # than 1, because "0 would signal the SpecWitness process group itself and -1 every
-    # process on the machine". This script signals GROUPS, so it needs the identical guard —
-    # `kill -TERM -1` on a shared runner would signal everything the user owns. The merged
-    # product refuses these; a shell script that reaps must not be the one place that does not.
-    case "${pgid}" in
-      ''|*[!0-9]*)
-        echo "    refusing to signal process group '${pgid}': not an integer"
-        continue
-        ;;
-    esac
-    if [ "${pgid}" -le 1 ]; then
-      echo "    refusing to signal process group ${pgid}: must be greater than 1"
-      continue
-    fi
-    # Never signal our own group: `kill -<own pgid>` would kill this script mid-reap.
-    if [ "${pgid}" = "${own_pgid}" ]; then
-      echo "    refusing to signal process group ${pgid}: it is this script's own"
-      continue
-    fi
-    case " ${reaped} " in *" ${pgid} "*) continue ;; esac
-    reaped="${reaped} ${pgid}"
-    echo "    kill -TERM -${pgid}"
-    kill -TERM "-${pgid}" 2>/dev/null
-  done < "${survivors}"
-
-  sleep 2
-
-  for pgid in ${reaped}; do
-    if kill -0 "-${pgid}" 2>/dev/null; then
-      echo "    still there; kill -KILL -${pgid}"
-      kill -KILL "-${pgid}" 2>/dev/null
-    fi
-  done
-
-  echo "    re-scanning after the reap"
-  node "${leak_check_args[@]}" --baseline "${baseline}" \
-    --label "after reaping the leak this check created" || true
-fi
+echo "==> [5/5] re-scanning after the reap"
+node "${leak_check_args[@]}" --baseline "${baseline}" \
+  --label "after reaping whatever this check left behind" || true
 
 rm -rf "${work}"
 exit ${result}

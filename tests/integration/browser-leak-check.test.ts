@@ -28,6 +28,7 @@
  * behind, which is the only question AC4 asks.
  */
 
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -358,6 +359,105 @@ describe('the browser leak check', () => {
     // versus "the scan never got that far".
     expect(exitCode).toBe(0);
     expect((await readFile(survivorsPath, 'utf8')).trim()).toBe('');
+  });
+
+  /* ── reaping ──────────────────────────────────────────────────────────────────────── */
+
+  /**
+   * ⚠️ **A DRY RUN WHENEVER THE LISTING IS A FIXTURE, AND THAT IS A SAFETY PROPERTY, NOT A
+   * TEST CONVENIENCE.** `--ps-file` rows carry INVENTED pids. On a real machine `4210` may
+   * well be a live process group belonging to somebody else, and `kill(-4210)` would signal
+   * it. So `--reap` signals only when the listing came from a real `ps`; with `--ps-file` it
+   * reports what it would have signalled and touches nothing.
+   *
+   * That is also what makes the security-critical half testable: the refusals below are
+   * exercised, while the signalling itself is exercised for real by the cancelled-run check
+   * in CI.
+   */
+  it('reaps by process GROUP, and never signals when the listing is a fixture', async () => {
+    const psFile = await listing(
+      `   4210    4200    4198       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+      `   4211    4210    4198       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome --type=zygote`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    // The exit code still reports the leak: a leak that had to be reaped is still a leak.
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('would signal process group 4198');
+    // One group, not two processes — a browser is a tree and the group is the unit.
+    expect(stdout.match(/would signal process group/g)).toHaveLength(1);
+    expect(stdout).toContain('dry run');
+  });
+
+  /**
+   * ⚠️ THE REFUSALS `assertSignallableProcessGroup` MAKES, in the one place that signals
+   * groups from a shell-facing script. `src/infra/process-runner.ts:364-376`: a pgid must be
+   * an integer greater than 1, because `-1` signals every process on the machine and `0` the
+   * caller's own group.
+   */
+  it('refuses to signal process group 0, 1, or a non-integer', async () => {
+    const psFile = await listing(
+      `   4210    4200       1       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+      `   4310    4300       0       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('refusing to signal process group 1');
+    expect(stdout).toContain('refusing to signal process group 0');
+    expect(stdout).not.toContain('would signal process group 1');
+    expect(stdout).not.toContain('would signal process group 0');
+  });
+
+  it('refuses to signal its own process group', async () => {
+    const ownPgid = execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], {
+      encoding: 'utf8',
+    }).trim();
+    const psFile = await listing(
+      `   9410    9400 ${ownPgid.padStart(7)}       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain(`refusing to signal process group ${ownPgid}`);
+    expect(stdout).toContain('own');
+  });
+
+  it('reaps nothing, and says so, when nothing survived', async () => {
+    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('no surviving browser process');
+    expect(stdout).not.toContain('would signal');
   });
 
   it('exits 64 on an unknown flag', async () => {

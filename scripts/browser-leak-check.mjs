@@ -41,7 +41,7 @@
  * Usage:
  *   node scripts/browser-leak-check.mjs [--browsers-path <dir>]... [--ps-file <path>]
  *                                       [--baseline <path> | --write-baseline <path>]
- *                                       [--write-survivors <path>]
+ *                                       [--write-survivors <path>] [--reap]
  *                                       [--wait-seconds <n>] [--label <text>]
  *
  * Exit codes follow the house taxonomy where they apply: 0 clean, 1 survivors or a scan that
@@ -81,12 +81,15 @@ const POLL_INTERVAL_MS = 500;
 /** How many already-running processes the "before" snapshot prints. All of them are recorded. */
 const BASELINE_SAMPLE = 10;
 
+/** Milliseconds between SIGTERM and SIGKILL, matching `TEARDOWN_GRACE_MS` in process-runner.ts. */
+const TEARDOWN_GRACE_MS = 2_000;
+
 function usage(message) {
   process.stderr.write(
     `${message}\n` +
       'usage: node scripts/browser-leak-check.mjs [--browsers-path <dir>]... ' +
       '[--ps-file <path>] [--baseline <path> | --write-baseline <path>] ' +
-      '[--write-survivors <path>] [--wait-seconds <n>] [--label <text>]\n',
+      '[--write-survivors <path>] [--reap] [--wait-seconds <n>] [--label <text>]\n',
   );
   process.exit(64);
 }
@@ -98,6 +101,7 @@ let psFile;
 let baselineFile;
 let writeBaselineFile;
 let writeSurvivorsFile;
+let reap = false;
 let waitSeconds = 0;
 let label = 'after the run';
 
@@ -131,6 +135,9 @@ for (let index = 0; index < argv.length; index += 1) {
       if (value === undefined) usage(`ERROR: ${flag} needs a value`);
       writeSurvivorsFile = value;
       index += 1;
+      break;
+    case '--reap':
+      reap = true;
       break;
     case '--wait-seconds':
       if (value === undefined) usage(`ERROR: ${flag} needs a value`);
@@ -375,6 +382,96 @@ if (summaryPath !== undefined && summaryPath !== '') {
     markdown.push('');
   }
   appendFileSync(summaryPath, markdown.join('\n'));
+}
+
+/* ── reaping ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * This process's own process group, read the way `ownProcessGroup()` does in
+ * `src/infra/process-runner.ts` — Node exposes `process.pid` and `process.ppid` but no
+ * `getpgid`, so `ps` is the only way to ask.
+ */
+function ownProcessGroup() {
+  try {
+    return Number(
+      execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8' }).trim(),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Terminate the process GROUPS the survivors belong to.
+ *
+ * ⚠️ **DETECTING A LEAK AND LEAVING IT RUNNING IS NOT A CHECK, IT IS A LEAK.** Raised twice by
+ * the Codex review of this branch — once for the cancelled-run check and once for the
+ * normal-exit step, which is the same defect in the sibling step: the job is non-blocking and
+ * every later step is `always()`, so a reported survivor would simply continue running while
+ * the job finished around it, and the next check would even record it in its own baseline.
+ *
+ * ⚠️ **THE GROUP, NOT THE PID.** A browser is a tree — renderers, a zygote, a crashpad
+ * handler — and `src/infra/process-runner.ts` reaps one with `kill(-pgid, ...)` for that
+ * reason. Reaping the pid alone leaves the tree.
+ *
+ * ⚠️ **THE SAME REFUSALS `assertSignallableProcessGroup` MAKES**
+ * (`src/infra/process-runner.ts:364-376`): a pgid must be an integer greater than 1, because
+ * `-1` signals every process on the machine and `0` the caller's own group; and never our own
+ * group, which would kill this process mid-reap.
+ *
+ * ⚠️ **A DRY RUN WHENEVER THE LISTING CAME FROM `--ps-file`.** Those rows carry INVENTED pids,
+ * and on a real machine an invented pgid may belong to somebody else's live process group.
+ * A test fixture must not be able to signal anything, so it does not.
+ *
+ * Ordered AFTER the report and the survivors file, so reaping can never erase the finding, and
+ * it does NOT change the exit code: a leak that had to be reaped is still a leak.
+ */
+function reapSurvivors() {
+  const dryRun = psFile !== undefined;
+  const own = ownProcessGroup();
+  const groups = [...new Set(survivors.map((row) => row.pgid))];
+  const lines = [`  REAPING ${groups.length} process group(s)${dryRun ? ' (dry run: the listing is a fixture, nothing is signalled)' : ''}`];
+
+  const signallable = [];
+  for (const pgid of groups) {
+    if (!Number.isInteger(pgid) || pgid <= 1) {
+      lines.push(`    refusing to signal process group ${pgid}: must be an integer greater than 1`);
+      continue;
+    }
+    if (own !== null && pgid === own) {
+      lines.push(`    refusing to signal process group ${pgid}: it is this process's own group`);
+      continue;
+    }
+    lines.push(`    would signal process group ${pgid}`);
+    signallable.push(pgid);
+  }
+
+  if (!dryRun) {
+    for (const pgid of signallable) {
+      try {
+        process.kill(-pgid, 'SIGTERM');
+      } catch {
+        lines.push(`    process group ${pgid} was already gone at SIGTERM`);
+      }
+    }
+    // The same SIGTERM -> grace -> SIGKILL shape as `terminateProcessGroup`.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, TEARDOWN_GRACE_MS);
+    for (const pgid of signallable) {
+      try {
+        process.kill(-pgid, 0);
+        process.kill(-pgid, 'SIGKILL');
+        lines.push(`    process group ${pgid} survived SIGTERM; sent SIGKILL`);
+      } catch {
+        lines.push(`    process group ${pgid} exited on SIGTERM`);
+      }
+    }
+  }
+
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+if (reap && survivors.length > 0) {
+  reapSurvivors();
 }
 
 if (survivors.length > 0) {

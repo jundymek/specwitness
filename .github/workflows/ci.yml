@@ -329,12 +329,22 @@ jobs:
         run: pnpm report:skips:browser
 
       - name: No browser process survived the run (AC4, normal exit)
+        # ⚠️ `--reap` IS NOT OPTIONAL HERE, and leaving it out was a P1 on this branch.
+        # This job is non-blocking and every step below is `always()`, so a survivor that was
+        # only REPORTED would keep running while the job finished around it — and the
+        # cancelled-run check would then record it in its own baseline and subtract it. The
+        # job would end having left a browser tree on a shared runner: the exact condition
+        # AC4 exists to prevent, produced by the check for it.
+        #
+        # Reaping happens after the report and does not change the exit code, so a leak that
+        # had to be reaped still fails this step.
         if: always()
         run: |
           node scripts/browser-leak-check.mjs \
             --browsers-path "$HOME/.cache/ms-playwright" \
             --baseline "$RUNNER_TEMP/browser-baseline.txt" \
             --wait-seconds 30 \
+            --reap \
             --label "after the suites finished normally"
 
       - name: No browser process survived a CANCELLED run (AC4, SIGKILL)
