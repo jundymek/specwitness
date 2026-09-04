@@ -25,7 +25,8 @@
  *     written beside it in the same run directory.
  *   - Exactly ONE trailing newline.
  *   - Key order is the literal construction order in `toRunResultDocument`, NOT
- *     alphabetical. `schemaVersion` first; `contract` last.
+ *     alphabetical. `schemaVersion` first; `contract` last of the mechanically-derived
+ *     keys, with story 5.5's optional, non-authoritative `explanations` after it.
  *   - No `undefined`-valued keys are emitted. Optional-and-absent stays absent rather
  *     than becoming `null`, so "this run had no contract" and "the contract was null"
  *     stay distinguishable.
@@ -382,6 +383,26 @@ const ProviderUsageSchema = z
   })
   .strict();
 
+/**
+ * One non-authoritative root-cause hypothesis (story 5.5), mirroring
+ * `domain/run-result.ts`'s `CriterionExplanation`.
+ *
+ * `.strict()` like every other member here, and `explanation` is a bare string rather than
+ * a `BoundedText`: unlike 5.3's `reviewerGuidance` there is no full copy of a hypothesis on
+ * disk to point a truncation marker at — the provider's answer is bounded at capture and
+ * what is bounded IS the whole of it. A `BoundedText` would promise a `fullPath` that can
+ * never exist.
+ *
+ * Nothing mechanical reads this field, here or anywhere else. It is not counted, not
+ * aggregated, and not consulted by any status.
+ */
+const CriterionExplanationSchema = z
+  .object({
+    criterionId: z.string().min(1),
+    explanation: z.string().min(1),
+  })
+  .strict();
+
 const RunEnvironmentSchema = z
   .object({
     nodeVersion: z.string().min(1),
@@ -496,6 +517,21 @@ export const RunResultDocumentSchema = z
     providerUsage: z.array(ProviderUsageSchema),
     environment: RunEnvironmentSchema,
     contract: ContractSummarySchema.optional(),
+    /**
+     * Story 5.5, ADDITIVE (AD-5) — the non-authoritative hypotheses, when a run was
+     * explicitly explained. Absent on every other run, which is every run by default.
+     *
+     * Declared here because this schema is `.strict()`: a field the domain carries but the
+     * mirror does not would make exactly the runs that used the feature unreadable from
+     * storage — serialized fine, refused on the way back. That is the shape the story 3.3
+     * follow-up hit with the stage `hint` mirror, and story 5.3 hit again with
+     * `reviewerGuidance`.
+     *
+     * `SCHEMA_VERSIONS.jsonReport` is deliberately NOT bumped: an added optional key is
+     * the additive case `schemas/versions.ts` describes, and every document written before
+     * this change still parses (asserted in `tests/unit/schemas/result-explanation.test.ts`).
+     */
+    explanations: z.array(CriterionExplanationSchema).readonly().optional(),
   })
   .strict();
 
@@ -542,6 +578,14 @@ export function toRunResultDocument(result: RunResult): RunResultDocument {
     // key out entirely instead of emitting `"contract": undefined` for JSON.stringify to
     // drop. Same bytes either way; this states the intent at the point it is decided.
     ...(result.contract === undefined ? {} : { contract: result.contract }),
+    // LAST, and the position is the decision (story 5.5). Everything above this line is
+    // mechanically derived from what the run observed; this is the one key that is not,
+    // so it sits after all of it — the same reason the terminal report puts its block
+    // furthest from the verdict. It is also the position that leaves every existing key's
+    // byte offset untouched for a run that was not explained, which is every run by
+    // default: `JSON.stringify` drops an `undefined`-valued key entirely, so an
+    // unexplained run's document is byte-for-byte what it was before this story.
+    ...(result.explanations === undefined ? {} : { explanations: result.explanations }),
   };
 }
 
