@@ -143,7 +143,7 @@ graph TD
 
 | Name | Version |
 | --- | --- |
-| Node.js (runtime floor) | >=22.12 (Node 20 EOL 2026-04; commander 15 & execa 10 require >=22.12 — reviewer-verified) |
+| Node.js (runtime floor) | >=22.13 (set by pinned pnpm 11.24, which requires >=22.13; commander 15 & execa 10 require >=22.12; Node 20 EOL 2026-04 — ADR-007, raised from >=22.12) |
 | TypeScript | 6.0.x (stable JS-compiler line; 5.9 branch ended, 7.x Go-compiler migration deferred) |
 | pnpm (dev) | 11.x |
 | commander | 15.x (14→15 breaking-change review in Epic 1 spike) |

@@ -28,7 +28,7 @@ const GIT_DIR = 'rev-parse --git-dir';
 
 describe('node-version (required)', () => {
   it('passes on the pinned floor and above', async () => {
-    for (const version of ['v22.12.0', 'v22.20.0', 'v24.0.1']) {
+    for (const version of ['v22.13.0', 'v22.20.0', 'v24.0.1']) {
       const { ctx } = await testContext({ nodeVersion: version });
       expect((await nodeVersionCheck.run(ctx)).status).toBe('pass');
     }
@@ -41,7 +41,13 @@ describe('node-version (required)', () => {
 
     expect(result.status).toBe('fail');
     expect(result.detail).toContain('22.11.0');
-    expect(result.detail).toContain('22.12');
+    expect(result.detail).toContain('22.13');
+  });
+
+  it('fails on 22.12, the old floor: pnpm 11.24 needs 22.13 (ADR-007)', async () => {
+    const { ctx } = await testContext({ nodeVersion: 'v22.12.0' });
+
+    expect((await nodeVersionCheck.run(ctx)).status).toBe('fail');
   });
 
   it('compares numerically, not as strings', async () => {

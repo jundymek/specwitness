@@ -1,31 +1,23 @@
 name: CI
 
-# TEMPORARILY DISABLED — 2026-08-30, owner decision.
+# Runs the same six steps every developer runs before a PR. The repository was
+# made public on 2026-09-04, so Actions minutes no longer apply; before that the
+# triggers were removed by owner decision (2026-08-30) because minutes were
+# exhausted and every PR carried a red check that said nothing about the code.
 #
-# This repository is private and its GitHub Actions minutes are exhausted, so
-# every job is rejected before it starts ("recent account payments have failed
-# or your spending limit needs to be increased") and zero steps execute. That
-# left a red, meaningless check on every PR in the epic — which trains
-# reviewers to ignore CI and would hide a genuine failure when one appears.
+# HISTORY WORTH KEEPING: no version of this workflow executed a single step
+# until 2026-09-04. The first real run failed in `Enable corepack` on both
+# platforms — pnpm 11.24.0 requires Node >=22.13 while this file pinned the
+# then-declared engines floor of 22.12. That is what ADR-007 resolved by raising
+# the floor to 22.13; the pin below tracks `engines.node` and must keep doing so.
 #
-# Only the triggers were removed; the job below still does the full check and
-# can be started by hand from the Actions tab (workflow_dispatch).
-#
-# HONEST CAVEAT: because minutes are exhausted, no version of this workflow has
-# ever executed a single step. The steps mirror what is run locally before every
-# PR and the bootstrap order has been reviewed, but treat the first real run as
-# unproven and expect to iterate on it.
-#
-# TO RE-ENABLE once minutes are available, restore these three lines above
-# workflow_dispatch:
-#   push:
-#     branches: [master]
-#   pull_request:
-#
-# Until then the same six steps are run locally before every PR:
-#   pnpm install --frozen-lockfile && pnpm typecheck && pnpm depcruise \
-#     && pnpm test && pnpm build && ./scripts/pack-smoke.sh
+# `workflow_dispatch` is retained deliberately so the matrix can be run by hand
+# against any branch.
+
 on:
+  push:
+    branches: [master]
+  pull_request:
   workflow_dispatch:
 
 # A superseded run proves nothing; let the newer commit take over.
@@ -45,7 +37,7 @@ jobs:
       matrix:
         # SpecWitness is a local-first developer tool; both host platforms its
         # users run on are checked. Node is pinned at the engines floor so a
-        # feature newer than >=22.12 cannot creep in unnoticed.
+        # feature newer than >=22.13 cannot creep in unnoticed.
         os: [ubuntu-latest, macos-latest]
 
     steps:
@@ -56,17 +48,22 @@ jobs:
       # different installation ahead of it on PATH — so `pnpm` can go missing.
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.12'
+          node-version: '22.13'
 
       - name: Enable corepack
         # pnpm's version comes from packageManager in package.json, so CI and
         # every developer machine resolve to the same pnpm.
         #
-        # Corepack is upgraded first: the release bundled with Node 22.12
+        # Corepack is upgraded first: the release bundled with Node 22.13
         # predates pnpm's current signing key, so activating pnpm@11.24.0 with
         # it can fail with "Cannot find matching keyid". Installing a current
         # corepack sidesteps a failure that would otherwise look like a broken
         # lockfile rather than a stale signature list.
+        #
+        # `--global corepack@latest` warns EBADENGINE here (current corepack
+        # wants a newer Node than our floor) and still installs and works. Pinned
+        # deliberately to `@latest` rather than to the floor-compatible release:
+        # the signing-key list is the thing we need current.
         run: |
           npm install --global corepack@latest
           corepack enable

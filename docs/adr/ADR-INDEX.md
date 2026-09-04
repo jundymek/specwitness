@@ -25,4 +25,4 @@ Maps every required decision topic (brief §71) to its explicit home. AD-n = ARC
 | 19 | Differential verification deferred but architecturally supported | spine Deferred; AR-3 (base+head recorded per run); questions doc Q67 |
 | 20 | Mutation testing deferred | spine Deferred; questions doc Q68 |
 
-Supporting decisions not on the §71 list: ADR-002 (exit codes 0/1/2/3/64), AD-13 (probe execution contract), AD-1 (pure domain core), questions doc Q26/27 (explicit ports), Q38 (unplannable criterion ⇒ needs_human), Q65 (provider/model provenance in meta).
+Supporting decisions not on the §71 list: ADR-007 (Node runtime floor >=22.13, set by the pinned package manager), ADR-002 (exit codes 0/1/2/3/64), AD-13 (probe execution contract), AD-1 (pure domain core), questions doc Q26/27 (explicit ports), Q38 (unplannable criterion ⇒ needs_human), Q65 (provider/model provenance in meta).
