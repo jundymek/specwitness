@@ -16,8 +16,16 @@ import { readFileSync } from 'node:fs';
 import { IngestError } from '../../domain/errors.js';
 import { assertInsideRoot } from '../repo-path.js';
 
-/** An opening or closing fence: three or more backticks or tildes. */
-const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
+/**
+ * An opening or closing fence: three or more backticks or tildes, plus whatever
+ * follows the marker on that line.
+ *
+ * The tail is captured because it is what tells an OPENING fence from a CLOSING
+ * one. A fence that carries an info string (```` ```js ````) can only be an
+ * opener; a closing fence carries nothing but whitespace after its marker. See
+ * `fenceMask` for why that distinction is load-bearing here.
+ */
+const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 
 /**
  * A markdown file plus, for each line, whether it sits inside a fenced code
@@ -45,7 +53,8 @@ export function fenceMask(lines: readonly string[]): boolean[] {
   let open: string | undefined;
 
   for (let index = 0; index < lines.length; index += 1) {
-    const marker = FENCE.exec(lines[index] as string)?.[1];
+    const fence = FENCE.exec(lines[index] as string);
+    const marker = fence?.[1];
 
     if (open === undefined) {
       if (marker !== undefined) {
@@ -56,13 +65,29 @@ export function fenceMask(lines: readonly string[]): boolean[] {
     }
 
     mask[index] = true;
-    // A fence closes only if it is the same kind AND at least as long as the
-    // opener. Both halves matter: a ``` inside a ~~~ block is content, and so
-    // is a ``` inside a ```` block — which is exactly how one writes
-    // documentation containing a fenced example, as this repository does.
-    // Treating the short one as a close reopens the rest of the file to
-    // structural parsing, turning example headings back into real stories.
-    if (marker !== undefined && marker[0] === open[0] && marker.length >= open.length) {
+    // A fence closes only if it is the same kind, at least as long as the
+    // opener, AND CARRIES NO INFO STRING. All three matter, and each closes a
+    // way an example block leaks back into structural parsing:
+    //
+    //  - a ``` inside a ~~~ block is content (different kind);
+    //  - a ``` inside a ```` block is content (shorter) — which is exactly how
+    //    one writes documentation containing a fenced example, as this
+    //    repository does;
+    //  - a ```js inside a ``` block is content (CommonMark §4.5: a closing
+    //    fence may not carry an info string, so a tagged fence can only be an
+    //    OPENER). This is action item e2-5a-i, carried from Epic 2 and closed
+    //    here. Without it, a story file showing a tagged example inside a plain
+    //    block — an entirely ordinary thing to write — ended the mask early,
+    //    and every following line was read as structure until the block's real
+    //    close reopened it. A `### Story 9.9` inside the example then invented
+    //    a story that does not exist, which is the failure this mask's own
+    //    header says it exists to prevent.
+    const closes =
+      marker !== undefined &&
+      marker[0] === open[0] &&
+      marker.length >= open.length &&
+      (fence?.[2] ?? '').trim() === '';
+    if (closes) {
       open = undefined;
     }
   }
