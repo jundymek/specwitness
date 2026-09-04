@@ -1,0 +1,22 @@
+{
+  "expectedVersion": 1,
+  "fixture": "09-meta-only-change",
+  "why": "The NEGATIVE half of brief section 7 defect class 9, and it is half of a matched pair with `09-tampered-fingerprint` — neither proves anything alone. Story 2.2 partitions a contract: the fingerprint covers `spec` and never `meta` (`src/schemas/canonical.ts`, whose canonicalize and fingerprint take a ContractSpec, so meta is not representable in their input). ADR-005 depends on that partition and ADR-008 section 4 restates it. This fixture alters ONLY `meta` — different createdAt and frozenAt, a different provider, model and CLI version in provenance, and a real FR-10 amendment record in history for the superseded version 1 — and the run must verify completely clean: PASS at exit 0, criterion adjudicated, no integrity complaint of any kind. ITS TWIN ALTERS `spec` AND MUST TRIP. A single fixture in either direction would be a mistake dressed as evidence: one that only tampers proves an ALARM, and an alarm that fires on everything is indistinguishable from one that fires on nothing; one that only changes meta proves silence, and silence is what a broken check also produces. The PAIR proves a partition. This direction is the one people forget to test and the one whose failure is most corrosive in practice: if a meta change tripped integrity, every routine schema evolution and every recorded amendment would look like an attack, and operators would learn that the integrity alarm means nothing — silencing the one signal that is supposed to mean tampering and only tampering. The assertion of that direction is BOTH lists below, and the split matters. EXPECTATION REVISED HERE, and the revision is recorded rather than quietly applied: this file originally listed the bare word 'integrity' in stderrAbsent, on the reasoning that a clean run should never mention it. That was wrong, and running the fixture is what said so. 'integrity' is the NAME OF THE STAGE, and the report prints its timeline row on every healthy run: 'ok integrity — epic-1 v2 verified against its fingerprint'. That line is not noise this fixture should suppress, it is this fixture's own proof, so it moved from stderrAbsent to stderrContains and the assertion got STRONGER rather than weaker. Absence of a complaint is also what a check that never ran would produce; the positive line distinguishes 'integrity verified this contract and was satisfied' from 'integrity was skipped', and those two must never look the same in a corpus about integrity. What stays in stderrAbsent is the pair of sentences that only a real tamper can produce.",
+  "proves": ["AC1", "FR-22", "ADR-002", "ADR-005", "ADR-008", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass"
+    }
+  },
+  "stderrContains": [
+    "epic-1 v2 verified against its fingerprint"
+  ],
+  "stderrAbsent": [
+    "was edited after it was frozen",
+    "no longer matches its stored fingerprint"
+  ]
+}

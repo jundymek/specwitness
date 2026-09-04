@@ -1,0 +1,35 @@
+# SpecWitness Project Config for the corpus fixture
+# `hazard-e4d-skipped-is-inert`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. The single command here is `node gates/lint.cjs`: argv, never a
+# shell line, with nothing to quote and nothing for a shell to interpret even if
+# one were involved.
+#
+# ⚠️ THREE ABSENCES ARE THE FIXTURE. Each is deliberate, and removing any one of
+# them destroys what this directory records:
+#
+#   1. THERE IS NO PLAN FILE beside the contract, so nothing maps either
+#      criterion to a probe.
+#   2. THERE IS NO `ai:` BLOCK, so no provider is assigned to the plan-author
+#      role and `verify` does not compile one. It warns and proceeds instead —
+#      Epic 3's gates-only mode, which is shipped and documented behaviour.
+#   3. THERE IS EXACTLY ONE GATE, AND IT PASSES. That single passing gate is
+#      what satisfies `assertSomethingToAdjudicate`, which refuses only a
+#      project with NO gates AND no probes. It is the whole reason this run is
+#      permitted to start.
+#
+# Together they produce PASS at exit 0 with both contract criteria `skipped` —
+# a green that adjudicated neither of the things the contract asked about.
+# See `expected.json` for why that is pinned rather than fixed, and for why
+# action item e4-D stays open and unanswered by this story.
+
+version: 1
+
+project:
+  baseBranch: master
+
+gates:
+  - { id: lint, run: node gates/lint.cjs }

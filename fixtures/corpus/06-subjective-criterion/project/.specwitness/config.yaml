@@ -1,0 +1,21 @@
+# SpecWitness Project Config for the corpus fixture `06-subjective-criterion`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. The single command here is `node commands/receipt.cjs`: argv, never
+# a shell line, with nothing to quote and nothing for a shell to interpret even
+# if one were involved.
+#
+# No gates, no services, no ports. This fixture is decided by the CONTRACT — a
+# criterion whose author wrote that no machine may judge it — so every other
+# route to a non-PASS verdict is deliberately absent.
+
+version: 1
+
+project:
+  baseBranch: master
+
+observations:
+  receipt:
+    run: node commands/receipt.cjs

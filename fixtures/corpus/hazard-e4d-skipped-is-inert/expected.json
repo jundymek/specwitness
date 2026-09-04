@@ -1,0 +1,21 @@
+{
+  "expectedVersion": 1,
+  "fixture": "hazard-e4d-skipped-is-inert",
+  "why": "⚠️ THIS FIXTURE PINS A HAZARD. IT RECORDS WHAT THE PRODUCT DOES TODAY AND ASSERTS NOTHING ABOUT WHETHER THAT IS RIGHT. It embodies no brief section 7 defect class, which is why it carries a non-numeric name and consumes no allocated class number. Action item e4-D — Epic 4 retrospective section 2 observation 2, open across three retrospectives — records that `skipped` is inert to `aggregate`, so every way for a criterion to produce no attempts is a way to reach green-for-nothing. Twice a criterion nobody could adjudicate reported PASS. Here is that path, driven end to end by the real binary: a project with a passing gate, a frozen contract declaring two AUTOMATED criteria, no compiled plan, and no provider assigned to the plan-author role. Verify does not refuse — `assertSomethingToAdjudicate` is satisfied by the gate alone — and it does not compile, because no provider is assigned. The probes stage is unwired, so both criteria derive from zero attempts to `skipped`, `skipped` contributes nothing to reject, and the run reports PASS at EXIT 0: merge-eligible, having adjudicated NEITHER of the contract's criteria. A harness reads the verdict, not the prose beside it. THE PRODUCT DOES WARN, and the warning is pinned below precisely so that its removal would be caught — today it is the only thing standing between this configuration and a silent green. THIS STORY DOES NOT ANSWER e4-D, DELIBERATELY AND UNDER INSTRUCTION. It does not make `skipped` fail, does not add a NEEDS_HUMAN trigger (Q39 fixes exactly two, both compile-time), and changes no code. Whether this behaviour should change is the owner's open question, and a taxonomy change is an ADR rather than a fixture. What a corpus CAN do is make the behaviour impossible to alter silently: the day someone changes it, this fixture goes red and forces the conversation. If you are reading this because it went red, that is the fixture working. Establish which happened — the product changed, or e4-D was answered — and then update or delete this file deliberately, as a decision someone recorded, rather than adjusting it to match the new output.",
+  "proves": ["AC1", "AD-6", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "skipped",
+      "E1-02": "skipped"
+    }
+  },
+  "stderrContains": [
+    "no plan has been compiled for epic-1 and no provider is assigned to the",
+    "every criterion will be reported as skipped"
+  ],
+  "stderrAbsent": []
+}

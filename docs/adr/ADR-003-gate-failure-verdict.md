@@ -9,7 +9,24 @@ The brief (§30–31) requires deterministic gate failures to be reported distin
 
 ## Decision (accepted)
 
-A failing Deterministic Gate ends the run with **Verdict FAIL**, `gateFailed: true`, the failing gate identified, zero criteria executed (all reported `skipped`), and the gate's output as evidence. Exit code 1.
+A failing Deterministic Gate ends the run with **Verdict FAIL**, `gateFailed` carrying the failing gate's id, zero criteria executed (all reported `skipped`), and the gate's output as evidence. Exit code 1.
+
+> **Prose correction, 2026-09-04 (Epic 3 action item e3-D; story 6.3).** This sentence
+> previously read `gateFailed: true`, *"the failing gate identified"* — describing a boolean
+> flag beside a separate identifier. The implemented type is `gateFailed?: string`
+> (`src/domain/run-outcome.ts`), a single optional field holding the gate's id: **its
+> presence is the boolean signal, and it identifies the gate in the same field.** One field
+> rather than two, so a marker cannot disagree with an id.
+>
+> **The decision is unchanged** — FAIL, exit 1, a visible gate-failure marker, criteria
+> `skipped` — and only the description of its shape is corrected. A consumer reading the old
+> wording would have tested `gateFailed === true`, which is never true of a string, and
+> concluded no gate had failed on precisely the runs where one had.
+>
+> The end-to-end evidence for the corrected shape is the Golden Corpus fixture
+> `fixtures/corpus/07-broken-build/`, whose hand-written expectation pins
+> `{"verdict": "FAIL", "gateFailed": "build"}` at exit 1 — and pins, in the same comparison,
+> that this outcome is never an infrastructure error.
 
 ## Rationale
 

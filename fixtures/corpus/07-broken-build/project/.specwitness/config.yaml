@@ -1,0 +1,28 @@
+# SpecWitness Project Config for the corpus fixture `07-broken-build`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Both commands here are `node <relative path inside this fixture>`:
+# argv, never a shell line, with nothing to quote and nothing for a shell to
+# interpret even if one were involved.
+#
+# No services and no ports: this fixture is decided by the GATE, and everything
+# that could fail for another reason is deliberately absent. A service here
+# would be a second, independent route to exit 3, and a fixture that can reach
+# its expected outcome two ways proves neither.
+
+version: 1
+
+project:
+  baseBranch: master
+
+gates:
+  # THE FAILING GATE. Its id is `build`, and that id is what the outcome carries
+  # in `gateFailed` — `expected.json` pins the string, so renaming this gate
+  # without updating the expectation is caught rather than silently absorbed.
+  - { id: build, run: node gates/build.cjs }
+
+observations:
+  version:
+    run: node commands/version.cjs
