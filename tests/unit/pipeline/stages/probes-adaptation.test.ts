@@ -903,6 +903,102 @@ describe('probe ids reused across criteria', () => {
     expect(context.run.criteria[1]?.status).toBe('pass');
   });
 
+  it('⚠️ never re-executes or replaces an unchanged NAMESAKE in another criterion', async () => {
+    // THE ROUND-10 CODEX P1, and a green-for-nothing route through the audit's blind spot.
+    //
+    // `adaptCriteria` patches only the SCOPED criterion's probe, but the stage tracked
+    // changed probes by BARE ID — so every namesake was re-executed, in criteria nothing was
+    // proposed for. An unchanged namesake that failed an assertion and then passed on that
+    // extra execution would have its result replaced, turning an UNRELATED criterion into a
+    // pass with NO recorded mechanics change.
+    //
+    // Here E7-02's `shared-id` is a flaky product failure: it fails first and would pass if
+    // run again. It must never be run again.
+    let e2Runs = 0;
+    const { adapt } = proposeWorking();
+    const deps: ProbesStageDeps = {
+      criteria: [
+        { criterionId: 'E7-01', disposition: 'automated', probes: [browserProbe('shared-id')] },
+        { criterionId: 'E7-02', disposition: 'automated', probes: [browserProbe('shared-id')] },
+      ],
+      data: NO_DATA,
+      dispatch: ({ criterionId, probe, attempt }): ProbeDispatch => {
+        const scenario = (probe as BrowserProbe).mechanics.scenario;
+        return {
+          executor: {
+            surface: probe.surface,
+            execute: async (): Promise<ProbeAttempt> => {
+              if (criterionId === 'E7-02') {
+                e2Runs += 1;
+                // Fails the first time, would pass the second. Never adapted, so never rerun.
+                const satisfied = e2Runs > 1;
+                return {
+                  attempt,
+                  observations: [],
+                  assertionEvaluations: [
+                    {
+                      description: 'the organization page appears',
+                      satisfied,
+                      expected: 'Organizations',
+                      actual: satisfied ? 'Organizations' : 'Orders',
+                    },
+                  ],
+                  evidence: [],
+                  durationMs: 1,
+                };
+              }
+              if (scenario !== WORKING) {
+                return {
+                  attempt,
+                  observations: [],
+                  assertionEvaluations: [],
+                  evidence: [],
+                  execError: {
+                    message: 'the step could not find its target',
+                    reason: 'step-target-missing',
+                  },
+                  durationMs: 1,
+                };
+              }
+              return {
+                attempt,
+                observations: [],
+                assertionEvaluations: [
+                  {
+                    description: 'the organization page appears',
+                    satisfied: true,
+                    expected: 'Organizations',
+                    actual: 'Organizations',
+                  },
+                ],
+                evidence: [],
+                durationMs: 1,
+              };
+            },
+          },
+          params: { probe },
+        };
+      },
+      adapt,
+    };
+
+    const context = await (async () => {
+      const ctx = stageContext();
+      ctx.run.contractCriteria.push(CRITERION, { ...CRITERION, criterionId: 'E7-02' });
+      await createProbesStage(deps).run(ctx);
+      return ctx;
+    })();
+
+    // E7-01 was adapted and passes.
+    expect(context.run.criteria[0]?.status).toBe('pass');
+    expect(context.run.adaptation?.applied.map((change) => change.criterionId)).toEqual(['E7-01']);
+    // ⚠️ E7-02 ran EXACTLY ONCE and kept its failure. If the namesake had been re-executed it
+    // would have passed on the second run and this criterion would have flipped to `pass`
+    // with nothing in the audit to explain it.
+    expect(e2Runs).toBe(1);
+    expect(context.run.criteria[1]?.status).toBe('fail');
+  });
+
   it('offers NEITHER when both namesakes are eligible — a proposal could not say which', async () => {
     // A proposal names an id and nothing else, so no scope can disambiguate this case.
     // Dropped rather than guessed at: adapting the wrong probe because two share a name is

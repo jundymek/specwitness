@@ -687,7 +687,22 @@ async function adaptAndReExecute(
     throw error;
   }
 
-  const changedProbeIds = new Set(adapted.changes.map((change) => change.probeId));
+  // ⚠️ KEYED BY (CRITERION, PROBE), NOT BY PROBE ID ALONE.
+  //
+  // Probe ids are unique only within a criterion, and `adaptCriteria` patches only the
+  // SCOPED criterion's probe — so a set of bare ids would re-execute every NAMESAKE, in
+  // criteria nothing was proposed for. An unchanged namesake that failed an assertion and
+  // then passed on that extra execution would have its result replaced, turning an unrelated
+  // criterion into a pass **with no recorded mechanics change**: a green-for-nothing route
+  // through the audit's blind spot.
+  //
+  // Raised as a P1 by the codex review, and it is a second-order consequence of the previous
+  // round's scoping fix — the applier learned about criteria and this loop had not.
+  const changedKey = (criterionId: string, probeId: string): string =>
+    `${criterionId}\u0000${probeId}`;
+  const changedKeys = new Set(
+    adapted.changes.map((change) => changedKey(change.criterionId, change.probeId)),
+  );
   const applied: AppliedMechanicsChange[] = [];
   // Executed, then thrown away because the criterion did not improve. Recorded rather than
   // dropped — see `RunAdaptation.discarded` for why omitting it was a lie about the run.
@@ -698,7 +713,9 @@ async function adaptAndReExecute(
     if (entry.disposition !== 'automated') {
       continue;
     }
-    const adaptedProbes = entry.probes.filter((probe) => changedProbeIds.has(probe.id));
+    const adaptedProbes = entry.probes.filter((probe) =>
+      changedKeys.has(changedKey(entry.criterionId, probe.id)),
+    );
     if (adaptedProbes.length === 0) {
       continue;
     }
@@ -755,7 +772,7 @@ async function adaptAndReExecute(
         ...options,
         probeId: probe.id,
       });
-      if (!changedProbeIds.has(probe.id)) {
+      if (!changedKeys.has(changedKey(entry.criterionId, probe.id))) {
         return original;
       }
       // The adapted probe's OWN fresh list — never merged with the first pass's, which is
