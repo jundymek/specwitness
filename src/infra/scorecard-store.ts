@@ -68,7 +68,7 @@
  * `src/domain` or `src/schemas`.
  */
 
-import { appendFile, open, readFile } from 'node:fs/promises';
+import { appendFile, open, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -136,6 +136,35 @@ export class ScorecardStore {
     // guarantee, and the one thing this method promises is that it has no failure route
     // at all. A throw here would be instrumentation changing a verdict.
     try {
+      // ⚠️ REFUSE A PATH THAT IS NOT A REGULAR FILE, BEFORE OPENING IT.
+      //
+      // Raised as a P2 by the codex review of this branch: opening a FIFO for append
+      // BLOCKS until a reader arrives, and `verify` awaits this call before rendering and
+      // before returning its exit code — so a named pipe sitting at this path would hang a
+      // completed verification forever. A run that never produces its verdict is the most
+      // total way instrumentation can affect an outcome, and this method exists to make
+      // that impossible.
+      //
+      // `stat` answers immediately for a FIFO, a socket or a device — it does not open
+      // them — so this converts an indefinite hang into the ordinary warning every other
+      // failure here becomes. A symlink pointing at a regular file still passes, because
+      // `stat` follows symlinks and someone redirecting their scorecard onto another disk
+      // is doing something reasonable.
+      //
+      // It is a guard against accident and misconfiguration, NOT a security control:
+      // stat-then-open is a TOCTOU race, and anyone able to plant a FIFO inside
+      // `.specwitness/` can already rewrite the contract and the plan that live beside it.
+      const existing = await stat(this.#path).catch(() => undefined);
+      if (existing !== undefined && !existing.isFile()) {
+        warnSafely(
+          warn,
+          `the run was verified, but its scorecard record could not be appended: ${this.#path} ` +
+            `is not a regular file. The verdict and exit code are unaffected; this run is ` +
+            `missing from the dogfooding measurement.`,
+        );
+        return;
+      }
+
       // ONE write, `O_APPEND`. Not read-modify-write, not open-truncate-write: either of
       // those would lose a concurrent run's record rather than merely interleave with it.
       // The separator is part of the SAME buffer, so this stays one `write(2)` — see
@@ -160,15 +189,12 @@ export class ScorecardStore {
       // — changes something this method promises not to change. Silence about a warning
       // is the least-bad outcome available; silence about a VERDICT never is, and that is
       // the distinction. The verdict is already decided and untouched by anything here.
-      try {
-        warn(
-          `the run was verified, but its scorecard record could not be appended to ${this.#path}: ` +
-            `${describe(cause)}. The verdict and exit code are unaffected; this run is missing from ` +
-            `the dogfooding measurement.`,
-        );
-      } catch {
-        // Intentionally empty. See above: there is nowhere left to say it.
-      }
+      warnSafely(
+        warn,
+        `the run was verified, but its scorecard record could not be appended to ${this.#path}: ` +
+          `${describe(cause)}. The verdict and exit code are unaffected; this run is missing from ` +
+          `the dogfooding measurement.`,
+      );
     }
   }
 
@@ -264,6 +290,31 @@ export class ScorecardStore {
     }
 
     return { records, skipped };
+  }
+}
+
+/**
+ * Reports through a caller-supplied `warn`, and swallows a throw from it.
+ *
+ * ⚠️ THE INNER BOUNDARY THAT MAKES `appendRecord`'s PROMISE TRUE, and it was a P2 from the
+ * codex review of this story before it existed. `warn` is bound at the CLI edge to
+ * `printWarning`, which writes to `process.stderr` — and `specwitness verify | head -1`
+ * destroys that stream. Without this, an EPIPE from the WARNING escaped `appendRecord`,
+ * reached `main.ts` and became exit 3: a completed verification reported as a broken
+ * environment by the instrumentation that exists to be invisible.
+ *
+ * WHAT IT DOES ON FAILURE IS NOTHING, deliberately. There is no third channel. We cannot
+ * report a failure to report, and every remaining option — rethrowing, writing to stdout
+ * (which carries the `--json` document a harness parses), exiting — changes something this
+ * module promises not to change. Silence about a WARNING is the least-bad outcome
+ * available; silence about a VERDICT never is, and the verdict is already decided and
+ * untouched by anything here.
+ */
+function warnSafely(warn: (message: string) => void, message: string): void {
+  try {
+    warn(message);
+  } catch {
+    // Intentionally empty. See above: there is nowhere left to say it.
   }
 }
 

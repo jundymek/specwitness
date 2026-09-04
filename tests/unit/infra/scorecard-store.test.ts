@@ -16,7 +16,7 @@
  * more here than usual, since one of these describes is about concurrent appends.
  */
 
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -100,6 +100,46 @@ describe('a failing scorecard write never changes anything (AC1, the hardest rul
     // Surfaced, not silent: a scorecard that quietly stops recording is a metric that
     // quietly becomes wrong, which is worse than one that visibly breaks.
     expect(warnings.messages[0]).toContain(SCORECARD_FILENAME);
+  });
+
+  it('refuses a path that is not a regular file, instead of opening it', async () => {
+    // Raised as a P2 by the codex review of this branch. Opening a FIFO for append BLOCKS
+    // until a reader arrives, and `verify` awaits this call before rendering and before
+    // returning its exit code — so a named pipe at this path would hang a completed
+    // verification forever. A run that never produces its verdict is the most total way
+    // instrumentation can affect an outcome.
+    //
+    // A DIRECTORY stands in for the FIFO here: Node cannot create a named pipe without a
+    // subprocess, and unit tests in this project spawn none. Both take the same branch —
+    // `stat().isFile()` is false — and `stat` answers immediately for either, which is the
+    // property that turns a hang into a warning.
+    const root = await project();
+    await mkdir(join(root, '.specwitness', SCORECARD_FILENAME), { recursive: true });
+
+    const store = new ScorecardStore(root);
+    const warnings = collector();
+
+    await expect(store.appendRecord(record(), warnings.warn)).resolves.toBeUndefined();
+    expect(warnings.messages).toHaveLength(1);
+    expect(warnings.messages[0]).toContain('not a regular file');
+  });
+
+  it('still appends through a SYMLINK that points at a regular file', async () => {
+    // The permit half. Redirecting a scorecard onto another disk is a reasonable thing to
+    // do, and a guard that broke it would be a guard someone deletes. `stat` follows
+    // symlinks, so this passes while the FIFO case above does not.
+    const root = await project();
+    const elsewhere = join(root, 'scorecard-elsewhere.jsonl');
+    await writeFile(elsewhere, '', 'utf8');
+    await symlink(elsewhere, join(root, '.specwitness', SCORECARD_FILENAME));
+
+    const store = new ScorecardStore(root);
+    const warnings = collector();
+
+    await store.appendRecord(record({ runId: 'run-20260904T120000Z-link' }), warnings.warn);
+
+    expect(warnings.messages).toEqual([]);
+    expect(await readFile(elsewhere, 'utf8')).toContain('run-20260904T120000Z-link');
   });
 
   it('does not throw when the .specwitness directory does not exist at all', async () => {
