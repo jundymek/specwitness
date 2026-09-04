@@ -452,11 +452,11 @@ describeWithBrowser('5.6 — adapting a real failing browser probe', () => {
       // The classification lives inside the failing ACTION's own catch, so only that step's
       // failure can reach it, and it costs no extra bounded operation (see `#bounds` — an
       // earlier version added a separate full-timeout wait and broke the arithmetic).
-      expect(spec).toContain('const urlBeforeStep = page.url()');
+      expect(spec).toContain('targetPresentBeforeStep');
       expect(spec).toContain("outcome.reason = 'unreachable'");
-      // Both facts, not one: a target miss requires that the page did not move AND that the
-      // selector matches nothing.
-      expect(spec).toContain('!moved');
+      // Asked BEFORE we act, so no navigation detection is needed at all — an earlier
+      // version compared page.url() and missed a same-URL navigation.
+      expect(spec).not.toContain('urlBeforeStep');
     },
     TEST_TIMEOUT_MS,
   );

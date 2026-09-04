@@ -1244,7 +1244,12 @@ describe('the prompt is bounded and the statement is scrubbed', () => {
     }
     await createProbesStage(deps).run(context);
 
+
     expect(offered[0]).toHaveLength(MAX_ADAPTED_PROBES);
+    // ⚠️ AND THE CAP IS NOT SILENT. This story refuses to do less in silence everywhere else
+    // — `--adapt` with no role refuses rather than no-oping — so an operator must be able to
+    // tell "nothing else needed adapting" from "adaptation did not reach it".
+    expect(context.run.adaptation?.refusal?.text).toMatch(/5 further eligible probes were not offered/);
   });
 });
 

@@ -749,9 +749,23 @@ test('specwitness browser probe', async ({ page, context }) => {
       outcome.phase = 'step ' + (index + 1) + ' (' + step.verb + ')';
       const locator = step.selector === undefined ? null : page.locator(step.selector).first();
 
-      // WHERE THE PAGE WAS BEFORE THIS ACTION. Read only by the classifier below, and free:
-      // a synchronous property, not an operation with a timeout of its own.
-      const urlBeforeStep = page.url();
+      // WAS THE TARGET THERE BEFORE WE ACTED? Read only by the classifier below.
+      //
+      // count() resolves immediately and waits for nothing, so this is NOT a second bounded
+      // operation and the aggregate test-timeout arithmetic in #bounds is untouched - which
+      // an earlier version of this classifier got wrong by waiting here.
+      //
+      // A page that cannot answer defaults to TRUE, meaning "not a target miss": the safe
+      // direction, since the only thing this value can do is make a probe eligible for
+      // provider-driven adaptation.
+      let targetPresentBeforeStep = true;
+      if (step.selector !== undefined) {
+        try {
+          targetPresentBeforeStep = (await page.locator(step.selector).count()) > 0;
+        } catch (unknown) {
+          targetPresentBeforeStep = true;
+        }
+      }
 
       try {
         if (step.verb === 'goto') {
@@ -781,22 +795,34 @@ test('specwitness browser probe', async ({ page, context }) => {
         //     exceed the aggregate and be killed. That is the same arithmetic bug this module
         //     already fixed once; see #bounds. count() and url() resolve immediately
         //     and wait for nothing, so the operation count is unchanged.
-        //  3. TWO FACTS THE PAGE REPORTS, not one. A target miss requires that the page did
-        //     NOT move AND that the selector matches nothing. Checking only the selector
-        //     would misread a click that succeeded far enough to navigate and then failed:
-        //     its target is legitimately gone, and calling that a locator miss would invite
-        //     an adaptation for a failure that had nothing to do with the locator.
+        //  3. THE QUESTION IS ASKED OF THE PAGE BEFORE AND AFTER, not of the URL. A target
+        //     miss means the selector matched NOTHING BEFORE WE ACTED and still matches
+        //     nothing. Checking only afterwards would misread a click that succeeded far
+        //     enough to navigate and then failed - its target is legitimately gone - and
+        //     calling that a locator miss would invite an adaptation for a failure that had
+        //     nothing to do with the locator.
+        //
+        //     An earlier version compared page.url() before and after to detect that
+        //     navigation. It missed a SAME-URL navigation - a reload, or a click that
+        //     re-navigates to the same address - which leaves the URL identical while the
+        //     clicked element is legitimately gone. Raised by the codex review. Asking
+        //     before we act needs no navigation detection at all.
         //
         // A page that cannot answer at all is a dead browser, never a target miss.
         if (step.selector !== undefined) {
-          try {
-            const moved = page.url() !== urlBeforeStep;
-            outcome.reason =
-              !moved && (await page.locator(step.selector).count()) === 0
-                ? 'step-target-missing'
-                : 'other';
-          } catch (unreachable) {
-            outcome.reason = 'unreachable';
+          if (targetPresentBeforeStep) {
+            // The selector matched before we acted, so whatever went wrong was not the
+            // locator being stale. Never adaptable.
+            outcome.reason = 'other';
+          } else {
+            try {
+              outcome.reason =
+                (await page.locator(step.selector).count()) === 0 ? 'step-target-missing' : 'other';
+            } catch (unreachable) {
+              // The page could not answer at all, so the browser is gone rather than the
+              // element. Never adaptable.
+              outcome.reason = 'unreachable';
+            }
           }
         }
         throw stepError;

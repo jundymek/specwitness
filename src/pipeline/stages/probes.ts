@@ -559,9 +559,7 @@ function adaptationCandidates(
   // edge cost the same order of magnitude and a reader learns one number. Taken in the run's
   // own order, so WHICH probes are offered is deterministic rather than dependent on
   // iteration.
-  return candidates
-    .filter((candidate) => perId.get(candidate.probeId) === 1)
-    .slice(0, MAX_ADAPTED_PROBES);
+  return candidates.filter((candidate) => perId.get(candidate.probeId) === 1);
 }
 
 /**
@@ -639,7 +637,23 @@ async function adaptAndReExecute(
   executed: readonly ExecutedCriterion[],
   adapt: MechanicsAdapter,
 ): Promise<number> {
-  const candidates = adaptationCandidates(executed, deps.redaction);
+  const eligible = adaptationCandidates(executed, deps.redaction);
+
+  // ⚠️ CAPPED, AND THE CAP IS NOT SILENT. A plan's criteria are not globally bounded and
+  // neither are its statements, so an uncapped candidate set is an uncapped provider request
+  // — a context-limit failure or a quota bill nobody asked for.
+  //
+  // Twenty, matching 5.5's `MAX_EXPLAINED_CRITERIA`, so both provider paths on the verify
+  // edge cost the same order of magnitude. Taken in the run's own order, so WHICH probes are
+  // offered is deterministic rather than dependent on iteration.
+  //
+  // The overflow is REPORTED rather than dropped quietly. This story refuses to do less in
+  // silence everywhere else — `--adapt` with no role refuses rather than no-oping, and
+  // `--no-ai --adapt` refuses rather than dropping a flag — for the same reason: an operator
+  // must be able to tell "nothing needed adapting" from "adaptation did not reach it".
+  const candidates = eligible.slice(0, MAX_ADAPTED_PROBES);
+  const overflow = eligible.length - candidates.length;
+
   if (candidates.length === 0) {
     // Nothing was adaptable, so no provider is called and the run carries NO adaptation key
     // at all. "A run that did not adapt has no marker and no record" is assertable because
@@ -759,8 +773,11 @@ async function adaptAndReExecute(
   // Executed, then thrown away because the criterion did not improve. Recorded rather than
   // dropped — see `RunAdaptation.discarded` for why omitting it was a lie about the run.
   const discarded: AppliedMechanicsChange[] = [];
-  /** Why an adapted probe could not be executed at all. See the try/catch below. */
-  const unexecutable: string[] = [];
+  /**
+   * Anything the operator should know that is not a per-probe outcome: an adapted probe that
+   * could not be executed, and candidates the cap did not reach.
+   */
+  const notes: string[] = [];
   let probesRun = 0;
 
   for (const entry of adapted.criteria) {
@@ -829,8 +846,8 @@ async function adaptAndReExecute(
       } catch (error) {
         // NOT recorded as discarded: it was applied to the plan copy and never executed, and
         // `discarded` means executed-and-not-kept. The refusal note carries it instead.
-        unexecutable.push(
-          `probe '${probe.id}': ${error instanceof Error ? error.message : String(error)}`,
+        notes.push(
+          `probe '${probe.id}' could not be executed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
@@ -905,7 +922,16 @@ async function adaptAndReExecute(
     }
   }
 
+  if (overflow > 0) {
+    notes.push(
+      `${overflow} further eligible ${overflow === 1 ? 'probe was' : 'probes were'} not offered: ` +
+        `at most ${MAX_ADAPTED_PROBES} are adapted in one run`,
+    );
+  }
+
   const discardedRecord = discarded.length === 0 ? {} : { discarded };
+  const noteRecord =
+    notes.length === 0 ? {} : { refusal: boundedText(notes.join('; '), deps.redaction) };
 
   context.run.adaptation =
     applied.length === 0
@@ -914,9 +940,10 @@ async function adaptAndReExecute(
           applied: [],
           ...discardedRecord,
           refusal: boundedText(
-            unexecutable.length === 0
-              ? 'the proposal was valid and was applied to a plan copy, but no re-executed probe passed — every criterion kept its original outcome and its original evidence'
-              : `the proposal was valid but the adapted probe could not be executed, so every criterion kept its original outcome and its original evidence: ${unexecutable.join('; ')}`,
+            [
+              'the proposal was valid and was applied to a plan copy, but no re-executed probe passed — every criterion kept its original outcome and its original evidence',
+              ...notes,
+            ].join('; '),
             deps.redaction,
           ),
         }
@@ -924,17 +951,11 @@ async function adaptAndReExecute(
           adapted: true,
           applied,
           ...discardedRecord,
-          // ⚠️ CARRIED ON THE ADAPTED ARM TOO. A proposal that could not be EXECUTED appears
-          // in neither `applied` nor `discarded` — both of those mean it ran — so without
-          // this it would vanish from a run that also adapted something successfully.
-          ...(unexecutable.length === 0
-            ? {}
-            : {
-                refusal: boundedText(
-                  `some proposals could not be executed and were not applied: ${unexecutable.join('; ')}`,
-                  deps.redaction,
-                ),
-              }),
+          // ⚠️ CARRIED ON THE ADAPTED ARM TOO. A proposal that could not be EXECUTED, or a
+          // candidate the cap did not reach, appears in neither `applied` nor `discarded` —
+          // both of those mean it ran — so without this it would vanish from a run that also
+          // adapted something successfully.
+          ...noteRecord,
         };
 
   return probesRun;
