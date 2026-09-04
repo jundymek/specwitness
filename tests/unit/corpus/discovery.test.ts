@@ -25,6 +25,7 @@ import {
   discoverFixtures,
   hashCorpusTree,
   machineStateReferences,
+  networkCapableCommands,
   nonLoopbackHosts,
 } from '../../corpus/runner.js';
 
@@ -184,6 +185,40 @@ describe('the hermeticity scanners over checked-in fixture text', () => {
     // The authority a checked-in fixture actually carries, before substitution.
     expect(
       await nonLoopbackHosts(await project('url: http://127.0.0.1:{{PORT:app}}/health\n')),
+    ).toEqual([]);
+  });
+
+  it('reports a fetching tool named on a `run:` line', async () => {
+    expect(
+      await networkCapableCommands(await project('gates:\n  - { id: deps, run: curl -sSf http://x }\n')),
+    ).toHaveLength(1);
+  });
+
+  it('reports a fetching tool inside a YAML BLOCK SCALAR', async () => {
+    // The case that defeated the first version of this scanner. `run: |` puts the command on
+    // a CONTINUATION line, which a filter keyed on `run:` walks straight past — and the
+    // fixture would then fetch while the hermeticity assertion stayed green.
+    const text = 'observations:\n  setup:\n    run: |\n      wget https://example.com/seed.sql\n';
+
+    const found = await networkCapableCommands(await project(text));
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('.specwitness/config.yaml:4:');
+    expect(found[0]).toContain('wget https://example.com/seed.sql');
+  });
+
+  it('reports a fetching tool inside a fixture SCRIPT, which is not a declared command at all', async () => {
+    // The hole the declared-command-only version never covered: a gate script that fetches.
+    expect(
+      await networkCapableCommands(
+        await project("const { execSync } = require('node:child_process');\nexecSync('git clone https://example.com/repo');\n"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('does not report a filename that merely contains the letters', async () => {
+    expect(
+      await networkCapableCommands(await project('run: node commands/curl-parser.js\n')),
     ).toEqual([]);
   });
 

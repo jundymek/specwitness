@@ -926,30 +926,57 @@ export async function machineStateReferences(projectDirectory: string): Promise<
  * in a pure URL scan: a config can name a fetching tool without naming a host, and the host
  * then arrives from an argument, a script or an environment variable.
  *
- * Word-boundary matched against the DECLARED command text, so `node commands/curl-parser.js`
- * is not refused for containing the letters.
+ * Word-boundary matched, so `node commands/curl-parser.js` is not refused for containing the
+ * letters — but `curl` as a word anywhere in a fixture IS refused, wherever it appears. See
+ * `networkCapableCommands` for why the scan is whole-file rather than declared-command-only.
  */
+/**
+ * A command name as an INVOCATION rather than as part of a longer name.
+ *
+ * `\b` is not enough, and the difference is a false positive that would teach the next
+ * author to distrust the guard: `\bcurl\b` matches inside `commands/curl-parser.js`,
+ * because `/` and `-` are both word boundaries. The lookarounds below refuse a match that is
+ * preceded by a path or name character, or followed by one — so `curl -sSf` is caught and
+ * `commands/curl-parser.js` is not.
+ */
+const invocation = (name: string): RegExp => new RegExp(`(?<![\\w./-])${name}(?![\\w-])`);
+
 const NETWORK_CAPABLE_COMMANDS = [
-  /\bcurl\b/,
-  /\bwget\b/,
-  /\bnc\b/,
-  /\bncat\b/,
-  /\bnetcat\b/,
-  /\bssh\b/,
-  /\bscp\b/,
-  /\brsync\b/,
-  /\bgit\s+(clone|fetch|pull|push|remote)\b/,
-  /\b(npm|pnpm|yarn|pip|pip3|gem|cargo|go)\s+(install|add|get|fetch|ci)\b/,
-  /\bnpx\b/,
-  /\bplaywright\s+install\b/,
+  invocation('curl'),
+  invocation('wget'),
+  invocation('nc'),
+  invocation('ncat'),
+  invocation('netcat'),
+  invocation('ssh'),
+  invocation('scp'),
+  invocation('rsync'),
+  invocation('npx'),
+  invocation('git\\s+(clone|fetch|pull|push|remote)'),
+  invocation('(npm|pnpm|yarn|pip|pip3|gem|cargo|go)\\s+(install|add|get|fetch|ci)'),
+  invocation('playwright\\s+install'),
 ];
 
 /**
- * Commands a fixture declares whose purpose is to reach the network.
+ * Anywhere in a fixture that names a tool whose purpose is to fetch.
  *
  * Static, like `nonLoopbackHosts`, and for the same reason: a corpus fixture is committed
  * executable content (AD-3), so the cheapest place to refuse a fetching tool is where it
  * enters the repository. It is not a sandbox and does not claim to be one.
+ *
+ * ⚠️ **EVERY LINE OF EVERY FILE, not just the lines that look like a declared command.**
+ * The first version of this scanner only inspected lines matching `run:`, which a YAML
+ * BLOCK SCALAR walks straight past — `run: |` followed by an indented `curl` puts the
+ * command on a line the filter skipped, and the fixture would have fetched while the
+ * hermeticity assertion stayed green. Rather than teach a line scanner to track YAML
+ * continuations (and then heredocs, and then line continuations in a shell script), the
+ * filter is gone: a fixture is a few dozen hand-written lines, and there is no line of one
+ * where `curl` belongs. That also closes a hole the narrower version never covered — a gate
+ * SCRIPT that fetches, which is not a declared command at all.
+ *
+ * The cost is a false positive on a fixture that legitimately contains one of these words.
+ * `fixtures/corpus/README.md` says what to do about that: it is a conversation, not a
+ * workaround, because a corpus fixture that needs the word `curl` in it is a fixture worth
+ * looking at twice.
  */
 export async function networkCapableCommands(projectDirectory: string): Promise<string[]> {
   const found: string[] = [];
@@ -958,19 +985,14 @@ export async function networkCapableCommands(projectDirectory: string): Promise<
     if (text === null) {
       continue;
     }
-    for (const line of text.split('\n')) {
-      // Only DECLARED commands, i.e. config lines that hand something to the product to
-      // run. A fixture application's own source may legitimately contain any word at all.
-      if (!/^\s*(-\s*\{?\s*)?(run|id)\s*:/.test(line) && !/run:/.test(line)) {
-        continue;
-      }
+    text.split('\n').forEach((line, index) => {
       for (const pattern of NETWORK_CAPABLE_COMMANDS) {
         if (pattern.test(line)) {
-          found.push(`${relative(projectDirectory, file)}: ${line.trim()}`);
+          found.push(`${relative(projectDirectory, file)}:${index + 1}: ${line.trim()}`);
           break;
         }
       }
-    }
+    });
   }
   return found.sort();
 }

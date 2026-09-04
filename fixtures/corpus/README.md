@@ -220,6 +220,14 @@ substituted. **Only loopback hosts may appear** in a fixture — the suite fails
 any other, and that check is what will meet an `https://api.example.com` in a
 wave-2 config before CI does.
 
+The same suite also refuses a fixture that NAMES a fetching tool — `curl`, `wget`,
+`git clone`, `npm install`, `npx`, `ssh` and friends — **anywhere in any file**,
+not only on a line that looks like a declared command. A YAML block scalar, a
+heredoc or a gate script would all hide one from a line-by-line filter. If your
+fixture legitimately needs one of those words, that is a conversation rather
+than a workaround: a corpus fixture that needs `curl` in it is a fixture worth
+looking at twice.
+
 ---
 
 ## What "hermetic" means here, and how each half is enforced
