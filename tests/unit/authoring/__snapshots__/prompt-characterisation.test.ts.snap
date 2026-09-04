@@ -212,7 +212,7 @@ severity: normal
 verifiability: automated
 
 Statement, verbatim from the frozen contract:
-the endpoint accepts AUTH_TOKEN=NOTAREALKEY-0123456789abcdefghij
+the endpoint accepts AUTH_TOKEN=[REDACTED]
 "
 `;
 

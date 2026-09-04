@@ -5,12 +5,18 @@
  * AD-3's boundary and AC4's surface rule can be stated to the model in words. Four
  * properties matter and all four are tested:
  *
- *  1. **THE CRITERIA REACH THE MODEL VERBATIM.** Statements are copied exactly as the
- *     frozen contract holds them. Paraphrasing here would mean the plan was compiled from a
- *     summary of the expectation rather than the expectation. Note the asymmetry with the
- *     ARTIFACT: statements go INTO the prompt and never into the plan (AD-5) — the plan
- *     references criteria by id only, because a second copy of fingerprinted content can
- *     drift from its authority, while a prompt is transient and hashes nothing.
+ *  1. **THE CRITERIA REACH THE MODEL VERBATIM, SUBJECT TO REDACTION** — and story 6.8 added
+ *     the second half of that sentence, so it is stated rather than quietly weakened.
+ *     Statements are copied exactly as the frozen contract holds them; they are NOT
+ *     paraphrased, summarised or reordered, because compiling a plan from a summary of the
+ *     expectation rather than the expectation is the failure this property exists to
+ *     prevent. What they now pass through is `redactText`, which alters a statement only
+ *     where it carries something shaped like a credential — see the split between `head`
+ *     and `body` below for why a prompt is the last place that boundary can be applied.
+ *     Note the asymmetry with the ARTIFACT: statements go INTO the prompt and never into the
+ *     plan (AD-5) — the plan references criteria by id only, because a second copy of
+ *     fingerprinted content can drift from its authority, while a prompt is transient and
+ *     hashes nothing.
  *
  *  2. **ONLY REAL IDS.** The prompt lists the project's declared service and observation
  *     ids, so the provider references things that exist rather than inventing plausible
@@ -35,7 +41,30 @@
  */
 
 import type { Contract, Criterion } from '../domain/contract.js';
+import type { RedactionOptions } from '../domain/evidence.js';
 import type { DeclaredIds } from '../schemas/plan.js';
+
+import { assemblePrompt } from './prompt-assembly.js';
+
+/**
+ * The whole-prompt cap, in BYTES. Story 6.8.
+ *
+ * ⚠️ **BEFORE STORY 6.8 THIS PROMPT WAS NOT BOUNDED AT ALL**, and the number chosen to
+ * bound it now is deliberately two orders of magnitude above the verify edge's 24 000.
+ *
+ * **The cap is a runaway guard, not a content budget.** The criteria carried below are the
+ * contract's whole substance, and a plan compiled from a truncated contract would be a plan
+ * that verifies less than the contract requires — Q38's exact failure. The safety here is
+ * that such a truncation fails LOUDLY rather than silently: `planDraftSchemaFor` requires
+ * every criterion to be covered exactly once, so a provider that never saw a criterion
+ * cannot produce an accepted draft, and the run ends in a gate rejection and `ProviderError`
+ * (exit 3). Loud is survivable; the number is set high enough that it should never be
+ * reached by a real contract at all.
+ *
+ * Scale check, so the figure is not arbitrary: this repository's entire `epics.md` — seven
+ * epics and forty-three stories — is 57 kB, and one contract holds a fraction of one epic.
+ */
+export const PLAN_PROMPT_CAP_BYTES = 200_000;
 
 /**
  * Builds the compilation prompt for one frozen contract.
@@ -44,8 +73,12 @@ import type { DeclaredIds } from '../schemas/plan.js';
  * against, not by asking the model nicely — this text explains the job;
  * `src/providers/invoke.ts` is what makes a malformed answer impossible to turn into state.
  */
-export function buildPlanPrompt(contract: Contract, declared: DeclaredIds): string {
-  const sections: string[] = [
+export function buildPlanPrompt(
+  contract: Contract,
+  declared: DeclaredIds,
+  redaction?: RedactionOptions,
+): string {
+  const head: string[] = [
     'You are compiling an executable verification plan from a FROZEN verification contract.',
     '',
     'The contract is the sole authority on WHAT must be true. Your job is HOW: for each',
@@ -121,9 +154,39 @@ export function buildPlanPrompt(contract: Contract, declared: DeclaredIds): stri
     '',
   ];
 
-  sections.push(...renderDeclared(declared), '', ...renderContract(contract));
+  // ⚠️ THE SPLIT BETWEEN `head` AND `body` IS THE SECURITY DECISION IN THIS FILE.
+  //
+  // `head` above is fixed literals authored in this repository. Everything below is
+  // VARIABLE and UNTRUSTED, so it is what `assemblePrompt` redacts and bounds:
+  //
+  //  - the declared ids come from the project's own `.specwitness/config.yaml`;
+  //  - the criteria come from the frozen contract, and `criterion.statement` is the field
+  //    Epic 5 retro §2 observation 3 is about. **Before story 6.8 it travelled from the
+  //    contract into this prompt with no boundary redacting it anywhere along the way** —
+  //    5.5's explainer clipped it through `redactText` and said why, 5.6's adapter had it
+  //    redacted by its caller, and this builder did neither. A contract that says "the
+  //    endpoint accepts AUTH_TOKEN=hunter2" is careless rather than exotic, and a prompt is
+  //    data leaving the process. AD-10 says unification widens; this is the widening.
+  //
+  // THE COST, STATED RATHER THAN DISCOVERED: a criterion that legitimately reads
+  // `requires Authorization: Bearer <token>` now reaches the model redacted, which loses
+  // some steering fidelity. That is the same trade `explain.ts` already made deliberately
+  // for the same field, and losing a little fidelity is the cheaper of the two errors.
+  //
+  // THE DECLARED IDS COME FIRST IN THE BODY, and the order is load-bearing. A bound cuts
+  // from the end, so the "you may reference these and nothing else" list is reached only
+  // after every criterion has been. There is no separate instruction TAIL here: unlike the
+  // explainer and the adapter, this prompt states all of its rules BEFORE its content, so
+  // bounding the body cannot reach an instruction. An empty tail is the honest answer for
+  // this builder rather than a reason to invent one.
+  const body = [...renderDeclared(declared), '', ...renderContract(contract)];
 
-  return `${sections.join('\n')}\n`;
+  return `${assemblePrompt({
+    head,
+    body,
+    capBytes: PLAN_PROMPT_CAP_BYTES,
+    ...(redaction === undefined ? {} : { redaction }),
+  })}\n`;
 }
 
 /**
