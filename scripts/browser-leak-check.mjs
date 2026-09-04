@@ -44,8 +44,8 @@
  *                                       [--write-survivors <path>] [--reap]
  *                                       [--wait-seconds <n>] [--label <text>]
  *
- * Exit codes follow the house taxonomy where they apply: 0 clean, 1 survivors or a scan that
- * could not look, 64 usage.
+ * Exit codes follow the house taxonomy: 0 clean, 1 survivors FOUND, 3 the scan could not look
+ * (infra), 64 usage. 1 and 3 are deliberately different — see the exit(3) below.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -68,12 +68,22 @@ const BROWSER_PATTERNS = [
   /(^|[/\s])chromium([\s-]|$)/,
   /(^|[/\s])(google-)?chrome([\s-]|$)/,
   /--type=(zygote|gpu-process|utility|renderer)/,
-  // The ROOT of the browser tree. `src/surfaces/browser.ts:1250-1251` spawns
-  // `process.execPath` with `[cliPath, 'test', '--config', configPath]`, detached — so a
-  // leaked Playwright runner is a leaked browser tree that happens to have already closed its
-  // browser, and it is the process that would open another one.
-  /@playwright[/\\]test[/\\]cli\.js/,
 ];
+
+/**
+ * The ROOT of the browser tree, kept separate from the browsers themselves.
+ *
+ * `src/surfaces/browser.ts:1250-1251` spawns `process.execPath` with
+ * `[cliPath, 'test', '--config', configPath]`, detached — so a leaked Playwright runner is a
+ * leaked browser tree that has merely closed its browser already, and it is the process that
+ * would open another one. It counts as a survivor.
+ *
+ * ⚠️ BUT IT IS NOT A BROWSER, AND `--browsers-only` EXISTS BECAUSE OF THAT. The runner starts
+ * BEFORE chromium, so a caller waiting for "a browser to appear" that accepts this process can
+ * act before any browser exists. That is what made `browser-cancelled-run-check.sh`'s vacuity
+ * guard vacuous — reported as a P1 on this branch.
+ */
+const PLAYWRIGHT_RUNNER_PATTERN = /@playwright[/\\]test[/\\]cli\.js/;
 
 /** How often to re-read the listing while waiting for stragglers. */
 const POLL_INTERVAL_MS = 500;
@@ -89,7 +99,8 @@ function usage(message) {
     `${message}\n` +
       'usage: node scripts/browser-leak-check.mjs [--browsers-path <dir>]... ' +
       '[--ps-file <path>] [--baseline <path> | --write-baseline <path>] ' +
-      '[--write-survivors <path>] [--reap] [--wait-seconds <n>] [--label <text>]\n',
+      '[--write-survivors <path>] [--reap] [--browsers-only] ' +
+      '[--wait-seconds <n>] [--label <text>]\n',
   );
   process.exit(64);
 }
@@ -102,6 +113,7 @@ let baselineFile;
 let writeBaselineFile;
 let writeSurvivorsFile;
 let reap = false;
+let browsersOnly = false;
 let waitSeconds = 0;
 let label = 'after the run';
 
@@ -138,6 +150,11 @@ for (let index = 0; index < argv.length; index += 1) {
       break;
     case '--reap':
       reap = true;
+      break;
+    // Narrows the match to real browsers, excluding the Playwright runner. Used by the
+    // launch predicate in browser-cancelled-run-check.sh; see PLAYWRIGHT_RUNNER_PATTERN.
+    case '--browsers-only':
+      browsersOnly = true;
       break;
     case '--wait-seconds':
       if (value === undefined) usage(`ERROR: ${flag} needs a value`);
@@ -253,7 +270,11 @@ function isBrowser(row) {
   if (browsersPaths.some((path) => path !== '' && row.args.includes(path))) {
     return true;
   }
-  return BROWSER_PATTERNS.some((pattern) => pattern.test(row.args));
+  if (BROWSER_PATTERNS.some((pattern) => pattern.test(row.args))) {
+    return true;
+  }
+  // The Playwright runner counts as a survivor, but never as evidence that a BROWSER is up.
+  return !browsersOnly && PLAYWRIGHT_RUNNER_PATTERN.test(row.args);
 }
 
 /**
@@ -319,7 +340,13 @@ try {
       'not guess. Check that `ps` is available on this runner, that the --ps-file path ' +
       'exists, and that the --baseline file was written by an earlier step.\n',
   );
-  process.exit(1);
+  // ⚠️ THREE, NOT ONE. "I looked and found survivors" is a FINDING; "I could not look" is
+  // INFRA, and the product's own taxonomy (ADR-002 / AD-6) keeps those apart for exactly the
+  // reason they must be kept apart here: a caller that cannot tell them apart reads a broken
+  // `ps` as a positive detection. That is precisely how the launch predicate in
+  // browser-cancelled-run-check.sh could fire without a browser. Reported as a P1 on this
+  // branch, alongside the Playwright-runner half of the same defect.
+  process.exit(3);
 }
 
 /* ── the "before" snapshot ───────────────────────────────────────────────────────────── */

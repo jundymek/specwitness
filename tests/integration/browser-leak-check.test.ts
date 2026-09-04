@@ -200,7 +200,12 @@ describe('the browser leak check', () => {
       BROWSERS_PATH,
     ]);
 
-    expect(exitCode).toBe(1);
+    // ⚠️ THREE, NOT ONE — and the distinction is load-bearing rather than cosmetic. "I looked
+    // and found survivors" is a FINDING (1); "I could not look" is INFRA (3), which is the
+    // product's own taxonomy (ADR-002 / AD-6). A caller that cannot tell them apart reads a
+    // broken `ps` as a positive detection — which is exactly the defect the launch predicate
+    // in `browser-cancelled-run-check.sh` had.
+    expect(exitCode).toBe(3);
     expect(stderr).toContain('ERROR:');
     expect(stderr).not.toContain('no surviving browser process');
   });
@@ -210,7 +215,7 @@ describe('the browser leak check', () => {
 
     const { exitCode, stderr } = await run(['--ps-file', psFile, '--browsers-path', BROWSERS_PATH]);
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(3);
     expect(stderr).toContain('ERROR:');
   });
 
@@ -306,8 +311,74 @@ describe('the browser leak check', () => {
       join(dir, 'never-written.txt'),
     ]);
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(3);
     expect(stderr).toContain('ERROR:');
+  });
+
+  /* ── the launch predicate ─────────────────────────────────────────────────────────── */
+
+  /**
+   * ⚠️ **THE PLAYWRIGHT RUNNER IS NOT A BROWSER, AND TREATING IT AS ONE MADE THE VACUITY GUARD
+   * VACUOUS.** Raised as a P1 by the Codex review of this branch.
+   *
+   * `browser-cancelled-run-check.sh` waits for a browser before killing the run, precisely so it
+   * cannot report "nothing survived a cancelled run" about a run that had not started a browser.
+   * It detected launch by asking this scanner for a non-zero exit — but the scanner deliberately
+   * matches `@playwright/test/cli.js` too (it is the root of the browser tree, and leaking it is
+   * a leak), and that process starts BEFORE chromium. On a slow runner the kill could therefore
+   * land after the CLI started and before any browser existed, and the check would pass having
+   * exercised nothing.
+   *
+   * `--browsers-only` is the narrower predicate: real browser processes, never the runner.
+   */
+  it('--browsers-only does not treat a lone Playwright runner as a browser', async () => {
+    const psFile = await listing(
+      '   6001    6000    6001       00:02 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/playwright.config.mjs',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--browsers-only',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('no surviving browser process');
+  });
+
+  it('--browsers-only still matches a real browser', async () => {
+    const psFile = await listing(
+      '   6001    6000    6001       00:02 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/playwright.config.mjs',
+      `   6100    6001    6001       00:01 ${BROWSERS_PATH}/chromium_headless_shell-1234/chrome-linux/headless_shell --headless`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--browsers-only',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('6100');
+    // Asserted on the runner's ARGV, not on its pid: the browser's row carries `6001` in its
+    // PPID column, so a bare pid check here passes or fails for the wrong reason.
+    expect(stdout).not.toContain('cli.js test');
+    expect(stdout.match(/^\s+\d+\s+\d+\s+\d+\s/gm)).toHaveLength(1);
+  });
+
+  /** Without the flag the runner still counts — a leaked runner is still a leak. */
+  it('counts the Playwright runner when --browsers-only is NOT given', async () => {
+    const psFile = await listing(
+      '   6001    6000    6001       00:02 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/playwright.config.mjs',
+    );
+
+    const { exitCode } = await run(['--ps-file', psFile, '--browsers-path', BROWSERS_PATH]);
+
+    expect(exitCode).toBe(1);
   });
 
   /**

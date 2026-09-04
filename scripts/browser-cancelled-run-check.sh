@@ -102,13 +102,40 @@ descendants() {
   echo "${found}" | tr -s ' ' | sed 's/^ //;s/ $//'
 }
 
+# ⚠️ THE LAUNCH PREDICATE, AND WHY IT IS NARROWER THAN IT LOOKS LIKE IT SHOULD BE.
+#
+# Reported as a P1 on this branch: the first version accepted ANY non-zero exit from the scanner
+# as proof that a browser had appeared. Two different things made that wrong, and either one
+# alone would have made this whole check able to pass vacuously — which is the single thing it
+# exists to prevent.
+#
+#   1. The scanner deliberately matches the detached Playwright runner (`@playwright/test/cli.js`)
+#      because leaking it is a leak. But that process starts BEFORE chromium, so on a slow runner
+#      the kill could land after the runner started and before any browser existed.
+#   2. The scanner also exits non-zero when it CANNOT LOOK — a `ps` that fails, a missing
+#      baseline. A broken `ps` therefore read as a positive detection. (The Codex sandbox, which
+#      cannot spawn `ps` at all, produces exactly that.)
+#
+# So: `--browsers-only` excludes the runner, and the exit code is now discriminated — 1 means
+# survivors were FOUND, 3 means the scan could not look, which is the product's own taxonomy
+# (ADR-002 / AD-6). Only a 1 counts as a launch; a 3 aborts loudly rather than proceeding.
 launched=no
 deadline=$((SECONDS + LAUNCH_TIMEOUT_SECONDS))
 while [ ${SECONDS} -lt ${deadline} ]; do
-  if ! node "${leak_check_args[@]}" --baseline "${baseline}" --label "waiting for launch" \
-      >/dev/null 2>&1; then
+  node "${leak_check_args[@]}" --baseline "${baseline}" --browsers-only \
+    --label "waiting for a real browser" >/dev/null 2>&1
+  probe=$?
+  if [ ${probe} -eq 1 ]; then
     launched=yes
     break
+  fi
+  if [ ${probe} -eq 3 ]; then
+    echo "ERROR: the survival scan cannot read a process listing on this machine, so this check cannot observe a launch" >&2
+    echo "HINT: 'ps' is unavailable or not permitted here. This check needs a real process table; it will not guess." >&2
+    for pid in $(descendants "${runner_pid}"); do
+      kill -KILL "${pid}" 2>/dev/null
+    done
+    exit 3
   fi
   if ! kill -0 "${runner_pid}" 2>/dev/null; then
     break
