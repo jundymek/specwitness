@@ -669,8 +669,6 @@ function assertOrigin(page, payload) {
 
 test('specwitness browser probe', async ({ page, context }) => {
   const outcome = { ok: false, phase: 'start', message: 'the driver did not run', reads: {} };
-  // The selector the CURRENT step is acting on, or null. Read only by the catch below.
-  let failingSelector = null;
   const blocked = [];
 
   // PREVENTION, NOT DETECTION - and the difference is the whole point. Checking the origin
@@ -749,10 +747,40 @@ test('specwitness browser probe', async ({ page, context }) => {
     for (let index = 0; index < payload.steps.length; index += 1) {
       const step = payload.steps[index];
       outcome.phase = 'step ' + (index + 1) + ' (' + step.verb + ')';
-      // Remembered so the catch below can ASK THE PAGE whether this selector matched,
-      // rather than reading the error text. See the catch for why that distinction matters.
-      failingSelector = step.selector === undefined ? null : step.selector;
       const locator = step.selector === undefined ? null : page.locator(step.selector).first();
+
+      // WHY THE PROBE COULD NOT LOOK, ESTABLISHED BEFORE ACTING RATHER THAN INFERRED
+      // AFTERWARDS (story 5.6, closing D12).
+      //
+      // Waiting for the target is its OWN operation, so "the element is not there" is a
+      // fact this driver LEARNED rather than a guess made once the page has already moved.
+      // Only this wait failing is a target miss; every later failure - a refused click, a
+      // blocked navigation, an origin violation, a read that dies - leaves the reason
+      // unset, and unset is never adaptable.
+      //
+      // The earlier version asked "does this selector still match?" in the catch, and it
+      // could not tell "never there" from "there, clicked, and the page moved" - both
+      // answer no. Raised by the codex re-review; the fix is to ask earlier, not to
+      // remember harder.
+      //
+      // The attached state rather than visible: presence is what a LOCATOR question is
+      // about. A present-but-unclickable element is not locator drift, so the action below
+      // is left to fail on its own terms with no reason set.
+      if (locator !== null) {
+        try {
+          await locator.waitFor({ state: 'attached' });
+        } catch (missing) {
+          try {
+            outcome.reason =
+              (await page.locator(step.selector).count()) === 0 ? 'step-target-missing' : 'other';
+          } catch (unreachable) {
+            // The page could not answer at all, so the browser is gone rather than the
+            // element. Never adaptable.
+            outcome.reason = 'unreachable';
+          }
+          throw missing;
+        }
+      }
       if (step.verb === 'goto') {
         await page.goto(step.url, { waitUntil: 'load' });
       } else if (step.verb === 'click') {
@@ -787,23 +815,10 @@ test('specwitness browser probe', async ({ page, context }) => {
   } catch (error) {
     outcome.ok = false;
     outcome.message = describe(error);
-    // WHY THE PROBE COULD NOT LOOK, decided by ASKING THE PAGE rather than by reading the
-    // error text (story 5.6, closing D12). A missing element is a fact the page can report;
-    // a dead browser is a page that cannot answer. That is the same distinction this
-    // module's header already draws for assertion reads, applied to steps.
-    //
-    // A count() probe is deliberate: it resolves immediately and does not wait, so it reports
-    // the state at the moment the step gave up rather than starting a second wait of its own.
-    if (failingSelector !== null) {
-      try {
-        outcome.reason =
-          (await page.locator(failingSelector).count()) === 0 ? 'step-target-missing' : 'other';
-      } catch (probeError) {
-        // The page could not answer, so the browser is gone. NOT a target miss, and
-        // therefore never adaptable.
-        outcome.reason = 'unreachable';
-      }
-    }
+    // The reason, when there is one, was set where it was ESTABLISHED - in the step loop
+    // above, before the action ran. Nothing is classified here: by the time an error
+    // reaches this catch, the page may have moved and any question asked of it would be
+    // about a different page from the one that failed.
   } finally {
     try {
       outcome.finalUrl = page.url();

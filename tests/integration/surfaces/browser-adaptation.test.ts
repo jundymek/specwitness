@@ -118,10 +118,22 @@ beforeAll(async () => {
       response.end(ordersPage('<h1 id="heading">This page has moved</h1>'));
       return;
     }
+    if (path.startsWith('/relay')) {
+      // Same origin, so a click really lands here and the clicked element stops existing.
+      // Then it tries to leave for an undeclared host, which the interception refuses.
+      response.end(
+        ordersPage(
+          '<h1 id="heading">Relaying</h1>' +
+            '<script>location.href = "https://prod.example.com/";</script>',
+        ),
+      );
+      return;
+    }
     response.end(
       ordersPage(
         '<h1 id="heading">Orders</h1>' +
           '<a id="create-company" href="/companies">Create company</a>' +
+          '<a id="via-relay" href="/relay">Via relay</a>' +
           '<a id="add-organization" href="/organizations">Add organization</a>',
       ),
     );
@@ -359,6 +371,87 @@ describeWithBrowser('5.6 — adapting a real failing browser probe', () => {
 
       expect(outcome.attempt.execError).toBeDefined();
       expect(outcome.attempt.execError?.reason).not.toBe('step-target-missing');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'establishes the missing-target reason BEFORE acting, and remembers no selector',
+    async () => {
+      // ⚠️ THE ROUND-2 CODEX P1, AND THE HONEST FORM OF ITS PROOF. Worth reading, because
+      // the first two things I wrote here were both wrong and the sequence is the point.
+      //
+      // The finding: the driver remembered which selector a step was acting on so the catch
+      // could ask the page whether it matched. A LATER failure would then be asked about an
+      // element that had nothing to do with it — and a click that navigates away removes its
+      // own target, so the answer would be "nothing matches" and an unrelated failure would
+      // become adaptable cosmetic drift.
+      //
+      // The first fix was the one the review suggested: clear the selector once the step
+      // succeeds. A test written to prove it went RED AGAINST THE FIXED CODE, because the
+      // after-the-fact probe is unreliable even while the selector is legitimately in
+      // flight: once a click has navigated, "does this selector still match?" answers no
+      // whether the element was ever there or not.
+      //
+      // So the reason is now established BEFORE the action, as its own operation, and
+      // NOTHING IS REMEMBERED. That is why this test is structural rather than behavioural:
+      // there is no stale state left to trigger, so no run can exhibit it. The generated
+      // driver is a byte-for-byte constant of SpecWitness, which is exactly what makes
+      // asserting on its text meaningful here — the same technique
+      // `browser-security.test.ts` uses.
+      const environment = await playwrightEnvironment();
+      if (!environment.ready) {
+        throw new Error('the suite should have skipped: no usable Playwright');
+      }
+
+      const runDir = join(scratch, 'generated-spec');
+      const written: Record<string, string> = {};
+      const dispatch = createProbeDispatcher({
+        config: configWithService(Number(new URL(app.baseUrl).port)),
+        runner,
+        clock,
+        writeEvidence: async (name, contents) => {
+          written[name] = contents;
+          const absolute = join(runDir, name);
+          await mkdir(dirname(absolute), { recursive: true });
+          await writeFile(absolute, contents);
+          return name;
+        },
+        writeEvidenceBytes: async (name, contents) => {
+          const absolute = join(runDir, name);
+          await mkdir(dirname(absolute), { recursive: true });
+          await writeFile(absolute, contents);
+          return name;
+        },
+        resolveRunPath: (name) => join(runDir, name),
+        playwright: environment,
+        onProcessGroup: () => undefined,
+      });
+
+      const { executor, params } = dispatch({
+        criterionId: CRITERION.criterionId,
+        probe: probeOf(planWith(browserProbe('/orders', 'click "#add-organization"'))),
+        attempt: 1,
+        cwd: scratch,
+        runAction: async () => undefined,
+        recordEvidence: () => undefined,
+      });
+      await executor.execute({
+        criterionId: CRITERION.criterionId,
+        surface: 'browser',
+        params,
+      });
+
+      const spec = Object.entries(written).find(([name]) => name.endsWith('.spec.cjs'))?.[1];
+      expect(spec).toBeDefined();
+
+      // No remembered selector anywhere: the whole class of staleness is deleted rather
+      // than managed. If a future change reintroduces one, this goes red.
+      expect(spec).not.toContain('failingSelector');
+      // The reason is set inside the pre-action wait, which is what makes it a fact the
+      // driver learned rather than a guess made after the page moved.
+      expect(spec).toContain("waitFor({ state: 'attached' })");
+      expect(spec).toContain("outcome.reason = 'unreachable'");
     },
     TEST_TIMEOUT_MS,
   );

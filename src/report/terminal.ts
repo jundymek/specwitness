@@ -45,7 +45,7 @@ import {
   GATE_STATUSES,
   type NeedsHumanReason,
 } from '../domain/result.js';
-import type { RunAdaptation } from '../domain/adaptation.js';
+import type { AppliedMechanicsChange, RunAdaptation } from '../domain/adaptation.js';
 import type { CriterionExplanation, RunResult } from '../domain/run-result.js';
 import type { StageTimelineEntry } from '../domain/stage.js';
 import { MARK_WIDTH, criterionMark, gateMark, stageMark, verdictLine } from './format.js';
@@ -566,14 +566,50 @@ function pointerLines(texts: readonly BoundedText[], indent: string): string[] {
  * "flaky" (5.4's, meaning repetition of an UNCHANGED probe) and never "explanation" or
  * "hypothesis" (5.5's, meaning text that changed nothing).
  */
+function changeLines(change: AppliedMechanicsChange): string[] {
+  return [
+    `  ${change.criterionId} · probe ${change.probeId} · ${change.field}`,
+    ...boundedLines('was', change.from, '    '),
+    ...boundedLines('now', change.to, '    '),
+  ];
+}
+
+/**
+ * What was EXECUTED and then thrown away because the criterion did not improve.
+ *
+ * ⚠️ Rendered in BOTH branches, and that is the point. Raised as a P2 by the codex
+ * re-review: the JSON audit carried these and the terminal did not, so a human reading the
+ * report could not see mechanics a browser had genuinely run. Worse, the unadapted branch
+ * said the results were "exactly what the compiled plan produced" — true of the RESULTS and
+ * false about what was executed.
+ *
+ * "Not kept" and "not executed" are different facts and the report now distinguishes them.
+ */
+function discardedLines(adaptation: RunAdaptation): string[] {
+  const discarded = adaptation.discarded ?? [];
+  if (discarded.length === 0) {
+    return [];
+  }
+
+  return [
+    '',
+    `  ${plural(discarded.length, 'change was', 'changes were')} executed and then DISCARDED,`,
+    '  because the re-executed probe did not pass. The criterion kept its original outcome',
+    '  and its original evidence; these ran and changed nothing:',
+    '',
+    ...discarded.flatMap(changeLines),
+  ];
+}
+
 function adaptationLines(adaptation: RunAdaptation): string[] {
   if (!adaptation.adapted) {
     return [
-      '  No adaptation was applied. The results below are exactly what the compiled plan',
-      '  produced, and every criterion kept its original outcome.',
+      '  No adaptation was applied, and every criterion kept its original outcome and its',
+      '  original evidence.',
       ...(adaptation.refusal === undefined
         ? []
         : boundedLines('Reason', adaptation.refusal, '  ')),
+      ...discardedLines(adaptation),
     ];
   }
 
@@ -584,11 +620,8 @@ function adaptationLines(adaptation: RunAdaptation): string[] {
     '',
     '  The plan file on disk was NOT modified.',
     '',
-    ...adaptation.applied.flatMap((change) => [
-      `  ${change.criterionId} · probe ${change.probeId} · ${change.field}`,
-      ...boundedLines('was', change.from, '    '),
-      ...boundedLines('now', change.to, '    '),
-    ]),
+    ...adaptation.applied.flatMap(changeLines),
+    ...discardedLines(adaptation),
   ];
 }
 

@@ -95,7 +95,56 @@ describe('a refused proposal is shown as a refusal, not as an adaptation', () =>
     // The refusal path must not borrow the applied path's warning: nothing changed, so the
     // results are exactly what the compiled plan produced and the report says so.
     expect(render(refused)).not.toMatch(/DIFFERENT place/);
-    expect(render(refused)).toMatch(/exactly what the compiled plan/);
+    // The wording no longer claims the results are "exactly what the compiled plan
+    // produced": that is true of the RESULTS and false about what was EXECUTED once a
+    // proposal has been applied and run. It says the outcomes are unchanged, which is the
+    // claim that survives both cases.
+    expect(render(refused)).toMatch(/kept its original outcome/);
+  });
+});
+
+describe('executed-then-discarded changes are shown, in both branches', () => {
+  const discardedChange = {
+    criterionId: 'E7-02',
+    probeId: 'confirm-order',
+    field: 'scenario' as const,
+    from: { text: 'click "#confirm"', truncated: false, totalBytes: 16 },
+    to: { text: 'click "#no-better"', truncated: false, totalBytes: 18 },
+  };
+
+  it('renders them beside an adaptation that WAS kept', () => {
+    // The round-2 codex P2. The JSON audit carried these and the terminal did not, so a
+    // human could not see mechanics a browser had genuinely executed.
+    const report = render({ ...APPLIED, discarded: [discardedChange] });
+
+    expect(report).toMatch(/DISCARDED/);
+    expect(report).toContain('confirm-order');
+    expect(report).toContain('click "#no-better"');
+  });
+
+  it('renders them when NOTHING was kept, and does not claim nothing ran', () => {
+    const report = render({
+      adapted: false,
+      applied: [],
+      discarded: [discardedChange],
+      refusal: {
+        text: 'no re-executed probe passed',
+        truncated: false,
+        totalBytes: 27,
+      },
+    });
+
+    expect(report).toMatch(/DISCARDED/);
+    expect(report).toContain('click "#no-better"');
+    // The old wording said the results were "exactly what the compiled plan produced",
+    // which was true of the RESULTS and false about what was executed.
+    expect(report).not.toMatch(/exactly what the compiled plan/);
+    // It still says the outcomes are unchanged, because they are.
+    expect(report).toMatch(/kept its original outcome/);
+  });
+
+  it('renders nothing extra when there is nothing discarded', () => {
+    expect(render(APPLIED)).not.toMatch(/DISCARDED/);
   });
 });
 
