@@ -1,15 +1,17 @@
 /**
  * Node runtime floor (FR-3, required).
  *
- * >=22.12 is a reviewed decision, not a preference: Node 20 is EOL, and
- * commander 15, execa 10 and dependency-cruiser 18 all require it. `engines`
- * makes npm complain at install time; this check makes it legible at diagnosis
- * time, which is the difference between a warning nobody read and an answer.
+ * >=22.13 is a reviewed decision, not a preference. Node 20 is EOL, and
+ * commander 15, execa 10 and dependency-cruiser 18 require >=22.12; pnpm 11.24 —
+ * the pinned `packageManager` — requires >=22.13, which is what makes 22.13 the
+ * real floor rather than 22.12 (ADR-007). `engines` makes npm complain at install
+ * time; this check makes it legible at diagnosis time, which is the difference
+ * between a warning nobody read and an answer.
  */
 
 import type { DoctorCheck } from '../registry.js';
 
-const REQUIRED: readonly [number, number] = [22, 12];
+const REQUIRED: readonly [number, number] = [22, 13];
 const REQUIRED_TEXT = `${REQUIRED[0]}.${REQUIRED[1]}`;
 
 /** `v22.20.0` / `22.20.0-nightly` -> `[22, 20, 0]`. */

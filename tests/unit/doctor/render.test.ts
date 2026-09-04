@@ -10,7 +10,7 @@ import {
 import type { DoctorCheckReport } from '../../../src/cli/doctor/registry.js';
 
 const REPORTS: DoctorCheckReport[] = [
-  { id: 'node-version', required: true, status: 'pass', detail: 'Node 22.20.0 (>=22.12)' },
+  { id: 'node-version', required: true, status: 'pass', detail: 'Node 22.20.0 (>=22.13)' },
   { id: 'git-present', required: true, status: 'pass', detail: 'git version 2.43.0' },
   {
     id: 'config-valid',
@@ -73,7 +73,7 @@ describe('renderJson', () => {
       timestamp: '2026-08-31T06:12:41.000Z',
       status: 'fail',
       checks: [
-        { id: 'node-version', status: 'pass', required: true, detail: 'Node 22.20.0 (>=22.12)' },
+        { id: 'node-version', status: 'pass', required: true, detail: 'Node 22.20.0 (>=22.13)' },
         { id: 'git-present', status: 'pass', required: true, detail: 'git version 2.43.0' },
         {
           id: 'config-valid',
