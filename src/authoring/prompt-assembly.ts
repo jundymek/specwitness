@@ -95,6 +95,7 @@
  * AD-1 — application layer, imports domain only.
  */
 
+import { InfraError } from '../domain/errors.js';
 import {
   boundedText,
   redactText,
@@ -155,6 +156,31 @@ export function promptField(value: string, options?: PromptFieldOptions): string
   );
 }
 
+/**
+ * What to do when the untrusted body does not fit inside `capBytes`.
+ *
+ * ⚠️ **THIS EXISTS BECAUSE A `truncate`-ONLY HELPER WAS WRONG**, and it was raised as a P2
+ * by the codex review of story 6.8 against that story's own reasoning.
+ * `CONTRACT_PROMPT_CAP_BYTES` already said in as many words that **nothing downstream
+ * detects a truncated epic** — and then mitigated that only by choosing a large number.
+ *
+ * A cap chosen so the bad case is unlikely is not the same as a cap that cannot produce the
+ * bad case. `CLAUDE.md`'s "implementation must never silently change expected behavior" has
+ * no exception for improbable inputs, and "fail closed, then explain" is the house rule.
+ *
+ *  - `'truncate'` (the default) — cut the body, mark the cut, carry on. Correct where what
+ *    is lost DEGRADES a result: an evidence summary missing from a non-authoritative
+ *    hypothesis, or one adaptation candidate the provider was free to decline anyway.
+ *  - `'refuse'` — throw `InfraError` and invoke no provider. Correct where what is lost
+ *    CHANGES a result: an epic or a contract is the definition of done, and a document
+ *    drafted or compiled from a truncated one is silently narrower than the requirement.
+ *    Exit 3, never a product FAIL (AD-7) — a prompt SpecWitness declined to build is an
+ *    infrastructure limit, not a verdict about the code under test.
+ *
+ * The refusal happens BEFORE the provider is invoked, so it costs no subscription quota.
+ */
+export type PromptOverflowPolicy = 'truncate' | 'refuse';
+
 export interface PromptAssembly {
   /**
    * Fixed instruction lines that open the prompt. NEVER redacted and NEVER bounded.
@@ -188,6 +214,14 @@ export interface PromptAssembly {
   readonly capBytes: number;
   /** The run's redaction options (AD-10). Built-in patterns apply whether or not this is set. */
   readonly redaction?: RedactionOptions;
+  /**
+   * What to do when the body does not fit. Defaults to `'truncate'`.
+   *
+   * The default is the LOSSY one deliberately: a builder that has thought about it says
+   * `'refuse'`, and a builder that has not gets the behaviour whose failure mode is visible
+   * in the prompt itself, via `truncationMarker`.
+   */
+  readonly onOverflow?: PromptOverflowPolicy;
 }
 
 /**
@@ -207,7 +241,24 @@ export function assemblePrompt(input: PromptAssembly): string {
   const framing = byteLength([...input.head, '', ...tail].join('\n'));
   const budget = input.capBytes - framing;
 
-  const slot = boundWithMarker(input.body.join('\n'), budget, input.redaction, '\n');
+  const raw = input.body.join('\n');
+
+  if ((input.onOverflow ?? 'truncate') === 'refuse') {
+    // Measured on the REDACTED text, because that is what would actually be sent — a
+    // redaction can only shorten, so measuring the raw text would refuse prompts that fit.
+    const redactedBytes = byteLength(redactText(raw, input.redaction));
+    if (redactedBytes > budget) {
+      throw new InfraError(
+        `the assembled prompt is too large: ${redactedBytes} bytes of content with only ` +
+          `${Math.max(0, budget)} available under a ${input.capBytes} byte cap`,
+        'this content cannot be sent without dropping part of it, and dropping part of it ' +
+          'would change what the provider is asked. Split the epic or contract into smaller ' +
+          'units, or raise the cap in the builder if the larger prompt is genuinely intended',
+      );
+    }
+  }
+
+  const slot = boundWithMarker(raw, budget, input.redaction, '\n');
 
   return [...input.head, slot, ...tail].join('\n');
 }

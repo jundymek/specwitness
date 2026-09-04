@@ -5,6 +5,7 @@ import {
   buildContractPrompt,
 } from '../../../src/authoring/prompt.js';
 import type { EpicSpec } from '../../../src/domain/epic-spec.js';
+import { InfraError } from '../../../src/domain/errors.js';
 import { SEEDED_SECRET } from '../../fixtures/run-result.js';
 
 /**
@@ -188,25 +189,49 @@ describe('bounding (story 6.8, AC1)', () => {
     })),
   });
 
-  it('is bounded, which it was not before story 6.8', () => {
-    // `+ 1` for the trailing newline this builder appends after assembly, which sits outside
-    // the assembled document and is part of its own long-standing output shape.
-    expect(new TextEncoder().encode(buildContractPrompt(huge())).length).toBeLessThanOrEqual(
-      CONTRACT_PROMPT_CAP_BYTES + 1,
-    );
+  it('REFUSES an oversized epic rather than truncating it', () => {
+    // ⚠️ RAISED AS A P2 BY THE CODEX REVIEW OF STORY 6.8, and correct — in the sharpest
+    // instance of it. The codex report: *"the resulting provider response can still satisfy
+    // DRAFT_RESPONSE_SCHEMA and become a frozen contract. This silently narrows the
+    // definition of done."*
+    //
+    // That is exactly right, and it was right against this story's own reasoning: the cap's
+    // doc comment already said nothing downstream detects a truncated epic, and then
+    // mitigated that only by choosing a large number. Unlike the plan-author path there is
+    // no gate that would catch it later, so an epic that does not fit must not be sent at
+    // all. Exit 3, never a product FAIL, and before any provider is invoked.
+    expect(() => buildContractPrompt(huge())).toThrow(InfraError);
   });
 
-  it('keeps every instruction when the epic is bounded away', () => {
-    // This builder states all of its rules BEFORE the epic, so it has no instruction tail to
-    // protect. The guarantee that matters here is the mirror image: bounding the body can
-    // never reach the head.
-    const prompt = buildContractPrompt(huge());
+  it('says how large the epic was and what the cap is', () => {
+    try {
+      buildContractPrompt(huge());
+      expect.unreachable('buildContractPrompt should have refused');
+    } catch (error) {
+      expect(error).toBeInstanceOf(InfraError);
+      expect((error as InfraError).message).toContain(String(CONTRACT_PROMPT_CAP_BYTES));
+      expect((error as InfraError).hint).toBeDefined();
+    }
+  });
 
-    expect(prompt).toContain('WHAT TO WRITE');
-    expect(prompt).toContain('WHAT NOT TO WRITE');
-    expect(prompt).toMatch(/DO NOT invent, assign or return criterion ids/);
-    // The bound really was reached, so nothing above passes vacuously.
-    expect(prompt).toMatch(/… truncated: \d+ of \d+ bytes shown/);
+  it('builds normally for an epic that fits, which is every real one', () => {
+    // The refusal must not be reachable by an ordinary epic. Forty stories with real
+    // narratives is already larger than anything this project has planned.
+    const ordinary: EpicSpec = {
+      ...EPIC,
+      stories: Array.from({ length: 40 }, (_unused, index) => ({
+        ...(EPIC.stories[0] as EpicStoryType),
+        id: `7.${index}`,
+      })),
+    };
+
+    const prompt = buildContractPrompt(ordinary);
+
+    expect(new TextEncoder().encode(prompt).length).toBeLessThanOrEqual(
+      CONTRACT_PROMPT_CAP_BYTES + 1,
+    );
+    expect(prompt).toContain('--- Story 7.39');
+    expect(prompt).not.toContain('truncated:');
   });
 
   it('leaves an ordinary epic completely untouched', () => {

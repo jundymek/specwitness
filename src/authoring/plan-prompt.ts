@@ -185,6 +185,13 @@ export function buildPlanPrompt(
     head,
     body,
     capBytes: PLAN_PROMPT_CAP_BYTES,
+    // ⚠️ REFUSE, DO NOT TRUNCATE. Raised as a P2 by the codex review of story 6.8, and
+    // correct against that story's own reasoning: the cap's doc comment already said
+    // nothing downstream detects a truncated document, then mitigated it only by choosing a
+    // large number. A silently narrowed definition of done is the failure this whole product
+    // exists to prevent, so an oversized input is an `InfraError` (exit 3) raised before any
+    // provider is invoked — costing no quota — rather than a quietly shortened prompt.
+    onOverflow: 'refuse',
     ...(redaction === undefined ? {} : { redaction }),
   })}\n`;
 }

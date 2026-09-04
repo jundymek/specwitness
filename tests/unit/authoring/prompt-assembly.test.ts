@@ -26,6 +26,7 @@ import {
   assemblePrompt,
   promptField,
 } from '../../../src/authoring/prompt-assembly.js';
+import { InfraError } from '../../../src/domain/errors.js';
 import { SEEDED_SECRET } from '../../fixtures/run-result.js';
 
 const encoder = new TextEncoder();
@@ -235,5 +236,93 @@ describe('promptField — bounding one untrusted value', () => {
 
   it('marks a value it cut, so a clipped field reads as clipped', () => {
     expect(promptField('x'.repeat(5_000))).toMatch(/… truncated: \d+ of \d+ bytes shown/);
+  });
+});
+
+/**
+ * `onOverflow: 'refuse'` — raised as a P2 by the codex review of story 6.8, and correct.
+ *
+ * The review's words: *"When a valid epic renders beyond 200,000 bytes, `assemblePrompt`
+ * truncates the later stories or acceptance criteria, yet the resulting provider response
+ * can still satisfy `DRAFT_RESPONSE_SCHEMA` and become a frozen contract. This silently
+ * narrows the definition of done."*
+ *
+ * It was right, and it was right against my own reasoning: `CONTRACT_PROMPT_CAP_BYTES`'s
+ * doc comment already said in as many words that **nothing downstream detects a truncated
+ * epic** — and then mitigated that only by choosing a large number. A cap chosen so the bad
+ * case is unlikely is not the same as a cap that cannot produce the bad case, and
+ * `CLAUDE.md`'s "implementation must never silently change expected behavior" does not have
+ * an exception for improbable inputs.
+ *
+ * So the two AUTHORING roles refuse rather than truncate: an oversized epic or contract is
+ * an `InfraError` (exit 3, never a product FAIL) raised BEFORE any provider is invoked, so
+ * it costs no quota. The two VERIFY-EDGE roles keep truncating, because what they would lose
+ * is an evidence summary or one candidate — content whose absence degrades a
+ * non-authoritative hypothesis rather than narrowing a definition of done.
+ */
+describe("onOverflow: 'refuse' — fail closed instead of silently dropping content", () => {
+  const head = ['INSTRUCTIONS', ''];
+  const tail = ['', 'RESPOND WITH JSON'];
+
+  it('throws rather than truncating when the body does not fit', () => {
+    expect(() =>
+      assemblePrompt({
+        head,
+        body: ['x'.repeat(5_000)],
+        tail,
+        capBytes: 1_000,
+        onOverflow: 'refuse',
+      }),
+    ).toThrow(InfraError);
+  });
+
+  it('names both sizes and prints a HINT, so the refusal is actionable', () => {
+    // House convention: `ERROR:` + `HINT:` on stderr. A refusal a reader cannot act on is a
+    // refusal they will work around.
+    try {
+      assemblePrompt({
+        head,
+        body: ['x'.repeat(5_000)],
+        tail,
+        capBytes: 1_000,
+        onOverflow: 'refuse',
+      });
+      expect.unreachable('assemblePrompt should have refused');
+    } catch (error) {
+      expect(error).toBeInstanceOf(InfraError);
+      const failure = error as InfraError;
+      expect(failure.message).toMatch(/5[,_]?\d{3}|\d+ bytes/);
+      expect(failure.message).toContain('1000');
+      expect(failure.hint).toBeDefined();
+    }
+  });
+
+  it('refuses even when the FRAMING alone exceeds the cap', () => {
+    // The other overflow route. Truncating mode returns the framing with an empty body here;
+    // refusing mode must not silently do the same, because an empty body is the most
+    // complete loss of content there is.
+    expect(() =>
+      assemblePrompt({ head, body: ['anything'], tail, capBytes: 5, onOverflow: 'refuse' }),
+    ).toThrow(InfraError);
+  });
+
+  it('is silent when the body fits — refusing is not a warning, it is an overflow', () => {
+    const prompt = assemblePrompt({
+      head,
+      body: ['a short body'],
+      tail,
+      capBytes: 24_000,
+      onOverflow: 'refuse',
+    });
+
+    expect(prompt).toContain('a short body');
+    expect(prompt).not.toContain('truncated:');
+  });
+
+  it("defaults to 'truncate', so the verify-edge builders are unaffected", () => {
+    const prompt = assemblePrompt({ head, body: ['x'.repeat(5_000)], tail, capBytes: 1_000 });
+
+    expect(prompt).toMatch(/… truncated: \d+ of \d+ bytes shown/);
+    expect(prompt.endsWith(tail.join('\n'))).toBe(true);
   });
 });

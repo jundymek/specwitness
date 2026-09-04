@@ -25,6 +25,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { PLAN_PROMPT_CAP_BYTES, buildPlanPrompt } from '../../../src/authoring/plan-prompt.js';
+import { InfraError } from '../../../src/domain/errors.js';
 import type { DeclaredIds } from '../../../src/schemas/plan.js';
 import { SEEDED_SECRET } from '../../fixtures/run-result.js';
 import { criterion, frozenContract } from '../../helpers/plan.js';
@@ -90,26 +91,46 @@ describe('bounding (AC1)', () => {
       ),
     );
 
-  it('is bounded, which it was not before story 6.8', () => {
-    // `+ 1` for the trailing newline this builder appends after assembly, which is outside
-    // the assembled document and part of its own long-standing output shape.
-    expect(bytes(buildPlanPrompt(huge(), DECLARED))).toBeLessThanOrEqual(
-      PLAN_PROMPT_CAP_BYTES + 1,
-    );
+  it('REFUSES an oversized contract rather than truncating it', () => {
+    // ⚠️ RAISED AS A P2 BY THE CODEX REVIEW OF STORY 6.8, and correct. The first version of
+    // this story capped the prompt and let it truncate, having already written in the cap's
+    // own doc comment that a plan compiled from a truncated contract verifies less than the
+    // contract requires. A cap chosen so the bad case is unlikely is not a cap that cannot
+    // produce it.
+    //
+    // Refusing is exit 3 (InfraError), never a product FAIL — SpecWitness declining to build
+    // a prompt is an infrastructure limit, not a verdict about the code under test — and it
+    // happens before any provider is invoked, so it costs no subscription quota.
+    expect(() => buildPlanPrompt(huge(), DECLARED)).toThrow(InfraError);
   });
 
-  it('keeps every instruction when the contract is bounded away', () => {
-    // This builder states its rules BEFORE its content, so it has no instruction tail to
-    // protect — an honest structural fact rather than an exemption. The guarantee that
-    // matters here is the mirror image: bounding the body can never reach the head.
-    const prompt = buildPlanPrompt(huge(), DECLARED);
+  it('says how large the contract was and what the cap is', () => {
+    try {
+      buildPlanPrompt(huge(), DECLARED);
+      expect.unreachable('buildPlanPrompt should have refused');
+    } catch (error) {
+      expect(error).toBeInstanceOf(InfraError);
+      expect((error as InfraError).message).toContain(String(PLAN_PROMPT_CAP_BYTES));
+      // House convention: ERROR: + HINT:. A refusal a reader cannot act on is one they work
+      // around.
+      expect((error as InfraError).hint).toBeDefined();
+    }
+  });
 
-    expect(prompt).toContain('THE PROBE SURFACES — this list is closed. There are no others.');
-    expect(prompt).toContain('CHOOSE THE LOWEST ADEQUATE SURFACE');
-    expect(prompt).toContain('COMMANDS AND SERVICES ARE REFERENCED BY ID, NEVER BY COMMAND LINE.');
-    expect(prompt).toContain('EVERY CRITERION MUST APPEAR EXACTLY ONCE.');
-    // The bound really was reached, so nothing above passes vacuously.
-    expect(prompt).toMatch(/… truncated: \d+ of \d+ bytes shown/);
+  it('builds normally for a contract that fits, which is every real one', () => {
+    // The refusal must not be reachable by an ordinary contract. Fifty criteria of ordinary
+    // length is already far beyond anything this project has frozen.
+    const ordinary = frozenContract(
+      Array.from({ length: 50 }, (_unused, index) =>
+        criterion(`E7-${index}`, { statement: `The system satisfies requirement ${index}.` }),
+      ),
+    );
+
+    const prompt = buildPlanPrompt(ordinary, DECLARED);
+
+    expect(bytes(prompt)).toBeLessThanOrEqual(PLAN_PROMPT_CAP_BYTES + 1);
+    expect(prompt).toContain('--- E7-49 ---');
+    expect(prompt).not.toContain('truncated:');
   });
 
   it('puts the declared ids ahead of the criteria, so a cut reaches the criteria first', () => {
