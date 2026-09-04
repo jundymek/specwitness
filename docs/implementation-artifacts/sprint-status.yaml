@@ -86,7 +86,7 @@ development_status:
   5-4-flakiness-retry-semantics: done
   5-5-failure-explanation-explainer-role: done
   5-6-mechanics-adaptation-boundary: done
-  epic-5-retrospective: optional
+  epic-5-retrospective: done
 
   epic-6: backlog
   6-1-corpus-infrastructure-hermetic-e2e-runner: backlog
@@ -118,3 +118,11 @@ action_items:
   - {id: e3-I, epic: 3, action: 'correct supervisor-brief 10 delta: docs/findings exists', owner: owner-harness, status: open}
   - {id: e2-B3, epic: 2, action: 'addendum B stale line (carried from Epic 2)', owner: owner, status: open}
   - {id: e2-5a-i, epic: 2, action: 'fenceMask closes on tagged inner fence (named follow-up, no ingest story yet)', owner: unassigned, status: open}
+  - {id: e5-A, epic: 5, action: 'follow-up story: one shared prompt-assembly helper (redact, bound, preserve the instruction tail)', owner: unassigned, status: open}
+  - {id: e5-B, epic: 5, action: 'give Epic 4 lesson 5 teeth - an agent quoting it still characterised a peer''s merged code from memory', owner: owner, status: open}
+  - {id: e5-C, epic: 5, action: 'add a dependency-cruiser rule for src/authoring/** - four modules, no enforcement', owner: owner, status: open}
+  - {id: e5-D, epic: 5, action: 'ADR: .strict() persisted envelope vs additive optional keys, across all four registry keys', owner: owner, status: open}
+  - {id: e5-E, epic: 5, action: 'decide report --explain: narrow the Q52 guard, or amend the 5.5 spec clarification', owner: owner, status: open}
+  - {id: e5-F, epic: 5, action: 'decide whether FR-18 narrowed coverage (step-target miss only) is the intended scope, and record it', owner: owner, status: open}
+  - {id: e5-G, epic: 5, action: 'harness: push block claims deleted-on-merge for a branch never pushed', owner: owner-harness, status: open}
+  - {id: e5-H, epic: 5, action: 'harness: block-loops.sh has no run boundaries; a fresh supervisor inherits the previous wave blocks', owner: owner-harness, status: open}
