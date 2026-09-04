@@ -64,6 +64,34 @@ describe('persistence', () => {
     expect(recovered.adaptation).toEqual(refused);
   });
 
+  it('round-trips an executed-then-DISCARDED change alongside an applied one', () => {
+    // `discarded` arrived after this suite was written, so it gets its own round trip rather
+    // than being assumed to ride along — the record has four fields and the mirror must
+    // carry all four.
+    const mixed: RunAdaptation = {
+      adapted: true,
+      applied: ADAPTATION.applied,
+      discarded: [
+        {
+          criterionId: 'E7-02',
+          probeId: 'confirm-order',
+          field: 'scenario',
+          from: { text: 'click "#confirm"', truncated: false, totalBytes: 16 },
+          to: { text: 'click "#no-better"', truncated: false, totalBytes: 18 },
+        },
+      ],
+      refusal: {
+        text: "some proposals could not be executed and were not applied: probe 'other'",
+        truncated: false,
+        totalBytes: 71,
+      },
+    };
+
+    const recovered = toRunResult(parseRunResult(serializeRunResult(adaptedRun(mixed)), 'r.json'));
+
+    expect(recovered.adaptation).toEqual(mixed);
+  });
+
   it('omits the key entirely on an unadapted run', () => {
     const text = serializeRunResult(fullyPopulatedRunResult());
 

@@ -30,7 +30,7 @@ import type { BrowserProbe, PlanCriterion } from '../../../../src/domain/plan.js
 import { resolvePlanData } from '../../../../src/domain/plan-data.js';
 import { summarizeFlakiness } from '../../../../src/domain/result-counts.js';
 import { InfraError } from '../../../../src/domain/errors.js';
-import { createProbesStage } from '../../../../src/pipeline/stages/probes.js';
+import { createProbesStage, MAX_ADAPTED_PROBES } from '../../../../src/pipeline/stages/probes.js';
 import type { ProbeDispatch, ProbesStageDeps } from '../../../../src/pipeline/stages/probes.js';
 import { stageContext } from './services.helpers.js';
 
@@ -818,7 +818,8 @@ describe('⚠️ nothing unredacted reaches the provider', () => {
 
     const candidate = seen.at(-1);
     expect(candidate).toBeDefined();
-    // The secret is GONE from everything that leaves the machine.
+    // The secret is GONE from everything that leaves the machine — the whole object, so a
+    // field added later cannot quietly become a new channel.
     expect(candidate?.scenario).not.toContain(secret);
     expect(candidate?.path).not.toContain(secret);
     expect(JSON.stringify(candidate)).not.toContain(secret);
@@ -1176,6 +1177,74 @@ describe('⚠️ an adapted probe that cannot be EXECUTED is a refused adaptatio
     expect(context.run.adaptation?.refusal?.text).toContain('bad');
     // And the criterion still reflects `bad` failing, because it was never fixed.
     expect(context.run.criteria[0]?.status).toBe('error');
+  });
+});
+
+describe('the prompt is bounded and the statement is scrubbed', () => {
+  it('scrubs a secret out of the criterion STATEMENT', async () => {
+    // The round-13 codex P1, and the fourth overclaim on this branch — this one a factual
+    // error about a SIBLING's merged code. I sent the statement as-is arguing that 5.5's
+    // explainer did too; `src/authoring/explain.ts` clips it through `redactText` and says
+    // exactly why. Epic 4's lesson 5 is about describing your own diff and not
+    // characterising anyone else's, and this is how it gets learned again.
+    const secret = 'NOTAREALKEY-0123456789abcdefghij';
+    const { adapt, seen } = proposeWorking();
+    const deps: ProbesStageDeps = {
+      criteria: [automated([browserProbe('p1')])],
+      data: NO_DATA,
+      redaction: { extraPatterns: [new RegExp(secret, 'g')] },
+      dispatch: ({ probe, attempt }): ProbeDispatch => ({
+        executor: {
+          surface: probe.surface,
+          execute: async (): Promise<ProbeAttempt> => ({
+            attempt,
+            observations: [],
+            assertionEvaluations: [],
+            evidence: [],
+            execError: {
+              message: 'the step could not find its target',
+              reason: 'step-target-missing',
+            },
+            durationMs: 1,
+          }),
+        },
+        params: { probe },
+      }),
+      adapt,
+    };
+
+    const context = stageContext();
+    context.run.contractCriteria.push({
+      ...CRITERION,
+      statement: `the API accepts AUTH_TOKEN=${secret}`,
+    });
+    await createProbesStage(deps).run(context);
+
+    const candidate = seen.at(-1);
+    expect(candidate).toBeDefined();
+    // ABSENT, never "[REDACTED] is present" (Epic 3 retro section 7).
+    expect(candidate?.statement).not.toContain(secret);
+    expect(JSON.stringify(candidate)).not.toContain(secret);
+  });
+
+  it('offers at most MAX_ADAPTED_PROBES candidates', async () => {
+    // A plan's criteria are not globally bounded and neither are its statements, so an
+    // uncapped candidate set is an uncapped provider request. Raised as a P2.
+    const many = Array.from({ length: MAX_ADAPTED_PROBES + 5 }, (_unused, index) => ({
+      criterionId: `E7-${String(index).padStart(2, '0')}`,
+      disposition: 'automated' as const,
+      probes: [browserProbe(`p${index}`)],
+    }));
+    const { adapt, offered } = proposeWorking();
+    const { deps } = scripted(many, adapt);
+
+    const context = stageContext();
+    for (const criterion of many) {
+      context.run.contractCriteria.push({ ...CRITERION, criterionId: criterion.criterionId });
+    }
+    await createProbesStage(deps).run(context);
+
+    expect(offered[0]).toHaveLength(MAX_ADAPTED_PROBES);
   });
 });
 

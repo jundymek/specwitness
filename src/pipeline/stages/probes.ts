@@ -345,6 +345,14 @@ async function executePlan(
 
 /* == story 5.6: the mechanics adaptation pass ========================================== */
 
+/**
+ * The most probes one run will offer for adaptation.
+ *
+ * Exported so a test asserts against THIS number rather than a hand-copied duplicate, which
+ * is 5.5's convention for the same kind of cap.
+ */
+export const MAX_ADAPTED_PROBES = 20;
+
 /** One criterion as the first pass left it, kept only when an adapter is wired. */
 interface ExecutedCriterion {
   /** Position in `context.run.criteria`, so a replacement lands where the original was. */
@@ -489,7 +497,19 @@ function adaptationCandidates(
 
       candidates.push({
         criterionId: record.criterion.criterionId,
-        statement: record.criterion.statement,
+        // ⚠️ REDACTED AND BOUNDED LIKE EVERYTHING ELSE, AND I ARGUED THE OPPOSITE ONCE.
+        //
+        // An earlier version sent the contract's statement as-is, on the reasoning that it
+        // is committed SPECIFICATION content rather than a captured value, and that 5.5's
+        // explainer sent it on the same footing. **The second half of that was simply wrong
+        // about a sibling's merged code**: `src/authoring/explain.ts` clips the statement
+        // through `redactText` and says why in terms — *"a criterion statement that reads
+        // 'the API accepts AUTH_TOKEN=hunter2' is careless rather than exotic, and the cost
+        // of closing it is one function call"*. Raised as a P1 by the codex review.
+        //
+        // So the rule is uniform and needs no exception to explain: **everything in this
+        // object leaves the machine, so everything in it is scrubbed first.**
+        statement: boundedText(record.criterion.statement, redaction).text,
         probeId: probe.id,
         // ⚠️ REDACTED AND BOUNDED, THOUGH THEY COME FROM THE PROJECT'S OWN PLAN.
         //
@@ -531,7 +551,17 @@ function adaptationCandidates(
   for (const candidate of candidates) {
     perId.set(candidate.probeId, (perId.get(candidate.probeId) ?? 0) + 1);
   }
-  return candidates.filter((candidate) => perId.get(candidate.probeId) === 1);
+  // ⚠️ CAPPED. A plan's criteria are not globally bounded and neither are its statements, so
+  // an unbounded candidate set is an unbounded provider request — a context-limit failure or
+  // a quota bill nobody asked for. Raised as a P2 by the codex review.
+  //
+  // Twenty, matching 5.5's `MAX_EXPLAINED_CRITERIA`, so the two provider paths on the verify
+  // edge cost the same order of magnitude and a reader learns one number. Taken in the run's
+  // own order, so WHICH probes are offered is deterministic rather than dependent on
+  // iteration.
+  return candidates
+    .filter((candidate) => perId.get(candidate.probeId) === 1)
+    .slice(0, MAX_ADAPTED_PROBES);
 }
 
 /**

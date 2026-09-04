@@ -42,6 +42,14 @@
 
 import type { AdaptationCandidate } from '../domain/adaptation-port.js';
 
+/**
+ * The most candidates one prompt will describe.
+ *
+ * Matches the stage's `MAX_ADAPTED_PROBES` and 5.5's `MAX_EXPLAINED_CRITERIA`, so both
+ * provider paths on the verify edge cost the same order of magnitude.
+ */
+export const MAX_PROMPTED_CANDIDATES = 20;
+
 /** One candidate, rendered. Values are already redacted and bounded by the caller. */
 function candidateBlock(candidate: AdaptationCandidate, index: number): string {
   const lines = [
@@ -70,6 +78,11 @@ function candidateBlock(candidate: AdaptationCandidate, index: number): string {
  * would cost in quota.
  */
 export function buildAdaptationPrompt(candidates: readonly AdaptationCandidate[]): string {
+  // The caller already caps the candidate set (`MAX_ADAPTED_PROBES`); this is the same bound
+  // asserted here so the function is safe for any caller, present or future. A prompt whose
+  // size depends on how many criteria a plan happens to have is a context-limit failure and
+  // a quota bill waiting to happen. Raised as a P2 by the codex review.
+
   return [
     'You are adapting the MECHANICS of browser probes in a verification plan.',
     '',
@@ -117,7 +130,7 @@ export function buildAdaptationPrompt(candidates: readonly AdaptationCandidate[]
     '',
     '=== THE FAILING PROBES ===',
     '',
-    candidates.map(candidateBlock).join('\n\n'),
+    candidates.slice(0, MAX_PROMPTED_CANDIDATES).map(candidateBlock).join('\n\n'),
     '',
     '=== YOUR RESPONSE ===',
     '',

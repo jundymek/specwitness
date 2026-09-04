@@ -74,12 +74,20 @@
  *    (`deriveCriterionResult`, AD-10);
  *  - the compiled `path` and `scenario` — **redacted and bounded by the caller** before the
  *    candidate is built, though they come from the project's own plan;
- *  - the criterion id and the contract's **statement** — sent AS-IS, and that is a decision
- *    rather than an oversight. They are committed SPECIFICATION content: a sentence about
- *    required behaviour, not a value typed into a form. `DerivedCriterionResult.statement`
- *    carries it unredacted for every renderer already, and 5.5's explainer sends it to a
- *    provider on the same footing — redacting it here alone would diverge from both while
- *    protecting a class of content that does not carry secrets by construction.
+ *  - the contract's **statement** — redacted and bounded by the caller too.
+ *
+ * ⚠️ **AND THE STATEMENT IS THE ONE I GOT WRONG, TWICE OVER.** An earlier version sent it
+ * as-is, arguing it was committed specification content rather than a captured value, *and
+ * that 5.5's explainer sent it on the same footing*. The second half was simply false about
+ * a sibling's merged code: `src/authoring/explain.ts` clips the statement through
+ * `redactText` and states the reason — *"a criterion statement that reads 'the API accepts
+ * AUTH_TOKEN=hunter2' is careless rather than exotic, and the cost of closing it is one
+ * function call"*. Raised by review; corrected here and in the PR body.
+ *
+ * Epic 4's lesson 5 is *describe your own diff; point at, but do not characterise, anyone
+ * else's* — and characterising a sibling's behaviour from memory is exactly how that lesson
+ * gets learned again. **The rule is now uniform and needs no exception to explain:
+ * everything sent leaves the machine, so everything sent is scrubbed first.**
  *
  * ⚠️ **THE PLAYWRIGHT TRACE IS NEVER READ, AND THAT IS THE MOST IMPORTANT LINE IN THIS
  * FILE.** `src/surfaces/browser.ts:285-323` records that traces are stored UNREDACTED, and
