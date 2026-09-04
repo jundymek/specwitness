@@ -88,9 +88,9 @@ development_status:
   5-6-mechanics-adaptation-boundary: done
   epic-5-retrospective: done
 
-  epic-6: backlog
+  epic-6: in-progress
   6-1-corpus-infrastructure-hermetic-e2e-runner: done
-  6-2-behavioral-corpus-fixtures-pass-fail-classes: backlog
+  6-2-behavioral-corpus-fixtures: backlog
   6-3-classification-corpus-fixtures: backlog
   6-4-non-node-target-fixture: backlog
   6-5-scorecard-recording: backlog
