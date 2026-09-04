@@ -7,6 +7,8 @@ dist/
 
 # Test output
 coverage/
+# vitest's JSON report, written by `pnpm test:ci` and read by the skipped-suite report.
+.vitest-report.json
 
 # Environment / secrets
 .env
