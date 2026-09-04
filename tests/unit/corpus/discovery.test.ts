@@ -168,6 +168,19 @@ describe('the hermeticity scanners over checked-in fixture text', () => {
     ).toEqual([]);
   });
 
+  it('reports an UPPERCASE scheme and host — both are case-insensitive in a URL', async () => {
+    // A guard bypassable by pressing shift is not a guard. RFC 3986 makes the scheme and the
+    // host case-insensitive, so `HTTPS://EXAMPLE.COM` is the same request as the lower-case
+    // one and must be reported the same way.
+    expect(await nonLoopbackHosts(await project('url: HTTPS://EXAMPLE.COM/health\n'))).toEqual([
+      'example.com',
+    ]);
+  });
+
+  it('accepts LOCALHOST in any case', async () => {
+    expect(await nonLoopbackHosts(await project('url: HTTP://LocalHost:4000/x\n'))).toEqual([]);
+  });
+
   it('accepts a BRACKETED IPv6 loopback authority', async () => {
     // `[::1]:8080` split on `:` yields `[`, so a naive parse reports a legitimate loopback
     // fixture as reaching the network. A FALSE POSITIVE is the expensive direction in this

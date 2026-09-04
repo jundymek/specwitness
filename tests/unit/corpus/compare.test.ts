@@ -49,6 +49,7 @@ function observation(overrides: Partial<ObservedOutcome> = {}): ObservedOutcome 
     document,
     documentSource: 'stdout',
     runDirectory: '/tmp/ws/project/.specwitness/runs/run-20260904T134152Z-2of4',
+    storedResult: null,
     ...overrides,
   };
 }
@@ -239,6 +240,86 @@ describe('a run that produced no document', () => {
       }),
       normalizer,
     );
+
+    expect(problems).toEqual([]);
+  });
+});
+
+describe('AD-11: --json stdout and the stored result.json are the same bytes', () => {
+  const stored = '{\n  "schemaVersion": 1\n}\n';
+
+  it('passes when they are identical', () => {
+    const problems = compareOutcome(
+      expectation({ criteria: { assertion: 'subset', statuses: {} } }),
+      observation({ stdout: stored, storedResult: stored }),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
+  });
+
+  it('FAILS when they differ, even by a byte', () => {
+    // Q53's promise is that a harness reading stdout and a human reading the run directory
+    // cannot see different runs. A value comparison would pass here; only a byte comparison
+    // tests what the invariant actually says.
+    const problems = compareOutcome(
+      expectation({ criteria: { assertion: 'subset', statuses: {} } }),
+      observation({ stdout: '{"schemaVersion":1}\n', storedResult: stored }),
+      normalizer,
+    );
+
+    expect(problems.join('\n')).toContain('NOT the same bytes');
+  });
+
+  it('says nothing when the fixture did not ask for --json', () => {
+    // A fixture that does not request the document on stdout asserts nothing about it.
+    const problems = compareOutcome(
+      expectation({
+        command: ['verify', 'epic-1'],
+        criteria: { assertion: 'subset', statuses: {} },
+      }),
+      observation({ stdout: '', storedResult: stored }),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
+  });
+});
+
+describe('an infraError expectation with no document must pin the MESSAGE', () => {
+  // The classification is printed nowhere: an edge refusal writes no run directory at all
+  // (verified against a tampered contract — exit 3, empty stdout, no `.specwitness/runs`
+  // entry), and exit 3 is identical for all five classifications. The message is the only
+  // thing that distinguishes them.
+  const infra = (stderrContains: string[]) =>
+    expectation({
+      exitCode: 3,
+      outcome: { infraError: 'integrity' },
+      criteria: { assertion: 'subset', statuses: {} },
+      stderrContains,
+    });
+
+  const noDocument = (stderr: string) =>
+    observation({
+      exitCode: 3,
+      document: null,
+      documentSource: 'none',
+      runDirectory: null,
+      stderr,
+    });
+
+  it('REFUSES a generic `ERROR:` as the whole of the evidence', () => {
+    // The hole named in review: a fixture expecting `provider` with only `ERROR:` pinned
+    // stays green when the CLI actually reported `config` — the classification confusion
+    // FR-22 exists to prevent, arriving through the corpus meant to pin FR-22.
+    const problems = compareOutcome(infra(['ERROR:']), noDocument('ERROR: something\n'), normalizer);
+
+    expect(problems.join('\n')).toContain('cannot be read back');
+  });
+
+  it('accepts a specific sentence that names the failure', () => {
+    const message = 'the contract for epic-1 was edited after it was frozen';
+    const problems = compareOutcome(infra([message]), noDocument(`ERROR: ${message}\n`), normalizer);
 
     expect(problems).toEqual([]);
   });

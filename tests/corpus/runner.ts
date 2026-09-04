@@ -509,6 +509,14 @@ export interface ObservedOutcome {
   readonly documentSource: 'stdout' | 'run-directory' | 'none';
   /** Absolute path of the run directory, when one exists, so a human can open the evidence. */
   readonly runDirectory: string | null;
+  /**
+   * The RAW BYTES of the persisted `result.json`, when the run wrote one.
+   *
+   * Carried separately from `document` so the AD-11 same-bytes invariant can be compared
+   * rather than assumed: `--json` stdout and the stored file are required to be the same
+   * byte sequence (Q53), and a parsed-then-reserialised comparison would not test that.
+   */
+  readonly storedResult: string | null;
 }
 
 /** The newest `.specwitness/runs/run-*` directory, or `null` when the run created none. */
@@ -565,6 +573,11 @@ export async function runFixture(
 
   const runDirectory = await newestRunDirectory(materialized.projectRoot);
 
+  const storedResult: string | null =
+    runDirectory === null
+      ? null
+      : ((await readFile(join(runDirectory, 'result.json'), 'utf8').catch(() => null)) ?? null);
+
   let document: RunResultDocument | null = null;
   let documentSource: ObservedOutcome['documentSource'] = 'none';
 
@@ -578,15 +591,17 @@ export async function runFixture(
     }
   }
 
-  if (document === null && runDirectory !== null) {
-    const stored = await readFile(join(runDirectory, 'result.json'), 'utf8').catch(() => null);
-    if (stored !== null) {
-      try {
-        document = JSON.parse(stored) as RunResultDocument;
-        documentSource = 'run-directory';
-      } catch {
-        document = null;
-      }
+  // The fallback is kept — a fixture may not pass `--json` at all, and its outcome is then
+  // only in the stored file. It is NOT a way for broken `--json` output to pass unnoticed:
+  // `compareOutcome` separately requires stdout and the stored bytes to be IDENTICAL
+  // whenever `--json` was requested (AD-11), so a divergence fails the fixture rather than
+  // being quietly papered over here.
+  if (document === null && storedResult !== null) {
+    try {
+      document = JSON.parse(storedResult) as RunResultDocument;
+      documentSource = 'run-directory';
+    } catch {
+      document = null;
     }
   }
 
@@ -597,6 +612,7 @@ export async function runFixture(
     document,
     documentSource,
     runDirectory,
+    storedResult,
   };
 }
 
@@ -642,6 +658,33 @@ function deepEqual(left: unknown, right: unknown): boolean {
 }
 
 /**
+ * Generic markers that every SpecWitness error prints, and which therefore distinguish
+ * nothing.
+ */
+const GENERIC_ERROR_MARKERS = new Set(['ERROR', 'ERROR:', 'HINT', 'HINT:', 'error', 'hint']);
+
+/** The shortest `stderrContains` entry that could plausibly name one classification. */
+const CLASSIFICATION_EVIDENCE_MIN_LENGTH = 20;
+
+/**
+ * Whether an expectation pins stderr text specific enough to tell one infra classification
+ * from another.
+ *
+ * Length is a proxy and it is an honest one: nothing mechanical can decide whether a
+ * sentence names an integrity failure rather than a config failure. What it CAN do is refuse
+ * the degenerate case the reviewer named — a fixture whose only evidence is `ERROR:` — which
+ * is the one that turns a classification expectation into an exit-code expectation wearing a
+ * classification's name.
+ */
+function pinsSomethingClassificationSpecific(expected: ExpectedOutcomeFile): boolean {
+  return (expected.stderrContains ?? []).some(
+    (needle) =>
+      !GENERIC_ERROR_MARKERS.has(needle.trim()) &&
+      needle.trim().length >= CLASSIFICATION_EVIDENCE_MIN_LENGTH,
+  );
+}
+
+/**
  * Compares an observation to its hand-written expectation and returns one line per
  * mismatch. An empty array means the fixture held.
  *
@@ -672,14 +715,24 @@ export function compareOutcome(
           'result document (neither on stdout nor in a run directory). A product verdict ' +
           'that was never written down is not a verdict.',
       );
-    } else if ((expected.stderrContains ?? []).length === 0) {
-      // Green-for-nothing, one level up: without a document, an exit code alone is a very
-      // thin claim. A fixture pinning an infra classification with no document must also
-      // pin the ERROR text that names it, or it asserts almost nothing.
+    } else if (!pinsSomethingClassificationSpecific(expected)) {
+      // ⚠️ THE CLASSIFICATION IS NOT PRINTED ANYWHERE. A refusal raised at the CLI edge —
+      // an integrity failure, for instance — writes no run directory at all (verified: a
+      // tampered contract exits 3 with empty stdout and no `.specwitness/runs` entry), so
+      // `infraError: 'integrity'` cannot be READ back from anything. Exit 3 is identical for
+      // all five classifications.
+      //
+      // What the fixture can pin is the MESSAGE, and the message is what actually differs
+      // between a config error and an integrity error. So a generic `ERROR:` is refused:
+      // it would let a fixture expecting `provider` stay green while the CLI reported
+      // `config`, which is the classification confusion FR-22 exists to prevent — arriving
+      // through the corpus that is supposed to pin FR-22.
       problems.push(
         `outcome: this fixture expects infraError '${expected.outcome.infraError}' and the ` +
-          'run produced no result document, so the classification is unobservable. Add a ' +
-          "'stderrContains' entry naming the ERROR: text, so the fixture pins something.",
+          'run produced no result document, so the classification cannot be read back from ' +
+          'anything: exit 3 is identical for all five. Pin the actual ERROR text in ' +
+          "'stderrContains' — a specific sentence, not just 'ERROR:' — because the message " +
+          'is the only thing that distinguishes one classification from another here.',
       );
     }
   } else {
@@ -749,6 +802,26 @@ export function compareOutcome(
           );
         }
       }
+    }
+  }
+
+  // AD-11 / Q53, made a CORPUS-ENFORCED property rather than a documented intention: the
+  // `--json` document a harness reads and the `result.json` persisted beside the evidence
+  // are the SAME BYTES. Compared raw, not parsed-and-reserialised — a value comparison would
+  // pass while the byte sequence differed, which is the whole thing the invariant is about.
+  //
+  // Only when `--json` was actually requested: a fixture that does not ask for the document
+  // on stdout is not asserting anything about it. And only when the run persisted one: an
+  // edge refusal writes neither, and empty stdout beside no file is consistent.
+  if (expected.command.includes('--json') && observed.storedResult !== null) {
+    if (observed.stdout !== observed.storedResult) {
+      problems.push(
+        '--json output and the stored result.json are NOT the same bytes (AD-11, Q53). ' +
+          `stdout is ${observed.stdout.length} bytes, ` +
+          `${observed.runDirectory ?? '(no run directory)'}/result.json is ` +
+          `${observed.storedResult.length} bytes. A harness reading stdout and a human ` +
+          'reading the run directory must not be able to see different runs.',
+      );
     }
   }
 
@@ -843,7 +916,32 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0:0:0
  * reaching the network. `)` and `}` still terminate the match, so a markdown link or a
  * template expression around a URL does not swallow the syntax after it.
  */
-const URL_IN_TEXT = /\b(?:https?):\/\/([^/\s"'`)}]+)/g;
+const URL_IN_TEXT = /\b(?:https?):\/\/([^/\s"'`)}]+)/gi;
+
+/**
+ * The host out of a URL authority, lower-cased.
+ *
+ * ONE implementation, used by both the static scan and the runtime evidence check, so the
+ * two cannot drift into disagreeing about what counts as loopback.
+ *
+ * BRACKET-AWARE: an IPv6 authority is `[::1]:8080`, and splitting on `:` yields `[` — which
+ * would report a legitimate loopback fixture as reaching the network. A FALSE POSITIVE is the
+ * expensive direction in this guard: it fails a correct fixture and teaches the next author
+ * that the check is noise.
+ *
+ * LOWER-CASED, and the scheme regex above carries `i`, because schemes and hosts are both
+ * case-insensitive (RFC 3986). `HTTPS://EXAMPLE.COM` is the same request as the lower-case
+ * one, and a guard bypassable by pressing shift is not a guard.
+ *
+ * `new URL()` is deliberately not used: a checked-in fixture's authority legitimately
+ * contains an unsubstituted `{{PORT:app}}` placeholder, which is not a parseable URL.
+ */
+function hostOfAuthority(authority: string): string {
+  const host = authority.startsWith('[')
+    ? authority.slice(0, authority.indexOf(']') + 1) || authority
+    : (authority.split(':')[0] ?? authority);
+  return host.toLowerCase();
+}
 
 /**
  * Every non-loopback URL host named anywhere in a fixture's checked-in project.
@@ -865,17 +963,7 @@ export async function nonLoopbackHosts(projectDirectory: string): Promise<string
       if (authority === undefined) {
         continue;
       }
-      // BRACKET-AWARE. An IPv6 authority is `[::1]:8080`, so splitting on `:` yields `[`
-      // and a legitimate loopback fixture would be reported as reaching the network — a
-      // FALSE POSITIVE, which in this guard is the expensive direction: it fails a correct
-      // fixture and teaches the next author that the check is noise. `[::1]` is already in
-      // `LOOPBACK_HOSTS`, so the intent was always to accept it.
-      //
-      // `new URL()` is not used: a fixture's authority legitimately contains an
-      // unsubstituted `{{PORT:app}}` placeholder, which is not a parseable URL.
-      const host = authority.startsWith('[')
-        ? authority.slice(0, authority.indexOf(']') + 1) || authority
-        : (authority.split(':')[0] ?? authority);
+      const host = hostOfAuthority(authority);
       if (!LOOPBACK_HOSTS.has(host)) {
         found.add(host);
       }
@@ -1026,10 +1114,7 @@ export function nonLoopbackEvidenceTargets(document: RunResultDocument): string[
     if (authority === undefined) {
       continue;
     }
-    const host = authority.startsWith('[')
-      ? authority.slice(0, authority.indexOf(']') + 1) || authority
-      : (authority.split(':')[0] ?? authority);
-    if (!LOOPBACK_HOSTS.has(host)) {
+    if (!LOOPBACK_HOSTS.has(hostOfAuthority(authority))) {
       found.add(url);
     }
   }
