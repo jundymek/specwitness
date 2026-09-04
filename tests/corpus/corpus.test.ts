@@ -52,16 +52,83 @@ import {
  * with zero tests, which is what "no fixtures found" would otherwise look like.
  */
 const fixtures = await discoverFixtures();
+
+/**
+ * THE STATIC HERMETICITY SCANS RUN BEFORE ANY FIXTURE IS EXECUTED, AND THE ORDER IS THE POINT.
+ *
+ * They used to be ordinary `it`s further down this file, which meant a newly checked-in
+ * fixture naming `curl` or a non-loopback host was SPAWNED first and rejected afterwards.
+ * The runner deliberately provides no network sandbox (see `runner.ts`'s header), so by the
+ * time such an assertion failed the fetch had already happened — a guard that reports the
+ * thing it was supposed to prevent.
+ *
+ * At module scope, so it happens before collection and therefore before any test body: the
+ * same reason discovery is here, and the same precedent
+ * (`tests/integration/surfaces/helpers/browser-fixture.ts`). A throw here fails the whole
+ * file, which is the correct blast radius — a fixture that is not hermetic makes the SUITE
+ * untrustworthy, not just itself.
+ */
+const preflight: string[] = [];
+for (const fixture of fixtures) {
+  const checks = [
+    ['names a host that is not loopback', await nonLoopbackHosts(fixture.projectDirectory)],
+    ['declares a command that can fetch', await networkCapableCommands(fixture.projectDirectory)],
+    ['reaches for machine state', await machineStateReferences(fixture.projectDirectory)],
+  ] as const;
+  for (const [check, found] of checks) {
+    if (found.length > 0) {
+      preflight.push(`  fixture '${fixture.name}' ${check}: ${found.join(', ')}`);
+    }
+  }
+}
+if (preflight.length > 0) {
+  throw new Error(
+    'corpus: refusing to EXECUTE any fixture - the checked-in corpus is not hermetic:\n' +
+      `${preflight.join('\n')}\n` +
+      'These run before anything is spawned on purpose: this runner is not a network ' +
+      'sandbox, so a fixture rejected after it ran has already done whatever it was ' +
+      'rejected for.',
+  );
+}
+
 const treeBefore = await hashCorpusTree();
 
 /** Names of fixtures that actually ran. Compared to `fixtures` in the last test. */
 const executed = new Set<string>();
 
-/** Kept so a failure can print the run directory before the workspace is removed. */
+/**
+ * Workspaces to remove at the end — populated only by fixtures that PASSED.
+ *
+ * ⚠️ **A FAILED FIXTURE'S WORKSPACE IS DELIBERATELY LEFT ON DISK.** `renderFailure` prints
+ * the run directory and tells the reader to open it; deleting it in teardown would break
+ * exactly the debugging workflow this suite documents, for exactly the case it exists for.
+ * A passing fixture's workspace is worthless and is removed; a failing one is the evidence.
+ *
+ * The leak is bounded and visible: one `mkdtemp` directory per failed fixture, under the OS
+ * temp dir, with its path printed in the failure and listed again in teardown.
+ */
 const completed: FixtureRun[] = [];
 
+/** Every run that started, so teardown can report what it deliberately kept. */
+const started: FixtureRun[] = [];
+
 afterAll(async () => {
+  // COMPUTED FIRST, and the order is load-bearing: `splice(0)` empties `completed`, so
+  // asking afterwards which runs are missing from it answers "all of them". Found by
+  // planting a failing expectation and watching a PASSING fixture be reported as kept.
+  const preserved = started.filter((run) => !completed.includes(run));
+
   await Promise.all(completed.splice(0).map(async (run) => await run.materialized.cleanup()));
+  if (preserved.length > 0) {
+    process.stderr.write(
+      '\n[corpus] KEPT the workspace of every fixture that did not pass, so the run ' +
+        'directory named in the failure above still exists:\n' +
+        preserved
+          .map((run) => `[corpus]   ${run.materialized.fixture.name}: ${run.materialized.workspace}\n`)
+          .join('') +
+        '[corpus] Remove them when you are done; nothing else will.\n',
+    );
+  }
 });
 
 describe('the Golden Verification Corpus', () => {
@@ -72,7 +139,7 @@ describe('the Golden Verification Corpus', () => {
         'produces exactly the outcome its hand-written expected.json pins',
         async () => {
           const run = await executeFixture(fixture);
-          completed.push(run);
+          started.push(run);
           executed.add(fixture.name);
 
           // The whole comparison in one assertion, so a failure prints the full report
@@ -108,6 +175,11 @@ describe('the Golden Verification Corpus', () => {
 
           // AD-8: the run leaves no worktree container behind under its own TMPDIR.
           expect(await leakedWorktreeContainers(run.materialized)).toEqual([]);
+
+          // LAST LINE, and the position is the decision: reaching it means every assertion
+          // above passed, so this workspace holds nothing anybody needs. Anything that threw
+          // leaves the run OUT of `completed`, and teardown keeps its directory.
+          completed.push(run);
         },
         180_000,
       );
