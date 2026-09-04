@@ -93,7 +93,7 @@ development_status:
   6-2-behavioral-corpus-fixtures: review
   6-3-classification-corpus-fixtures: review
   6-4-non-node-target-fixture: review
-  6-5-scorecard-recording: backlog
+  6-5-scorecard-recording: review
   6-6-defect-attribution-summary: backlog
   6-7-dogfooding-readiness-docs-packaging: backlog
   6-8-shared-prompt-assembly-helper: review

@@ -711,3 +711,74 @@ describe('the authoring-layer rule (story 6.1, rider e5-C)', () => {
     expect(exitCode).toBe(0);
   });
 });
+
+describe('the scorecard is local-only, structurally (story 6.5)', () => {
+  /**
+   * ⚠️ THESE PLANT INTO THE REAL MODULE'S PATH, not into a scratch probe, and they have to.
+   *
+   * `scorecard-is-local-only` is scoped to exactly two file paths, because those two
+   * files are the entire scorecard write path and a rule over `src/infra/**` would forbid
+   * `node:https` to every adapter that legitimately needs it. A probe module at some other
+   * path therefore cannot trigger it. So the copy's own `infra/scorecard-store.ts` is
+   * OVERWRITTEN inside the temp tree — the real `src/` is never touched, exactly as every
+   * other case in this file guarantees.
+   */
+  const OFFENDING = (specifier: string): string =>
+    `import { request } from '${specifier}';\nexport const p = request;\n`;
+
+  it('blocks a networking built-in in the scorecard store', async () => {
+    // The import that would pass every other rule in this file. `src/infra/**` may use any
+    // Node built-in — that is what makes `RunStore` possible — so without this rule a
+    // single `node:https` beside the `node:fs` one is invisible to the architecture check.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/scorecard-store.ts', OFFENDING('node:https'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks a raw socket too, not only HTTP', async () => {
+    // `node:net` opens a connection without ever spelling "http". A rule that named only
+    // the HTTP modules would be a rule anybody could walk around by accident.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/scorecard-store.ts', OFFENDING('node:net'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('still permits the filesystem, which is the whole point of the module', async () => {
+    // The permit half. A ban that also broke `node:fs` would be a ban somebody deletes.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'infra/scorecard-store.ts',
+      "import { appendFile } from 'node:fs/promises';\nimport { join } from 'node:path';\n" +
+        'export const p = { appendFile, join };\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('scorecard-is-local-only');
+    expect(exitCode).toBe(0);
+  });
+
+  it('has no global-fetch escape hatch in either real module', async () => {
+    // THE HONEST GAP THE DEPCRUISE RULE CANNOT CLOSE. Node's `fetch`, `WebSocket` and
+    // `XMLHttpRequest` are GLOBALS: they need no import, so dependency-cruiser cannot see
+    // them. This reads the two real modules and says so. Cheap, and it is the only guard
+    // that would catch the one-line change a well-meaning contributor is most likely to
+    // make.
+    for (const relative of ['schemas/scorecard.ts', 'infra/scorecard-store.ts']) {
+      const source = await readFile(join(SRC, relative), 'utf8');
+      // Both modules discuss the ban at length in prose, so the search is for a CALL or a
+      // construction rather than for the word.
+      expect(source).not.toMatch(/\bfetch\s*\(/);
+      expect(source).not.toMatch(/\bnew\s+(WebSocket|XMLHttpRequest)\b/);
+    }
+  });
+});
