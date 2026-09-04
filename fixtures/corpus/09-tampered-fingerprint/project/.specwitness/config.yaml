@@ -1,0 +1,25 @@
+# SpecWitness Project Config for the corpus fixture `09-tampered-fingerprint`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. The single command here is `node gates/lint.cjs`: argv, never a
+# shell line, with nothing to quote and nothing for a shell to interpret even if
+# one were involved.
+#
+# ⚠️ THE GATE NEVER RUNS, AND IT IS STILL REQUIRED. The integrity stage precedes
+# every stage that spawns anything — a contract whose content no longer matches
+# its fingerprint costs nothing to reject, so nothing is built, started or
+# written. But without a declared gate this plan-less project would be refused
+# by `assertSomethingToAdjudicate` BEFORE the run began, and the fixture would
+# pin a config refusal instead of an integrity failure. Both exit 3; only one of
+# them is class 9. The gate exists so the run gets far enough to be refused for
+# the RIGHT reason.
+
+version: 1
+
+project:
+  baseBranch: master
+
+gates:
+  - { id: lint, run: node gates/lint.cjs }

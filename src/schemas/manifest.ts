@@ -23,6 +23,7 @@ import { z } from 'zod';
 
 import { InfraError } from '../domain/errors.js';
 import { isRunId } from '../domain/run-id.js';
+import { unknownKeysOnly } from './unknown-keys.js';
 import { schemaVersionFor } from './versions.js';
 
 /** Current manifest schema version, from the AD-5 registry. */
@@ -184,6 +185,27 @@ export function parseRunManifest(text: string, path: string): RunManifest {
 
   const result = RunManifestSchema.safeParse(json);
   if (!result.success) {
+    // ADR-008: an unknown key is a VERSION SKEW, not corruption. This file's own
+    // `RunManifestSchema` header already anticipated it — "an unknown key means a newer
+    // writer added something" — but that diagnosis never reached the operator, who saw a
+    // validation failure naming an unexpected field. It reaches them now.
+    //
+    // `unknownKeysOnly` returns `null` the moment any other issue is present, so a
+    // manifest that is BOTH newer AND corrupt keeps the malformed message below — and that
+    // matters more here than for most artifacts, because the run this file describes may
+    // still own a worktree or a live process group, and "upgrade specwitness" would send
+    // the operator away from resources that need reaping.
+    //
+    // ⚠️ `InfraError`, NEVER `IntegrityError` (ADR-008 §1). `IntegrityError` means
+    // tampering and must keep meaning only that.
+    const unknown = unknownKeysOnly(result.error);
+    if (unknown !== null) {
+      throw new InfraError(
+        `this run manifest was written by a newer SpecWitness than the one reading it: ${path}`,
+        `unknown field(s): ${unknown.join(', ')}. Upgrade specwitness, or read this run with the version that wrote it; do not delete it`,
+      );
+    }
+
     const detail = result.error.issues
       .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
       .join('; ');

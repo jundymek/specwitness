@@ -1,0 +1,39 @@
+# Hand-written Verification Contract for the corpus fixture `07-broken-build`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-1 --freeze` — see `fixtures/corpus/README.md`
+# section "Adding a fixture". That is deliberate and it is NOT what AD-12
+# forbids: a contract is an INPUT to the run, and its fingerprint is a hash the
+# product must be able to recompute from these bytes or refuse the run.
+# `expected.json` — the OUTCOME — is hand-written and never generated.
+#
+# Both criteria are `verifiability: automated`. This fixture is about the GATE;
+# a `human` criterion here would add a second, independent route to a non-PASS
+# verdict, and the fixture would stop proving what it claims.
+spec:
+  epic: epic-1
+  version: 1
+  criteria:
+    - id: E1-01
+      statement: The packaged command reports its own name and version.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E1-02
+      statement: The packaged command exits successfully when asked for its version.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 3fb04aecfbb54b5eceb139a53850f90318d3a2e64ffa81f60b6f0f2226ab0aab
+  createdAt: 2026-09-04T09:00:00.000Z
+  frozenAt: 2026-09-04T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-04T09:00:00.000Z
+  history: []

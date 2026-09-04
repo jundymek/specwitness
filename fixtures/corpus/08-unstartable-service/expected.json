@@ -1,0 +1,18 @@
+{
+  "expectedVersion": 1,
+  "fixture": "08-unstartable-service",
+  "why": "Brief section 7 defect class 8: the environment could not be brought up, so SpecWitness reached no conclusion about the branch. The declared service exits immediately with a non-zero code and never binds its port, which the services stage diagnoses as 'exited before it became ready' and raises as an InfraError — exit 3, classification 'infra'. THIS IS THE MOST IMPORTANT NEGATIVE ASSERTION IN THE PRODUCT: it must NEVER report FAIL. 'Infra failures are never reported as product FAIL' is the first non-negotiable rule in CLAUDE.md (AD-6, AD-7, ADR-002), and it is the exact mirror of fixture 07, which must never report InfraError. Five epics asserted this in unit tests written by the same agent that wrote the code; this is the first time the real binary is driven through a genuinely unstartable service end to end. A gate that reports FAIL because a port was busy gets switched off within a week, which is why exit 1 here would be a defect of the first order rather than a cosmetic mislabel. THE FIXTURE MUST ALSO FAIL FOR ITS STATED REASON: not a port collision (the runner allocates a fresh loopback port per run and the services stage proves it free before spawning), not a missing binary (node and the script both exist — that would be a different InfraError), and not a readiness timeout (the process exits at once, so the failure is diagnosed immediately and the declared timeoutSec is never paid). 'criteria' is exact-and-empty on purpose: an InfraError breaks the stage loop, so the aggregate stage never runs and NO criterion result is materialised. Any criterion appearing here would mean the pipeline kept going after it had lost the environment.",
+  "proves": ["AC1", "FR-22", "ADR-002", "AD-6", "AD-7", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 3,
+  "outcome": { "infraError": "infra" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {}
+  },
+  "stderrContains": [
+    "service 'app' exited before it became ready",
+    "SpecWitness reached no conclusion about the branch under verification"
+  ],
+  "stderrAbsent": ["FAIL"]
+}

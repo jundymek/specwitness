@@ -74,6 +74,7 @@ import {
   VerdictSchema,
 } from './enums.js';
 import { IsoUtcTimestamp } from './manifest.js';
+import { unknownKeysOnly } from './unknown-keys.js';
 import { schemaVersionFor } from './versions.js';
 
 /** Current version of the persisted result document, from the AD-5 registry. */
@@ -709,6 +710,51 @@ export function serializeRunResult(result: RunResult): string {
 }
 
 /**
+ * Sub-trees of `result.json` whose CONTENT originated with a provider (AD-2).
+ *
+ * ⚠️ **AN UNKNOWN KEY IN HERE IS NOT A VERSION SKEW, AND SAYING IT IS WOULD WEAKEN A
+ * SECURITY GUARD.** ADR-008's whole premise is that an unrecognised key means *a newer
+ * SpecWitness wrote this document* — true for the envelope, which is where additive
+ * evolution actually happens (story 5.5 added `explanations`, 5.6 added `adaptation`, 5.4
+ * added `flakiness`). It is NOT true here. These sub-trees carry text a provider produced,
+ * and an unexpected key inside one is the shape of a provider smuggling a field the schema
+ * never granted it — `{criterionId, explanation, status}` being the worked example, where
+ * `status` is a verdict-shaped field in a payload that AD-2 says is non-authoritative.
+ * Telling an operator to *upgrade specwitness* in that situation sends them away from the
+ * one document that recorded the attempt.
+ *
+ * ADR-008 already draws this line and simply did not notice it ran through `jsonReport`.
+ * Its Context excludes `adaptation` from the ADR because it "is additionally a *provider
+ * input* boundary, which this ADR deliberately does not touch — see Decision 4" — but
+ * `jsonReport`, which the ADR does assign, CONTAINS provider-authored sub-objects. So the
+ * carve-out is honoured here, at the reader, which is exactly where ADR-008 §2 puts this
+ * kind of judgement: *"This is a property of the reader, not of the schema."*
+ *
+ * The effect is to make the new branch NARROWER than the ADR's literal text, never wider.
+ * Anything excluded here keeps the pre-existing malformed-document behaviour, which is the
+ * fail-closed direction — and `tests/unit/schemas/result-explanation.test.ts` ("rejects a
+ * document whose explanation carries an unknown key") is the merged guard that proves it
+ * still holds, unchanged by this story.
+ */
+const PROVIDER_AUTHORED_PAYLOADS = ['explanations', 'adaptation'] as const;
+
+/**
+ * Whether any unrecognised key sits inside a provider-authored payload.
+ *
+ * Matches on the path PREFIX, so `explanations.0.status` is caught while a root-level key
+ * that merely begins with the same letters is not. A bare match on the payload name itself
+ * cannot occur — those keys are declared, so they are never "unrecognised" — but it is
+ * included so the predicate reads as "at or under", which is what it means.
+ */
+function touchesProviderAuthoredPayload(unknownKeys: readonly string[]): boolean {
+  return unknownKeys.some((key) =>
+    PROVIDER_AUTHORED_PAYLOADS.some(
+      (payload) => key === payload || key.startsWith(`${payload}.`),
+    ),
+  );
+}
+
+/**
  * Parses a stored document, applying the version policy.
  *
  * Always throws `InfraError` naming `path` — never returns undefined and never throws
@@ -744,6 +790,27 @@ export function parseRunResult(text: string, path: string): RunResultDocument {
 
   const result = RunResultDocumentSchema.safeParse(json);
   if (!result.success) {
+    // ADR-008: an unknown key is a VERSION SKEW, not corruption. Strictness stays — it is
+    // what catches a typo'd key and a half-written file — but when the ONLY thing wrong is
+    // fields this build has never heard of, the honest diagnosis is that a newer
+    // SpecWitness wrote this document, not that the document is broken.
+    //
+    // `unknownKeysOnly` returns `null` the moment any other issue is present, so a
+    // document that is BOTH newer AND corrupt keeps the malformed message below. That
+    // direction is the one with teeth: telling an operator to upgrade would send them away
+    // from a file that is genuinely broken, and upgrading would not fix it.
+    //
+    // ⚠️ `InfraError`, NEVER `IntegrityError` (ADR-008 §1). `IntegrityError` means
+    // tampering and must keep meaning only that, or an ordinary upgrade becomes
+    // indistinguishable from an attack.
+    const unknown = unknownKeysOnly(result.error);
+    if (unknown !== null && !touchesProviderAuthoredPayload(unknown)) {
+      throw new InfraError(
+        `this stored run result was written by a newer SpecWitness than the one reading it: ${path}`,
+        `unknown field(s): ${unknown.join(', ')}. Upgrade specwitness, or read this run with the version that wrote it`,
+      );
+    }
+
     const detail = result.error.issues
       .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
       .join('; ');

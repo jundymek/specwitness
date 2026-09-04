@@ -1,0 +1,17 @@
+{
+  "expectedVersion": 1,
+  "fixture": "09-tampered-fingerprint",
+  "why": "Brief section 7 defect class 9, and a SECURITY fixture: a frozen contract was edited after it was frozen, so its content no longer matches its stored fingerprint. The run must refuse — exit 3, classified `integrity` — and it must never report a product verdict of any kind. Contract freeze is the guarantee that implementation can never silently change expected behaviour, and a freeze whose integrity check fails to fire is not a weak guarantee, it is no guarantee at all. THE TAMPER IS INSIDE `spec`, WHICH IS THE ONLY PLACE IT COUNTS: the fingerprint covers `spec` and never `meta` (story 2.2's partition, `src/schemas/canonical.ts`, restated by ADR-008 section 4). A fixture that tampered in `meta` and called itself an integrity test would assert the exact opposite of the truth, because a meta change correctly does NOT trip integrity — that is this fixture's twin, `09-meta-only-change`, which carries the SAME spec and the SAME fingerprint and must pass clean. Neither fixture proves anything alone; the pair proves a partition rather than an alarm. THE CLASSIFICATION IS PINNED AS DATA, NOT ONLY AS PROSE, and the project shape is chosen to make that possible. This project declares a gate and no plan, so `resolvePlan` returns early without asserting the contract and the tamper is caught by the pipeline's INTEGRITY STAGE — which means the run reaches a run directory and the persisted document carries `infraError: integrity` where a machine can read it. Had a plan been present the refusal would have happened at the CLI edge before the run existed, leaving exit 3 and nothing else, and exit 3 is identical for all five infra classifications. Both halves are asserted anyway: the classification in `outcome`, and the sentence in stderr. `IntegrityError` MUST KEEP MEANING TAMPERING AND ONLY TAMPERING (ADR-008 section 1) — a version skew classified this way would make an ordinary upgrade indistinguishable from an attack, which is why the neighbouring reader change in this same story reports skew as `infra` and never as `integrity`. `criteria` is exact-and-empty because the run stops at the integrity stage: nothing was adjudicated, and a criterion appearing here would mean the pipeline kept going after it had lost confidence in the expectations themselves.",
+  "proves": ["AC1", "FR-9", "FR-22", "ADR-002", "ADR-005", "ADR-008", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 3,
+  "outcome": { "infraError": "integrity" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {}
+  },
+  "stderrContains": [
+    "was edited after it was frozen: its content no longer matches its stored fingerprint"
+  ],
+  "stderrAbsent": ["FAIL"]
+}

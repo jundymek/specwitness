@@ -1,0 +1,58 @@
+# Hand-written Verification Contract for the corpus fixture
+# `09-tampered-fingerprint` — the POSITIVE half of brief section 7 class 9.
+#
+# ⚠️ THIS CONTRACT IS DELIBERATELY TAMPERED, AND IT IS SUPPOSED TO STAY THAT
+# WAY. Do not "fix" it. Do not re-freeze it. A run against it MUST refuse with
+# an IntegrityError at exit 3, and if this file is ever repaired the fixture
+# silently stops testing anything while staying green.
+#
+# WHAT WAS DONE, precisely:
+#
+#   1. The `spec` block below was written, and frozen ONCE with the shipped
+#      `specwitness contract epic-1 --freeze`, producing the fingerprint
+#      recorded in `meta.fingerprint`.
+#   2. THEN `spec.criteria[0].statement` WAS EDITED — the criterion now demands
+#      a version string the frozen one never mentioned — while `meta` was left
+#      exactly as the freeze wrote it.
+#
+# So the stored fingerprint describes a contract that no longer exists here.
+# That is what an implementation quietly widening its own acceptance criteria
+# looks like on disk, and catching it is the entire point of freezing.
+#
+# ⚠️ THE EDIT IS INSIDE `spec`, AND THAT IS THE ONLY PLACE IT COUNTS. The
+# fingerprint covers `spec` and never `meta` (story 2.2, `canonical.ts`). The
+# twin fixture `09-meta-only-change` carries THE SAME `spec` and THE SAME
+# fingerprint below, and alters only `meta` — and it must verify clean. Neither
+# fixture means anything alone: together they prove a partition, where either
+# alone would only prove that something fires, or that something is silent.
+#
+# ⚠️ THERE IS NO PLAN FILE BESIDE THIS CONTRACT, AND THAT IS A DELIBERATE
+# CHOICE ABOUT WHAT CAN BE ASSERTED. With a plan present the tamper is caught at
+# the CLI edge before a run directory exists, so the run produces NO document
+# and `integrity` cannot be read back from anything — exit 3 is identical for
+# all five infra classifications. With no plan, plan resolution returns early
+# without asserting and the tamper is caught by the pipeline's integrity stage
+# instead, so the run persists a document carrying `infraError: integrity`
+# where a machine can read it. The declared gate is what keeps this gate-less-
+# plan project from being refused before it starts.
+spec:
+  epic: epic-1
+  version: 2
+  criteria:
+    - id: E1-01
+      statement: The packaged command reports its own name and version and the build channel.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 2d83c13d957531182965feeef22ec01bb4a9d2010a05dba92723a81d1107c978
+  createdAt: 2026-08-30T08:00:00.000Z
+  frozenAt: 2026-09-01T11:45:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-08-30T08:00:00.000Z
+  history: []
