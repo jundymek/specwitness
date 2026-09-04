@@ -270,6 +270,36 @@ describe('reading back — ADR-008 §5, skip with a warning and keep counting', 
     expect(file.skipped[0]?.message).toContain('newer SpecWitness');
   });
 
+  it('skips a line from a NEWER SCHEMA VERSION and counts it, rather than aggregating it', async () => {
+    // The read-level half of the P2 the codex review of this branch raised. A version-2
+    // record can carry exactly this build's key set and mean something different by it
+    // (ADR-008 §3), so the unknown-key branch cannot see it. It must land in `skipped`,
+    // which is what 6.6 surfaces as `skippedRecords` — a record silently aggregated by a
+    // build that misunderstands it is a wrong metric with no symptom.
+    const root = await project();
+    const store = new ScorecardStore(root);
+    const warnings = collector();
+    await store.appendRecord(record({ runId: 'run-20260904T120000Z-aaaa' }), warnings.warn);
+
+    const future = JSON.parse(
+      serializeScorecardRecord(record({ runId: 'run-20260904T120100Z-bbbb' })),
+    ) as Record<string, unknown>;
+    future['schemaVersion'] = SCORECARD_RECORD_VERSION + 1;
+    const existing = await readFile(join(root, '.specwitness', SCORECARD_FILENAME), 'utf8');
+    await writeFile(
+      join(root, '.specwitness', SCORECARD_FILENAME),
+      `${existing}${JSON.stringify(future)}\n`,
+      'utf8',
+    );
+
+    const file = await store.read();
+
+    expect(file.records).toHaveLength(1);
+    expect(file.records[0]?.runId).toBe('run-20260904T120000Z-aaaa');
+    expect(file.skipped).toHaveLength(1);
+    expect(file.skipped[0]).toMatchObject({ line: 2, reason: 'version-skew' });
+  });
+
   it('skips a MALFORMED line with a DIFFERENT diagnosis, so corruption cannot hide behind an upgrade hint', async () => {
     const root = await project();
     const store = new ScorecardStore(root);

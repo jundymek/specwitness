@@ -596,6 +596,34 @@ export function parseScorecardLine(line: string, lineNumber: number, path: strin
     };
   }
 
+  // ⚠️ THE VERSION IS READ BEFORE THE SHAPE, and that ordering is the whole point — the
+  // same ordering `parseRunResult` uses for `result.json`. Raised as a P2 by the codex
+  // review of this branch, and it is the sharpest defect this story could have shipped.
+  //
+  // The unknown-key branch below cannot catch a version bump, because ADR-008 §3 defines
+  // a bump as an EXISTING field changing meaning, type or requiredness. A version-2
+  // record can therefore carry exactly the version-1 key set and mean something different
+  // by it: no unknown keys, every type valid, and every number 6.6 computes from it
+  // wrong. That is the failure this whole story is written against — a north-star metric
+  // that is confidently wrong, with nothing on screen to say so.
+  //
+  // A CEILING, not a wall. Only a NEWER version is refused; a record at this build's own
+  // version is what every line written here carries, and AD-5's "a stored run from last
+  // week must stay readable" governs the other direction.
+  if (typeof json === 'object' && json !== null && 'schemaVersion' in json) {
+    const version = (json as { schemaVersion: unknown }).schemaVersion;
+    if (typeof version === 'number' && version > SCORECARD_RECORD_VERSION) {
+      return {
+        ok: false,
+        reason: 'version-skew',
+        message:
+          `${where} was written by a newer SpecWitness than the one reading it — record ` +
+          `skipped (schemaVersion ${version}, this build understands ` +
+          `${SCORECARD_RECORD_VERSION}). Upgrade specwitness to read it.`,
+      };
+    }
+  }
+
   const parsed = ScorecardRecordSchema.safeParse(json);
   if (parsed.success) {
     return { ok: true, record: parsed.data };

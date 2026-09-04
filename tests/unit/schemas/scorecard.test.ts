@@ -450,6 +450,44 @@ describe('the line is one independently-parseable record (ADR-008 §5)', () => {
     }
   });
 
+  it('refuses a line whose schemaVersion is NEWER, even when every field is recognised', () => {
+    // ⚠️ Raised as a P2 by the codex review of this branch, and it is the sharpest failure
+    // this story could have shipped. ADR-008 §3 defines a version bump as an existing
+    // field CHANGING meaning, type or requiredness — so a version-2 record can carry
+    // exactly the version-1 key set and mean something different by it. Unknown keys
+    // cannot catch that: there are none. Accepting it would let an older build aggregate
+    // records it misunderstands, and produce a north-star metric that is confidently
+    // wrong with nothing on screen to say so.
+    const future = {
+      ...JSON.parse(serializeScorecardRecord(toScorecardRecord(run()))),
+      schemaVersion: SCORECARD_RECORD_VERSION + 1,
+    };
+
+    const parsed = parseScorecardLine(JSON.stringify(future), 4, '/tmp/scorecard.jsonl');
+
+    expect(parsed).toMatchObject({ ok: false, reason: 'version-skew' });
+    if (!parsed.ok) {
+      expect(parsed.message).toContain('newer SpecWitness');
+      // The NUMBERS, so an operator can tell which build to reach for — the same
+      // courtesy `parseRunResult` extends for `result.json`.
+      expect(parsed.message).toContain(String(SCORECARD_RECORD_VERSION + 1));
+      expect(parsed.message).toContain('line 4');
+    }
+  });
+
+  it('still reads a line at the CURRENT version, so the check is a ceiling and not a wall', () => {
+    // AD-5's other direction: "a stored run from last week must stay readable". The guard
+    // above must refuse only what is NEWER — a version equal to this build's is exactly
+    // what every record written here carries.
+    const parsed = parseScorecardLine(
+      serializeScorecardRecord(toScorecardRecord(run())).trimEnd(),
+      1,
+      '/tmp/scorecard.jsonl',
+    );
+
+    expect(parsed.ok).toBe(true);
+  });
+
   it('diagnoses a WRONG TYPE as malformed, and never as a skew', () => {
     const broken = {
       ...JSON.parse(serializeScorecardRecord(toScorecardRecord(run()))),
