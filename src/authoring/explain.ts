@@ -115,7 +115,12 @@ import { z } from 'zod';
 
 import type { AgentProvider, AgentRequest } from '../domain/agent-provider.js';
 import type { DerivedCriterionResult } from '../domain/criterion-result.js';
-import { boundedText, redactText, truncationMarker, type Evidence } from '../domain/evidence.js';
+import {
+  boundedText,
+  truncationMarker,
+  type Evidence,
+  type RedactionOptions,
+} from '../domain/evidence.js';
 import type { Clock } from '../domain/ports.js';
 import type {
   CriterionExplanation,
@@ -124,6 +129,8 @@ import type {
 } from '../domain/run-result.js';
 import { attemptInvoke } from '../providers/invoke.js';
 import { schemaVersionFor } from '../schemas/versions.js';
+
+import { assemblePrompt, promptField } from './prompt-assembly.js';
 
 /** The role name, spelled once. Already declared in `AI_ROLES` and `AgentRole`. */
 export const EXPLAINER_ROLE = 'explainer' as const;
@@ -147,15 +154,24 @@ export const EXPLANATION_SCHEMA_VERSION = schemaVersionFor('explanation');
  */
 export const MAX_EXPLAINED_CRITERIA = 20;
 
-/** Per-field prompt cap. The values are already redacted; this bounds cost, not exposure. */
-const FIELD_CAP_CHARS = 400;
-
 /**
- * Whole-prompt cap, in characters. Bounded output is a house convention (FR-29).
+ * Whole-prompt cap, in BYTES. Story 6.8's shared `assemblePrompt` enforces it.
  *
- * Exported so a test asserts against THIS number rather than a hand-copied duplicate of it.
+ * 24 000, carried unchanged from story 5.5's `PROMPT_CAP_CHARS`; only the unit moved, from
+ * characters to bytes, when the layer stopped keeping two bounding vocabularies. Bytes are
+ * what a request actually costs, and for the same number a byte cap is never looser than a
+ * character one.
+ *
+ * WHY THIS ROLE IS CAPPED AT 24 000 WHILE THE AUTHORING ROLES ARE CAPPED AT 200 000
+ * (story 6.8, Task 4): losing an evidence summary from an explanation costs a paragraph of
+ * a NON-AUTHORITATIVE hypothesis nothing mechanical reads. Losing a criterion from the
+ * contract-author prompt would silently narrow a definition of done. Different content,
+ * different consequence, different number — deliberately not unified.
+ *
+ * The per-field cap is `PROMPT_FIELD_CAP_BYTES`, shared with every other builder in the
+ * layer. Exported so a test asserts against THIS number rather than a hand-copied duplicate.
  */
-export const PROMPT_CAP_CHARS = 24_000;
+export const PROMPT_CAP_BYTES = 24_000;
 
 /**
  * The cap on ONE returned hypothesis, in bytes.
@@ -217,6 +233,19 @@ export interface ExplainRequest {
   /** Provenance, as `readProviderProvenance` reports it. `null` when unknown — never guessed. */
   readonly model?: string | null;
   readonly providerCliVersion?: string | null;
+  /**
+   * The run's redaction options (AD-10), forwarded to the shared prompt assembly.
+   *
+   * OPTIONAL AND CURRENTLY UNSET BY EVERY CALLER, which is worth stating rather than
+   * leaving for a reader to discover: nothing at the CLI edge builds a `RedactionOptions`
+   * today — `src/cli/commands/verify.ts` composes the probe dispatcher with no `redaction`
+   * key. The built-in patterns always apply; what this seam adds is the config-declared
+   * EXTRA patterns, for the day something wires them. That is exactly the posture
+   * `RedactionOptions` documents for itself in `src/domain/evidence.ts`: the parameter
+   * exists so that when a caller needs it there is nowhere new to put it, and no second
+   * redaction entry point gets invented. Wiring it at the edge is not story 6.8's scope.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /**
@@ -242,31 +271,6 @@ export interface ExplainOutcome {
 }
 
 /**
- * Redact, then clip, for everything that goes into the prompt.
- *
- * REDACTED AGAIN EVEN THOUGH MOST OF IT ALREADY WAS, and the exception is why. Evidence is
- * redacted at capture and `expected`/`actual` at derivation, so for those this is a second
- * pass over text that has already been cleaned — `redactText` fires on assignment names and
- * header names, so re-running it over `FOO_KEY=[REDACTED]` yields the same string and costs
- * nothing.
- *
- * **`statement` is the field that makes it necessary.** A criterion's statement is a
- * human's own words, carried VERBATIM from the frozen contract by `deriveCriterionResult`,
- * and no boundary between the contract file and here redacts it — correctly, because a
- * contract is a document a person wrote and reads. But a prompt is DATA LEAVING THE
- * PROCESS, and this is the last line before it does. A contract that says "the endpoint
- * accepts AUTH_TOKEN=hunter2" is careless rather than exotic, and the cost of closing it is
- * one function call.
- *
- * Clipping happens AFTER redacting, never before: cutting first could split an assignment
- * so that the pattern no longer matches and the tail of a secret survives the cut.
- */
-function clip(value: string, cap = FIELD_CAP_CHARS): string {
-  const redacted = redactText(value);
-  return redacted.length <= cap ? redacted : `${redacted.slice(0, cap)}…`;
-}
-
-/**
  * The criteria this run would pay to have explained, in the run's own order.
  *
  * Exported because the CLI needs the same answer to decide whether invoking the provider is
@@ -287,18 +291,20 @@ export function explainableCriteria(result: RunResult): readonly DerivedCriterio
  * dump, and never a re-read. The switch is exhaustive over the closed union, so a seventh
  * evidence kind stops compiling here rather than silently producing a blank line.
  */
-function summarizeEvidence(evidence: Evidence): string {
+function summarizeEvidence(evidence: Evidence, redaction: RedactionOptions | undefined): string {
+  const field = (value: string): string => promptField(value, redaction);
+
   switch (evidence.kind) {
     case 'http':
-      return `http ${evidence.request.method} ${evidence.request.url} -> ${evidence.response.status}; body: ${clip(evidence.response.body.text)}`;
+      return `http ${evidence.request.method} ${evidence.request.url} -> ${evidence.response.status}; body: ${field(evidence.response.body.text)}`;
     case 'browser':
       return `browser ${evidence.url}${evidence.trace === undefined ? '' : ' (trace captured)'}`;
     case 'observation':
-      return `observation ${evidence.observationId}: ${clip(evidence.snapshot.text)}`;
+      return `observation ${evidence.observationId}: ${field(evidence.snapshot.text)}`;
     case 'command':
-      return `command ${evidence.commandId} exited ${evidence.exitCode ?? 'null'}; stdout: ${clip(evidence.stdout.text)}; stderr: ${clip(evidence.stderr.text)}`;
+      return `command ${evidence.commandId} exited ${evidence.exitCode ?? 'null'}; stdout: ${field(evidence.stdout.text)}; stderr: ${field(evidence.stderr.text)}`;
     case 'gate':
-      return `gate ${evidence.gateId} ${evidence.status} (exit ${evidence.exitCode ?? 'null'}); stdout: ${clip(evidence.stdout.text)}; stderr: ${clip(evidence.stderr.text)}`;
+      return `gate ${evidence.gateId} ${evidence.status} (exit ${evidence.exitCode ?? 'null'}); stdout: ${field(evidence.stdout.text)}; stderr: ${field(evidence.stderr.text)}`;
     case 'provider':
       // The rawResponse of an EARLIER provider call is deliberately not forwarded: it is
       // diagnostic text about a different invocation, and it is the one evidence member
@@ -318,7 +324,10 @@ function summarizeEvidence(evidence: Evidence): string {
 export function buildExplainPrompt(
   result: RunResult,
   criteria: readonly DerivedCriterionResult[],
+  redaction?: RedactionOptions,
 ): string {
+  const field = (value: string): string => promptField(value, redaction);
+
   const header: string[] = [
     'You are assisting a verification tool called SpecWitness.',
     '',
@@ -344,13 +353,13 @@ export function buildExplainPrompt(
       '',
       `criterionId: ${criterion.criterionId}`,
       `status: ${criterion.status} (severity ${criterion.severity})`,
-      `statement: ${clip(criterion.statement)}`,
+      `statement: ${field(criterion.statement)}`,
     );
     if (criterion.expected !== undefined) {
-      body.push(`expected: ${clip(criterion.expected)}`);
+      body.push(`expected: ${field(criterion.expected)}`);
     }
     if (criterion.actual !== undefined) {
-      body.push(`actual: ${clip(criterion.actual)}`);
+      body.push(`actual: ${field(criterion.actual)}`);
     }
     if (criterion.evidence !== undefined && criterion.evidence.length > 0) {
       body.push(
@@ -364,7 +373,7 @@ export function buildExplainPrompt(
     body.push('(none captured)');
   } else {
     for (const evidence of result.evidence) {
-      body.push(`- ${summarizeEvidence(evidence)}`);
+      body.push(`- ${summarizeEvidence(evidence, redaction)}`);
     }
   }
 
@@ -378,26 +387,25 @@ export function buildExplainPrompt(
 
   // THE CAP FALLS ON THE BODY ALONE, and never on the instructions.
   //
-  // The first version clipped the assembled prompt as one string, which bounds it correctly
-  // and cuts off the wrong end: the response-shape line and the valid-ids rule are the LAST
-  // thing in the document, so exactly the runs with the most to explain would have sent a
-  // provider a prompt that stops mid-sentence and never says what to reply with. Those runs
-  // would then burn the whole retry budget on schema rejections — the failure arriving
-  // precisely where the feature was most wanted. Found by review.
+  // Story 5.5's first version clipped the assembled prompt as one string, which bounds it
+  // correctly and cuts off the WRONG END: the response-shape line and the valid-ids rule
+  // are the LAST thing in the document, so exactly the runs with the most to explain would
+  // have sent a provider a prompt that stops mid-sentence and never says what to reply
+  // with. Those runs would then burn the whole retry budget on schema rejections — the
+  // failure arriving precisely where the feature was most wanted. Found by review.
   //
-  // `header` and `footer` are fixed literals of known length, so the body's budget is what
-  // is left over; `Math.max(0, …)` keeps it defined even if the framing ever grows past the
-  // cap, in which case the instructions survive and the evidence does not — the right way
-  // round. `clip` marks the cut with an ellipsis, so a truncated body reads as truncated.
-  // The empty string stands in for the body slot, so this measures the framing EXACTLY as
-  // it will appear — including both separator newlines the body sits between. Measuring
-  // `[...header, ...footer]` instead undercounts by one separator, and `clip` adds an
-  // ellipsis on top, which is how the first version of this overshot the cap by two
-  // characters. The `- 1` is that ellipsis.
-  const framing = [...header, '', ...footer].join('\n').length;
-  const budget = Math.max(0, PROMPT_CAP_CHARS - framing - 1);
-
-  return [...header, clip(body.join('\n'), budget), ...footer].join('\n');
+  // ⚠️ AND THEN STORY 5.6 DERIVED THE SAME DEFECT INDEPENDENTLY, hours later, in
+  // `adaptation-prompt.ts`. Two modules, one mistake, twice. That is why the budget
+  // arithmetic that used to live here now lives in `assemblePrompt`, which every builder in
+  // this layer shares: `header` is its `head`, `footer` is its `tail`, and neither can be
+  // reached by any input size. Story 6.8, retiring Epic 5 action item e5-A.
+  return assemblePrompt({
+    head: header,
+    body,
+    tail: footer,
+    capBytes: PROMPT_CAP_BYTES,
+    ...(redaction === undefined ? {} : { redaction }),
+  });
 }
 
 /**
@@ -409,8 +417,8 @@ export function buildExplainPrompt(
  * matters because, with no full copy on disk, a silently clipped hypothesis would read as
  * a complete thought that simply stopped making sense.
  */
-function redactAndBound(raw: string): string {
-  const bounded = boundedText(raw, { capBytes: EXPLANATION_CAP_BYTES });
+function redactAndBound(raw: string, redaction: RedactionOptions | undefined): string {
+  const bounded = boundedText(raw, { ...redaction, capBytes: EXPLANATION_CAP_BYTES });
   const marker = truncationMarker(bounded);
   return marker === '' ? bounded.text : `${bounded.text} ${marker}`;
 }
@@ -452,7 +460,7 @@ export async function explainRun(request: ExplainRequest): Promise<ExplainOutcom
 
   const agentRequest: AgentRequest<ExplainerResponse> = {
     role: EXPLAINER_ROLE,
-    prompt: buildExplainPrompt(request.result, criteria),
+    prompt: buildExplainPrompt(request.result, criteria, request.redaction),
     responseSchema: EXPLAINER_RESPONSE_SCHEMA,
     // `jsonSchema` deliberately unset: the gate derives it from `responseSchema` in exactly
     // one place, so two sites cannot disagree about it.
@@ -494,7 +502,7 @@ export async function explainRun(request: ExplainRequest): Promise<ExplainOutcom
         continue;
       }
       seen.add(entry.criterionId);
-      const explanation = redactAndBound(entry.hypothesis);
+      const explanation = redactAndBound(entry.hypothesis, request.redaction);
       if (explanation.trim() === '') {
         continue;
       }
