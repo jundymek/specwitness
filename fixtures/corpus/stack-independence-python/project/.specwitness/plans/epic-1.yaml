@@ -1,0 +1,122 @@
+# Hand-written Verification Plan for the corpus fixture
+# `stack-independence-python`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with
+# a plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, story 6.1 AC1's "no real providers"). This fixture makes ZERO
+# provider calls. The `contract.fingerprint` below must match the frozen
+# contract beside it; the runner does not patch it, so a contract re-freeze
+# means this line is re-copied by hand.
+#
+# ⚠️ NOTHING IN THIS FILE NAMES A LANGUAGE. The probes reference `serviceId`
+# and `commandId` -- keys the Project Config declares -- and the config is
+# where `python3` and `sh` appear. That separation IS FR-4, and this plan is
+# what it looks like when the target is not a Node project: byte for byte the
+# shape a Node fixture's plan would have.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 5d9df0a5acae02a871b29e924cab9aedb3cfd5f34de45851900ce1c4ee3a0415
+  data:
+    seed: corpusseed000002
+    bindings: []
+  criteria:
+    # ── the SERVICE surface: a non-Node long-running child, started and awaited
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: items-listing
+          surface: http
+          mechanics:
+            serviceId: inventory
+            method: GET
+            path: /items
+          assertions:
+            - description: the items endpoint answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+            - description: it reports the two seeded stock items
+              target: { source: jsonPath, path: count }
+              comparison: equals
+              expected: "2"
+            - description: the first seeded item is the widget
+              # QUOTED: inside a YAML flow mapping an unquoted `[` opens a flow
+              # sequence, so `items[0].id` is a syntax error rather than a path.
+              target: { source: jsonPath, path: "items[0].id" }
+              comparison: equals
+              expected: widget
+
+    # ── the SHELL surface: the target project's own packaged command
+    - criterionId: E1-02
+      disposition: automated
+      probes:
+        - id: version-probe
+          surface: shell
+          mechanics:
+            commandId: version
+            args: ["--version"]
+            argumentAllowlist: ["--version"]
+          assertions:
+            - description: the command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: it prints its own name and version
+              target: { source: stdout }
+              comparison: contains
+              expected: inventory-service 2.1.0
+
+    # ── the OBSERVATION surface: a before/after invariant over persisted state.
+    #
+    # `reservations-delta` WRAPS `reserve-item`. The observation executor takes
+    # the before snapshot, runs the wrapped probe, then takes the after
+    # snapshot -- and `src/pipeline/stages/probes.ts:967` states that a probe
+    # named by another probe's `mechanics.around` is not run by the main loop,
+    # so the reservation happens EXACTLY ONCE and the delta is deterministic.
+    #
+    # This is the pairing brief section 35 describes: the http probe alone
+    # would see 201 and be satisfied, and it is the persisted-state delta that
+    # says whether anything actually happened.
+    - criterionId: E1-03
+      disposition: automated
+      probes:
+        - id: reserve-item
+          surface: http
+          mechanics:
+            serviceId: inventory
+            method: POST
+            path: /reserve
+          assertions:
+            - description: the reservation is accepted
+              target: { source: status }
+              comparison: equals
+              expected: "201"
+            - description: the widget is the item reserved
+              target: { source: jsonPath, path: reserved }
+              comparison: equals
+              expected: widget
+        - id: reservations-delta
+          surface: observation
+          mechanics:
+            commandId: reservations
+            args: []
+            around: reserve-item
+          assertions:
+            - description: no reservations are recorded before the request
+              target: { source: jsonPath, path: reservedCount, phase: before }
+              comparison: equals
+              expected: "0"
+            - description: exactly one reservation is persisted by the request
+              target: { source: jsonPath, path: reservedCount, phase: delta }
+              comparison: equals
+              expected: "1"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
