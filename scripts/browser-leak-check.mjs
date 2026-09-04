@@ -99,7 +99,7 @@ function usage(message) {
     `${message}\n` +
       'usage: node scripts/browser-leak-check.mjs [--browsers-path <dir>]... ' +
       '[--ps-file <path>] [--baseline <path> | --write-baseline <path>] ' +
-      '[--write-survivors <path>] [--reap] [--browsers-only] ' +
+      '[--write-survivors <path>] [--reap] [--browsers-only] [--owned-pgid <n>]... ' +
       '[--wait-seconds <n>] [--label <text>]\n',
   );
   process.exit(64);
@@ -114,6 +114,7 @@ let writeBaselineFile;
 let writeSurvivorsFile;
 let reap = false;
 let browsersOnly = false;
+const ownedPgids = [];
 let waitSeconds = 0;
 let label = 'after the run';
 
@@ -155,6 +156,12 @@ for (let index = 0; index < argv.length; index += 1) {
     // launch predicate in browser-cancelled-run-check.sh; see PLAYWRIGHT_RUNNER_PATTERN.
     case '--browsers-only':
       browsersOnly = true;
+      break;
+    // The tighter ownership bound, for a caller that KNOWS which groups it spawned.
+    case '--owned-pgid':
+      if (value === undefined) usage(`ERROR: ${flag} needs a value`);
+      ownedPgids.push(Number(value));
+      index += 1;
       break;
     case '--wait-seconds':
       if (value === undefined) usage(`ERROR: ${flag} needs a value`);
@@ -263,11 +270,22 @@ function isSelf(row) {
   return row.pid === process.pid || row.ppid === process.pid || row.args.includes(SELF);
 }
 
+/**
+ * ⚠️ OWNERSHIP, WHICH IS A DIFFERENT AND MUCH STRONGER CLAIM THAN "LOOKS LIKE A BROWSER".
+ *
+ * A process running a binary out of the browsers registry THIS job was given is this job's.
+ * Everything the broad patterns catch — the operator's Chrome, an Electron app — is suspicious
+ * enough to REPORT and never sufficient to SIGNAL. See `reapSurvivors`.
+ */
+function isOwned(row) {
+  return browsersPaths.some((path) => path !== '' && row.args.includes(path));
+}
+
 function isBrowser(row) {
   if (isSelf(row)) {
     return false;
   }
-  if (browsersPaths.some((path) => path !== '' && row.args.includes(path))) {
+  if (isOwned(row)) {
     return true;
   }
   if (BROWSER_PATTERNS.some((pattern) => pattern.test(row.args))) {
@@ -521,6 +539,21 @@ function reapSurvivors() {
 
   const lines = [`  REAPING ${groups.length} process group(s)${dryRun ? ' (dry run: the listing is a fixture, nothing is signalled)' : ''}`];
 
+  // ⚠️ ONLY GROUPS THIS RUN OWNS. Raised as a P1 on this branch, and it is the destructive
+  // failure mode of the whole script: the patterns match any Chrome or Electron process ON
+  // PURPOSE, so run locally, a browser window the operator opened during the wait is absent from
+  // the baseline and would have had its ENTIRE GROUP signalled. An early local run of the
+  // cancelled-run check really did report a Vivaldi renderer that appeared during its wait; with
+  // reaping armed, this script would have killed the author's browser.
+  //
+  // A group is owned when it contains at least one process running out of the browsers registry
+  // this job was given — the whole group then goes, because a browser is a tree and its helpers
+  // do not all name the registry themselves. `--owned-pgid` narrows it further for a caller that
+  // knows exactly which groups it spawned.
+  const ownedGroups = new Set(
+    survivors.filter((row) => isOwned(row)).map((row) => row.pgid),
+  );
+
   const signallable = [];
   for (const pgid of groups) {
     if (!Number.isInteger(pgid) || pgid <= 1) {
@@ -529,6 +562,20 @@ function reapSurvivors() {
     }
     if (pgid === own) {
       lines.push(`    refusing to signal process group ${pgid}: it is this process's own group`);
+      continue;
+    }
+    if (!ownedGroups.has(pgid)) {
+      lines.push(
+        `    NOT reaped, reported only: process group ${pgid} is not owned by this run ` +
+          '(no member came from the browsers registry given)',
+      );
+      continue;
+    }
+    if (ownedPgids.length > 0 && !ownedPgids.includes(pgid)) {
+      lines.push(
+        `    NOT reaped, reported only: process group ${pgid} is not owned by this run ` +
+          '(not in the caller\'s --owned-pgid list)',
+      );
       continue;
     }
     lines.push(`    would signal process group ${pgid}`);

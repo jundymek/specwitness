@@ -613,6 +613,111 @@ describe('the browser leak check', () => {
     expect(stdout).not.toContain('would signal process group');
   });
 
+  /**
+   * ⚠️ **DETECTION IS BROAD; REAPING IS NARROW. THEY ARE NOT THE SAME QUESTION, AND CONFLATING
+   * THEM MADE THIS SCRIPT DESTRUCTIVE.** Raised as a P1 by the Codex review of this branch.
+   *
+   * The patterns match any Chrome or Electron process on purpose, because a browser helper that
+   * outlives its parent is the thing being hunted. But "suspicious enough to REPORT" is a much
+   * weaker claim than "mine, so safe to SIGKILL its whole process group". Run locally, a browser
+   * window the operator opened during the wait matches the patterns, is absent from the
+   * baseline, and would have had its entire group signalled.
+   *
+   * That is not hypothetical: an early local run of the cancelled-run check reported a Vivaldi
+   * renderer that appeared during its 120-second wait. With `--reap` armed, this script would
+   * have killed the author's browser.
+   *
+   * Ownership is the REGISTRY: a process running a binary out of the browsers path this job was
+   * given is this job's. Everything else is reported and left alone.
+   */
+  it('reports a browser it does not own, and refuses to reap it', async () => {
+    const psFile = await listing(
+      '   8100    8000    8100       00:05 /Applications/Vivaldi.app/Contents/MacOS/Vivaldi Helper --type=renderer',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    // Still a finding: the report is unchanged and the exit code still says survivors exist.
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('8100');
+    // But never signalled.
+    expect(stdout).not.toContain('would signal process group 8100');
+    expect(stdout).toContain('not owned by this run');
+  });
+
+  it('reaps a browser that came out of the registry it was given', async () => {
+    const psFile = await listing(
+      `   8200    8000    8200       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome --type=renderer`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('would signal process group 8200');
+  });
+
+  /**
+   * A group containing at least one registry-owned process is this run's tree, so the whole
+   * group goes — helpers whose own argv does not name the registry included. That is why the
+   * unit is the group and not the pid.
+   */
+  it('reaps the whole group when any member came from the registry', async () => {
+    const psFile = await listing(
+      `   8300    8000    8300       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+      '   8301    8300    8300       00:05 /opt/hostedtoolcache/chrome_crashpad_handler --monitor-self',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('would signal process group 8300');
+    expect(stdout.match(/would signal process group/g)).toHaveLength(1);
+  });
+
+  /**
+   * `--owned-pgid` is the tighter bound the cancelled-run check can give, because it KNOWS which
+   * groups it spared. Registry ownership alone would still be safe; this makes it exact.
+   */
+  it('honours an explicit owned-group list when the caller knows one', async () => {
+    const psFile = await listing(
+      `   8400    8000    8400       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+      `   8500    8000    8500       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-pgid',
+      '8400',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('would signal process group 8400');
+    expect(stdout).not.toContain('would signal process group 8500');
+    expect(stdout).toContain('not owned by this run');
+  });
+
   it('reaps nothing, and says so, when nothing survived', async () => {
     const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
 

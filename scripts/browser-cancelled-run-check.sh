@@ -252,11 +252,20 @@ remaining=$(( WAIT_SECONDS - waited ))
 [ ${remaining} -lt 0 ] && remaining=0
 echo "    ${waited}s of the ${WAIT_SECONDS}s budget already spent; ${remaining}s left for this scan"
 
+# The tighter ownership bound: this check KNOWS which groups it spared, so it names them. The
+# scanner already refuses to signal anything that did not come out of the browsers registry, but
+# an exact list beats a good heuristic when the caller has one - and this script is the one
+# documented as runnable locally, where an unowned kill would hit the operator own browser.
+owned_args=""
+for entry in ${spared}; do
+  owned_args="${owned_args} --owned-pgid ${entry#*:}"
+done
+
 node "${leak_check_args[@]}" \
   --baseline "${baseline}" \
   --wait-seconds "${remaining}" \
   --write-survivors "${survivors}" \
-  --reap \
+  --reap ${owned_args} \
   --label "after a run killed with SIGKILL (no afterEach ran)"
 result=$?
 
