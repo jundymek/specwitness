@@ -1,0 +1,239 @@
+/**
+ * Story 6.8 — the shared prompt-assembly helper. Retires Epic 5 action item e5-A.
+ *
+ * THE FIRST TEST IN THIS FILE IS THE REASON THE STORY EXISTS, and it was written and
+ * watched fail before `src/authoring/prompt-assembly.ts` had a single line in it.
+ *
+ * Epic 5 retro §2 observation 3: story 5.5 (round 2) and story 5.6 (round 13) EACH found,
+ * independently and hours apart, that bounding a prompt cut off its tail — where the
+ * response shape and the valid-ids rule live — so the runs with the most evidence to send
+ * were exactly the runs whose prompt never said what to reply with. Neither fix was
+ * applied to the other's module. This file is the guard that makes that defect
+ * unrepresentable for every builder in the layer at once.
+ *
+ * The security assertions here follow Epic 3 retro §7 without exception: a seeded
+ * credential is asserted **ABSENT**, never that `[REDACTED]` is **present**. Output
+ * carrying the marker with the secret still beside it passes the weaker check.
+ *
+ * `SEEDED_SECRET` is the repository's one fake credential, reused rather than reinvented:
+ * a second, realistic-looking fake in a test file is the shape a real leak hides in.
+ */
+
+import { describe, expect, it } from 'vitest';
+
+import {
+  PROMPT_FIELD_CAP_BYTES,
+  assemblePrompt,
+  promptField,
+} from '../../../src/authoring/prompt-assembly.js';
+import { SEEDED_SECRET } from '../../fixtures/run-result.js';
+
+const encoder = new TextEncoder();
+const bytes = (text: string): number => encoder.encode(text).length;
+
+const HEAD = [
+  'You are assisting a verification tool.',
+  '',
+  'Do NOT state whether a criterion passes.',
+  '',
+  '--- THE EVIDENCE ---',
+];
+
+const TAIL = [
+  '',
+  '--- RESPOND WITH ONLY THIS JSON ---',
+  '{"explanations":[{"criterionId":"<one of the ids above>","hypothesis":"<your text>"}]}',
+  '',
+  'Use only criterionIds listed above; any other id is discarded.',
+];
+
+describe('assemblePrompt — the instruction tail (AC1, the whole point of story 6.8)', () => {
+  it('keeps the fixed tail WHOLE when the untrusted middle is bounded away', () => {
+    // THE PATHOLOGICAL CASE. The body alone is an order of magnitude past the cap, so a
+    // naive `assembled.slice(0, cap)` would return a document whose last line is a
+    // half-written evidence summary and which never reaches the word "RESPOND".
+    const cap = 4_000;
+    const body = Array.from(
+      { length: 200 },
+      (_unused, index) => `evidence ${index}: ${'x'.repeat(500)}`,
+    );
+
+    const prompt = assemblePrompt({ head: HEAD, body, tail: TAIL, capBytes: cap });
+
+    // Every tail line survives, byte for byte, in order.
+    for (const line of TAIL) {
+      expect(prompt).toContain(line);
+    }
+    expect(prompt.endsWith(TAIL.join('\n'))).toBe(true);
+
+    // And the head does too — bounding falls on the middle, not on either end.
+    for (const line of HEAD) {
+      expect(prompt).toContain(line);
+    }
+    expect(prompt.startsWith(HEAD.join('\n'))).toBe(true);
+  });
+
+  it('really did truncate, so the assertion above is not passing vacuously', () => {
+    const cap = 4_000;
+    const body = Array.from(
+      { length: 200 },
+      (_unused, index) => `evidence ${index}: ${'x'.repeat(500)}`,
+    );
+
+    const prompt = assemblePrompt({ head: HEAD, body, tail: TAIL, capBytes: cap });
+
+    expect(bytes(prompt)).toBeLessThanOrEqual(cap);
+    // The bound was actually reached rather than the input happening to fit.
+    expect(bytes(prompt)).toBeGreaterThan(cap - 500);
+    // `truncationMarker`'s format, so a truncated prompt READS as truncated to whoever
+    // (or whatever) receives it. Not a bare ellipsis of this module's own invention.
+    expect(prompt).toMatch(/… truncated: \d+ of \d+ bytes shown/);
+  });
+
+  it('drops the body entirely rather than any instruction when the framing alone exceeds the cap', () => {
+    // The right way round, and `explain.ts:503-506` says why: if something has to go, the
+    // instructions survive and the evidence does not. A prompt with no evidence is a
+    // useless question; a prompt with no instructions is an unanswerable one that also
+    // burns the whole retry budget on schema rejections.
+    const prompt = assemblePrompt({
+      head: HEAD,
+      body: ['some evidence that cannot fit'],
+      tail: TAIL,
+      capBytes: 10,
+    });
+
+    expect(prompt).toContain('--- RESPOND WITH ONLY THIS JSON ---');
+    expect(prompt).not.toContain('some evidence that cannot fit');
+  });
+
+  it('respects the cap for multi-byte input without splitting a character', () => {
+    // `boundedText` walks back off a continuation byte; this asserts the composed helper
+    // inherits that rather than re-deriving a cut of its own. A U+FFFD in a prompt is a
+    // character nobody wrote.
+    const cap = 2_000;
+    const prompt = assemblePrompt({
+      head: HEAD,
+      body: ['日本語テキスト'.repeat(2_000)],
+      tail: TAIL,
+      capBytes: cap,
+    });
+
+    expect(bytes(prompt)).toBeLessThanOrEqual(cap);
+    expect(prompt).not.toContain('�');
+    expect(prompt.endsWith(TAIL.join('\n'))).toBe(true);
+  });
+
+  it('leaves a body that fits completely alone, with no marker', () => {
+    const prompt = assemblePrompt({
+      head: HEAD,
+      body: ['criterionId: E7-01', 'statement: the endpoint responds 200'],
+      tail: TAIL,
+      capBytes: 24_000,
+    });
+
+    expect(prompt).toContain('statement: the endpoint responds 200');
+    expect(prompt).not.toContain('truncated:');
+  });
+
+  it('accepts an absent tail — a builder whose instructions all precede its content', () => {
+    // `buildContractPrompt` and `buildPlanPrompt` are shaped this way: the instructions are
+    // the HEAD and the variable content is last, so the Epic 5 tail defect never applied to
+    // them. The helper supports that honestly rather than making them invent a tail.
+    const prompt = assemblePrompt({ head: HEAD, body: ['the epic'], capBytes: 24_000 });
+
+    expect(prompt).toContain('the epic');
+    expect(prompt.startsWith(HEAD.join('\n'))).toBe(true);
+  });
+});
+
+describe('assemblePrompt — redaction (AC1, AC2)', () => {
+  it('redacts the body even when the builder did NOT call promptField', () => {
+    // THIS IS THE ONE STRUCTURAL GUARANTEE STORY 6.8 CLAIMS, and the reason redaction lives
+    // in the assembly step rather than only in a per-field helper a builder must remember.
+    // A future provider-facing module that forgets `promptField` still cannot put an
+    // unredacted assignment into a prompt through this function.
+    const prompt = assemblePrompt({
+      head: HEAD,
+      body: [`statement: the API accepts AUTH_TOKEN=${SEEDED_SECRET}`],
+      tail: TAIL,
+      capBytes: 24_000,
+    });
+
+    expect(prompt).not.toContain(SEEDED_SECRET);
+  });
+
+  it('redacts a sensitive header line in the body', () => {
+    const prompt = assemblePrompt({
+      head: HEAD,
+      body: [`actual: Authorization: Bearer ${SEEDED_SECRET}`],
+      tail: TAIL,
+      capBytes: 24_000,
+    });
+
+    expect(prompt).not.toContain(SEEDED_SECRET);
+  });
+
+  it('applies config-declared extra patterns when the run supplies them', () => {
+    // AD-10's "config-declared extra patterns". Nothing at the CLI edge builds a
+    // `RedactionOptions` today (`src/cli/commands/verify.ts:447-465` passes no `redaction`
+    // key), so this proves the seam works rather than that it is wired.
+    const prompt = assemblePrompt({
+      head: HEAD,
+      body: ['actual: internal-codename-ORCHID'],
+      tail: TAIL,
+      capBytes: 24_000,
+      redaction: { extraPatterns: [/ORCHID/g] },
+    });
+
+    expect(prompt).not.toContain('ORCHID');
+  });
+
+  it("never redacts the head or the tail, which are the module's own literals", () => {
+    // A fixed instruction line is authored in this repository, not captured from anything.
+    // Running the redactor over it could only damage it — and an instruction that reads
+    // `api_key: [REDACTED]` is an instruction the model cannot follow.
+    const prompt = assemblePrompt({
+      head: ['Return an api_key: "<the key you were given>" field.'],
+      body: ['nothing sensitive'],
+      capBytes: 24_000,
+    });
+
+    expect(prompt).toContain('Return an api_key: "<the key you were given>" field.');
+  });
+
+  it('redacts BEFORE it bounds, so a cut cannot leave the tail of a secret behind', () => {
+    // The ordering `boundedText` already documents (`evidence.ts:653-659`), asserted
+    // through the composed helper. Cutting first could split an assignment so the pattern
+    // no longer matches, and the surviving half of a credential is still a credential.
+    const prompt = assemblePrompt({
+      head: [],
+      body: [`${'padding '.repeat(40)}AUTH_TOKEN=${SEEDED_SECRET}`],
+      capBytes: 400,
+    });
+
+    expect(prompt).not.toContain(SEEDED_SECRET);
+    expect(prompt).not.toContain(SEEDED_SECRET.slice(0, 12));
+  });
+});
+
+describe('promptField — bounding one untrusted value', () => {
+  it('redacts and caps, in that order', () => {
+    expect(promptField(`API_KEY=${SEEDED_SECRET}`)).not.toContain(SEEDED_SECRET);
+  });
+
+  it('caps at the shared field cap by default', () => {
+    expect(bytes(promptField('x'.repeat(5_000)))).toBeLessThanOrEqual(PROMPT_FIELD_CAP_BYTES);
+  });
+
+  it('takes a caller-supplied cap', () => {
+    expect(bytes(promptField('x'.repeat(5_000), { capBytes: 50 }))).toBeLessThanOrEqual(50);
+  });
+
+  it('leaves a short value untouched, with no marker', () => {
+    expect(promptField('the endpoint responds 200')).toBe('the endpoint responds 200');
+  });
+
+  it('marks a value it cut, so a clipped field reads as clipped', () => {
+    expect(promptField('x'.repeat(5_000))).toMatch(/… truncated: \d+ of \d+ bytes shown/);
+  });
+});
