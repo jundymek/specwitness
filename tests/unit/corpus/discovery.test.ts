@@ -274,9 +274,25 @@ describe('the hermeticity scanners over checked-in fixture text', () => {
     ).toHaveLength(1);
   });
 
+  it('reports a PATH-QUALIFIED invocation', async () => {
+    // The bypass the first version of the name pattern opened while closing a false
+    // positive: excluding a preceding `/` made `commands/curl-parser.js` safe and
+    // `/usr/bin/curl` invisible at the same time. A narrowing that removes a true positive
+    // along with a false one is the worst kind, because the guard still looks like it works.
+    expect(
+      await networkCapableCommands(await project('run: /usr/bin/curl https://example.com\n')),
+    ).toHaveLength(1);
+    expect(
+      await networkCapableCommands(await project('run: ./wget https://example.com\n')),
+    ).toHaveLength(1);
+  });
+
   it('does not report a filename that merely contains the letters', async () => {
     expect(
       await networkCapableCommands(await project('run: node commands/curl-parser.js\n')),
+    ).toEqual([]);
+    expect(
+      await networkCapableCommands(await project('run: node commands/curl.js\n')),
     ).toEqual([]);
   });
 

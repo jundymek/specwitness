@@ -1084,13 +1084,23 @@ export async function machineStateReferences(projectDirectory: string): Promise<
 /**
  * A command name as an INVOCATION rather than as part of a longer name.
  *
- * `\b` is not enough, and the difference is a false positive that would teach the next
- * author to distrust the guard: `\bcurl\b` matches inside `commands/curl-parser.js`,
- * because `/` and `-` are both word boundaries. The lookarounds below refuse a match that is
- * preceded by a path or name character, or followed by one — so `curl -sSf` is caught and
- * `commands/curl-parser.js` is not.
+ * `\b` is not enough: `\bcurl\b` matches inside `commands/curl-parser.js`, because `/` and
+ * `-` are both word boundaries, and a false positive teaches the next author to distrust the
+ * guard.
+ *
+ * ⚠️ **BUT `/` MUST BE ALLOWED BEFORE THE NAME, AND THE FIRST VERSION OF THIS EXCLUDED IT.**
+ * Refusing a preceding `/` fixed `curl-parser.js` and simultaneously opened
+ * `/usr/bin/curl https://example.com` and `./curl` — an ordinary, path-qualified invocation
+ * walking straight through the guard. A narrowing made to remove a false positive that
+ * removes a true positive with it is the worst kind, because the guard still looks like it
+ * works.
+ *
+ * So the rule is about SEGMENT boundaries, not path boundaries: the name may be preceded by
+ * a path separator or nothing, and may not be adjacent to a word character, a `-` or a `.`
+ * on either side. `/usr/bin/curl x` and `./curl x` are caught; `commands/curl-parser.js` and
+ * `commands/curl.js` are not.
  */
-const invocation = (name: string): RegExp => new RegExp(`(?<![\\w./-])${name}(?![\\w-])`);
+const invocation = (name: string): RegExp => new RegExp(`(?<![\\w.-])${name}(?![\\w.-])`);
 
 const NETWORK_CAPABLE_COMMANDS = [
   invocation('curl'),
