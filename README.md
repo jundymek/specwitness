@@ -232,9 +232,45 @@ directory. Pass a run id for a specific run, or an epic id for that epic's lates
 | `verify <epic>` | Run the verification. **The main event** — flags below. |
 | `report <run-id\|epic>` | Re-render a stored run. Re-executes nothing. |
 | `clean [--all]` | Reap process groups and worktrees left behind by crashed runs. Never deletes results. |
+| `scorecard add\|summary` | Record human attribution of findings, and report the metrics computed from them. **Lands with story 6.6 in this epic — see the note below.** |
 
 Run `specwitness <command> --help` for the authoritative flag list — the binary is always
 the truth.
+
+### `scorecard` — measuring whether the tool is worth running
+
+SpecWitness makes a claim: that it finds *real* defects that earlier gates missed. The
+scorecard is how you check that claim on your own data rather than taking it on faith.
+
+Every completed run appends a record to a local `.specwitness/scorecard.jsonl`. After a
+run, a human attributes each finding — **only a human**: the attribution is never inferred,
+never defaulted, and omitting it is a usage error rather than a guess.
+
+```bash
+# Attribute one finding. --attribution is required and takes
+# unique | duplicate | false-positive
+specwitness scorecard add <run-id> --criterion E12-03 --attribution unique
+
+# Report the metrics
+specwitness scorecard summary [--json]
+```
+
+`summary` reports the north-star number — **unique real defects found after earlier gates
+passed** — plus the false-positive, NEEDS_HUMAN, infra-error and flaky rates, median run
+duration, AI-free run share, and counts of skipped and unattributed records. Every rate
+shows its denominator, and a rate whose denominator is zero is `null`, never `0%`.
+
+Attributions are append-only, and re-attributing is allowed — people change their minds, so
+a correction is a later line and the last record wins. `scorecard` adjudicates nothing: it
+can exit `0`, `64` or `3`, and never `1` or `2`.
+
+> **⚠️ Status.** These two commands are story 6.6 of this epic, developed in parallel with
+> this README and **not yet merged when this section was written**. The surface above is
+> the authoritative one its author published at intent-sync, and it is documented here so
+> the epic merges with complete documentation rather than a gap. **It is the only section
+> of this README not verified against a built binary.** If `specwitness scorecard --help`
+> disagrees with the text above, the binary is right and this is a documentation bug —
+> please report it.
 
 ### `verify` flags
 

@@ -206,6 +206,14 @@ A full sequence:
    criterion, feeding each agent the criterion statement, expected/actual and the evidence
    paths from `result.json` — then rerun step 4 with `--no-ai`, since the plan is already
    compiled.
+6. **After merging, measure.** Attribute each finding and read the metrics back:
+   ```bash
+   specwitness scorecard add <run-id> --criterion E12-03 --attribution unique
+   specwitness scorecard summary --json
+   ```
+   This is the step that tells you whether the gate is earning its place. Attribution is a
+   human judgement and the CLI will not supply one for you — `--attribution` is required.
+   *(`scorecard` ships with story 6.6 of this epic; see the note in the README.)*
 
 **Verify the survey before relying on it.** PRD addendum §A was written on 2026-08-30 and
 describes one specific harness. Its §B has already needed a correction. The invocation
@@ -356,3 +364,7 @@ Stated explicitly rather than described plausibly:
   registry round trip has not happened.
 - **The current state of the first-client harness.** PRD addendum §A is a survey from
   2026-08-30; check your own supervisor prompt for the §8a slot.
+- **The `scorecard` commands.** They ship with story 6.6 of this epic and had not merged
+  when this guide was written, so unlike everything else here their surface comes from
+  their author's published specification rather than from a `--help` I ran. Everything
+  else in this document was executed.
