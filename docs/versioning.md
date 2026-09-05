@@ -96,19 +96,35 @@ claim.
 So the sequence for any release with meaningful change is:
 
 ```bash
-# 1. Publish the candidate under `next` only. `latest` does not move.
+# 1. Set the candidate version to a prerelease, then publish it under `next` only.
+#    `latest` does not move.
+#    package.json version: 0.2.0-next.1
 npm publish --tag next
 
 # 2. Install it deliberately and use it to gate a real epic.
 npm install -D specwitness@next
 
-# 3. Only once that has happened, promote the exact version.
-npm dist-tag add specwitness@0.2.0 latest
+# 3. Only once that has happened, promote THE EXACT VERSION THAT WAS PUBLISHED.
+npm dist-tag add specwitness@0.2.0-next.1 latest
 ```
+
+> **⚠️ Step 3 names `0.2.0-next.1`, not `0.2.0`, and that is not a typo.** `0.2.0` is never
+> published by this sequence — only the candidate is — so
+> `npm dist-tag add specwitness@0.2.0 latest` would fail against a version that does not
+> exist in the registry. An earlier draft of this document said `0.2.0` and was internally
+> inconsistent with its own step 1; Codex review caught it as a P1.
 
 **Promotion moves a tag; it never republishes.** The bytes that were validated under `next`
 are the bytes that become `latest` — republishing would make the promoted artifact a
 different one from the tested artifact.
+
+**The price of that guarantee, stated rather than glossed:** `latest` then carries a
+version string containing `-next.1` until the following release. That reads oddly, and it
+is the honest cost of refusing to republish. The alternative — publishing a fresh `0.2.0`
+once validation passes — ships a tarball nobody gated, differing from the tested one by at
+least the version field, which is exactly what this rule exists to prevent. **A future
+maintainer who prefers a clean `latest` string is trading away the never-republish
+guarantee; that trade belongs in this document, not in someone's terminal history.**
 
 ### Pre-release version strings
 
@@ -134,6 +150,17 @@ which no rule here says how to publish, fails.
 is not set at all until the tool has gated a real epic (Epic 7's dogfooding run). A package
 with no `latest` tag makes `npm install specwitness` fail loudly rather than hand someone
 an unvalidated build — which is the correct answer at that moment.
+
+**It publishes as plain `0.1.0`, with no `-next.N` identifier, and that is deliberate
+rather than an exception to the rule above.** The prerelease identifier exists to stop a
+caret or `latest` resolution pulling an ungated candidate. On the very first publish
+neither risk exists: there is no `latest` tag to resolve to, and no earlier version for a
+range to climb from. So the identifier would buy nothing and would leave `latest` carrying
+`-next.1` permanently once promoted. Promotion is then the plain
+`npm dist-tag add specwitness@0.1.0 latest`.
+
+**From the second release onward the identifier is required**, because by then a `latest`
+exists and a range can move.
 
 ---
 
@@ -162,11 +189,15 @@ an owner action.
    binary, asserts the tarball contains `dist/` and `templates/` only, and runs
    `npm publish --dry-run`.
 3. Confirm CI is green on **both** `ubuntu-latest` and `macos-latest`.
-4. Bump the version; write release notes, with a `BREAKING:` section if anything broke.
+4. Bump the version — **`X.Y.Z-next.N` from the second release onward**, plain `X.Y.Z` for
+   the very first publish (see above). Write release notes, with a `BREAKING:` section if
+   anything broke.
 5. Tag the commit.
 6. `npm publish --tag next`.
 7. Install from `next` and gate a real epic with it.
-8. Only then: `npm dist-tag add specwitness@<version> latest`.
+8. Only then: `npm dist-tag add specwitness@<the exact version you published in step 6> latest`.
+   **Not a tidied-up version string** — the promoted version must be one that exists in the
+   registry, and the whole point is that it is the artifact step 7 validated.
 
 **Step 7 is not a formality and is not skippable.** It is the step that makes the version
 number mean something.
