@@ -129,6 +129,10 @@ Fixtures that exist only to prove the RUNNER works carry a **non-numeric**
     "assertion": "exact",
     "statuses": { "E1-01": "pass", "E1-02": "pass" }
   },
+  "evidence": {
+    "assertion": "exact",
+    "kinds": ["gate", "command", "observation"]
+  },
   "stderrContains": [],
   "stderrAbsent": []
 }
@@ -145,6 +149,7 @@ Fixtures that exist only to prove the RUNNER works carry a **non-numeric**
 | `outcome` | yes | either `{"verdict": …, "gateFailed"?: …}` or `{"infraError": …}` — never both (AD-6). Compared as a whole object, so an unexpected `gateFailed` fails the fixture. |
 | `criteria.assertion` | yes | `"exact"` or `"subset"`. **No default, on purpose** — see below. |
 | `criteria.statuses` | yes | criterion id → `pass` / `fail` / `needs_human` / `skipped` / `error`. |
+| `evidence` | no | the **kinds** of evidence the run produced. Optional and additive — omitting it asserts nothing about evidence, which is what every fixture merged before story 6.10 means. See below. |
 | `stderrContains` | no | substrings that must appear in **normalised** stderr. |
 | `stderrAbsent` | no | substrings that must not. Assert a secret is ABSENT; never assert that `[REDACTED]` is present (Epic 3 retro §7). |
 
@@ -165,6 +170,56 @@ which it means:
   about the rest.*
 
 Both are legitimate. Choosing is not optional.
+
+### `evidence` — pinning what the run OBSERVED
+
+The rest of this file pins what a run **concluded**: its verdict, its exit code, its
+criterion statuses. `evidence` pins what it **observed**, and those are different
+failures. A change that leaves every verdict correct while a verification surface
+quietly stops producing evidence is invisible to a fixture that does not pin kinds —
+the same *green for nothing* the Epic 4 retrospective found at the criterion level and
+story 6.9 found at the CI level, one floor down.
+
+```jsonc
+"evidence": {
+  "assertion": "exact",                          // required whenever `evidence` is present
+  "kinds": ["gate", "command", "observation"]    // a SET — order is not a fact
+}
+```
+
+- **The six kinds** are `http`, `browser`, `observation`, `command`, `gate` and
+  `provider` — the closed union in `src/domain/evidence.ts`. A misspelled kind is
+  refused **at load**, naming the field, rather than becoming a kind that can never
+  match.
+- **The surface chooses the kind**, which is the thing to know before writing one:
+  a `gates:` entry in `config.yaml` produces `gate`; a plan probe with
+  `surface: observation` produces `observation`; `surface: shell` produces `command`;
+  `surface: http` produces `http`. A fixture that declares no service can never produce
+  `http` or `browser`, and **no** corpus fixture can produce `provider`, because every
+  fixture ships a precompiled plan and no provider is ever in scope (FR-18).
+- **`assertion` is required**, for the same reason `criteria.assertion` is: a defaulted
+  discriminator lets a fixture be read as making the stronger claim when its author meant
+  the weaker one.
+- **`exact` vs `subset`** work exactly as they do for criteria. `exact` also fails on a
+  kind the run produced and the fixture does not name — which is the property the
+  `stderrContains` route below cannot express.
+- **Empty lists.** `"exact"` with `"kinds": []` is a real claim — *this run produced no
+  evidence at all* — and can go red. `"subset"` with `"kinds": []` is **refused at load**,
+  because it is satisfied by every run that has ever happened, including one where a
+  surface silently stopped observing. That is the vacuous pass this key exists to catch,
+  so the format will not let you write it.
+- **Kinds only, never contents.** URLs, request bodies, command output and provider
+  payloads are not assertable here and the failure message never quotes them. A kind is
+  one of six known words; everything else in an evidence record has to be assumed
+  sensitive.
+
+**This strengthens the `stderrContains` route, it does not replace it.** Story 6.2's
+fixtures pin the rendered Evidence lines (`"  gate tests (pass, exit 0): …"`), which is
+real mechanical pinning and was seen red. Two things it cannot do: it is a
+presence/subset check, so a run producing an *additional* kind still passes; and it
+asserts what the terminal report **printed**, not what `document.evidence` **contains**,
+so a renderer change moves it off its target. `evidence` compares the structured
+document. Fixtures may carry both, and the merged ones keep theirs.
 
 ### What is deliberately NOT assertable
 

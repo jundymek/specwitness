@@ -130,3 +130,100 @@ describe('loadExpectedOutcome', () => {
     ).rejects.toThrow(ExpectedOutcomeError);
   });
 });
+
+/* ── story 6.10: the optional `evidence` expectation ────────────────────────────────── */
+
+describe('the optional `evidence` key', () => {
+  it('is OPTIONAL: an expectation omitting it parses and asserts nothing about evidence', () => {
+    // AC2, and the whole reason this key could land at all. Every fixture merged before this
+    // story omits `evidence`, and none of them may change meaning by virtue of the key
+    // existing. A format change that silently re-reads files nobody re-opened is exactly what
+    // `EXPECTED_VERSION` exists to prevent (see its doc comment).
+    const parsed = parseExpectedOutcome(JSON.stringify(valid()), PATH);
+
+    expect(parsed.evidence).toBeUndefined();
+  });
+
+  it('parses a well-formed expectation, keeping the assertion mode and the kinds', () => {
+    const parsed = parseExpectedOutcome(
+      JSON.stringify({
+        ...valid(),
+        evidence: { assertion: 'exact', kinds: ['gate', 'command', 'observation'] },
+      }),
+      PATH,
+    );
+
+    expect(parsed.evidence).toEqual({
+      assertion: 'exact',
+      kinds: ['gate', 'command', 'observation'],
+    });
+  });
+
+  it('refuses an `evidence` block with no assertion mode, naming the field', () => {
+    // AC3. The same rule `criteria.assertion` follows and for the same reason: a defaulted
+    // discriminator lets a fixture be READ as making the stronger claim when its author meant
+    // the weaker one. Silence must never be readable as a claim.
+    const broken = { ...valid(), evidence: { kinds: ['gate'] } };
+
+    expect(() => parseExpectedOutcome(JSON.stringify(broken), PATH)).toThrow(/assertion/);
+  });
+
+  it('refuses a misspelled evidence kind at LOAD, rather than never matching it', () => {
+    // The failure mode this closes: `"observaton"` is not a kind the product can ever emit,
+    // so a fixture carrying it under `subset` would demand a kind that cannot appear and go
+    // red for the wrong reason — or, worse, under a laxer schema, be quietly compared against
+    // nothing. The six kinds are a closed union (`src/domain/evidence.ts`), so the typo is
+    // caught by the same enum the product uses.
+    const broken = { ...valid(), evidence: { assertion: 'subset', kinds: ['observaton'] } };
+
+    expect(() => parseExpectedOutcome(JSON.stringify(broken), PATH)).toThrow(/kinds/);
+  });
+
+  it('refuses an unknown key INSIDE the evidence block', () => {
+    // `.strict()` holds all the way down. A misspelled `kind` (singular) beside a correct
+    // `kinds` would otherwise be silently ignored.
+    const broken = {
+      ...valid(),
+      evidence: { assertion: 'exact', kinds: ['gate'], kind: 'gate' },
+    };
+
+    expect(() => parseExpectedOutcome(JSON.stringify(broken), PATH)).toThrow(/kind/);
+  });
+
+  it('refuses a `subset` expectation over an EMPTY set, because it can never fail', () => {
+    // The vacuous pass, guarded. `subset` means "every listed kind must be present"; over an
+    // empty list that is satisfied by every run there has ever been, including one that
+    // produced no evidence at all because a verification surface silently stopped emitting
+    // any. A fixture whose evidence assertion cannot fail is a fixture asserting nothing while
+    // looking like it asserts something — which is the precise shape this whole story exists
+    // to close.
+    const broken = { ...valid(), evidence: { assertion: 'subset', kinds: [] } };
+
+    expect(() => parseExpectedOutcome(JSON.stringify(broken), PATH)).toThrow(/kinds/);
+  });
+
+  it('ACCEPTS an `exact` expectation over an empty set, which is a real claim', () => {
+    // The other side of the guard above, and the reason `kinds` is not simply `.min(1)`.
+    // `exact` + `[]` says "this run produced NO evidence at all" — a claim that CAN go red,
+    // the moment the run starts producing any. Forbidding it would remove an assertion the
+    // format should be able to make in order to close a hole it does not have.
+    const parsed = parseExpectedOutcome(
+      JSON.stringify({ ...valid(), evidence: { assertion: 'exact', kinds: [] } }),
+      PATH,
+    );
+
+    expect(parsed.evidence).toEqual({ assertion: 'exact', kinds: [] });
+  });
+
+  it('refuses a duplicated kind, because the expectation is a SET', () => {
+    // `["gate", "gate"]` is not a stronger claim than `["gate"]`; it is an author who thinks
+    // the field counts occurrences. It does not, and the comparison is set arithmetic, so the
+    // honest response is to refuse the file rather than silently deduplicate it.
+    const broken = {
+      ...valid(),
+      evidence: { assertion: 'exact', kinds: ['gate', 'gate'] },
+    };
+
+    expect(() => parseExpectedOutcome(JSON.stringify(broken), PATH)).toThrow(/kinds/);
+  });
+});

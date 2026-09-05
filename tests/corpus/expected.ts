@@ -33,6 +33,7 @@ import { readFile } from 'node:fs/promises';
 
 import { z } from 'zod';
 
+import { EVIDENCE_KINDS } from '../../src/domain/evidence.js';
 import { CRITERION_STATUSES } from '../../src/domain/result.js';
 import { INFRA_ERROR_CLASSIFICATIONS, VERDICTS } from '../../src/domain/run-outcome.js';
 
@@ -42,6 +43,30 @@ import { INFRA_ERROR_CLASSIFICATIONS, VERDICTS } from '../../src/domain/run-outc
  * It exists so a change to the format is a visible, dated event rather than a silent
  * reinterpretation of files nobody re-read. A fixture written against version 1 that a
  * later version cannot honour must FAIL LOUDLY, never be coerced.
+ *
+ * ⚠️ **NOT BUMPED for the optional `evidence` key (story 6.10, 2026-09-05), and here is the
+ * reasoning, recorded because AC4 asks for it in the code rather than in a PR nobody will
+ * re-open.**
+ *
+ * The version marks a change that could REINTERPRET a file nobody re-read. An **optional,
+ * additive** key cannot do that: a fixture that omits `evidence` asserts exactly what it
+ * asserted before the key existed — nothing about evidence — and the comparator skips the
+ * branch entirely. There is no reading of an old fixture that changes, so there is no event
+ * to date.
+ *
+ * The version WOULD have to move for: removing a key, narrowing an existing one, changing
+ * what a present key means, or making a previously optional key required. Any of those makes
+ * a merged fixture mean something its author did not write, and a bump is what converts that
+ * into a loud load failure instead.
+ *
+ * And the corollary that decides it in practice: `expectedVersion` below is a
+ * `z.literal(EXPECTED_VERSION)`, so bumping this constant does not "allow both" — it REFUSES
+ * every fixture written against the old number. A bump here for a key nobody is required to
+ * use would turn all fifteen merged fixtures red at load until each was hand-edited, which is
+ * a migration with no reinterpretation to protect against.
+ *
+ * Either way the AC4 property holds: an old-version fixture LOADS (this decision) or FAILS
+ * LOUDLY naming `expectedVersion` (the other one). It is never silently reinterpreted.
  */
 export const EXPECTED_VERSION = 1;
 
@@ -104,6 +129,72 @@ const ExpectedCriteria = z
   .strict();
 
 /**
+ * The evidence KINDS a run produced — `http` · `browser` · `observation` · `command` ·
+ * `gate` · `provider` (`src/domain/evidence.ts`, mirrored by `src/schemas/result.ts`'s
+ * discriminated union).
+ *
+ * Typed off the product's own closed union rather than as free strings, the same way
+ * `CriterionStatus` and the verdicts above are. A misspelled `"observaton"` is then refused
+ * AT LOAD naming the field, instead of becoming a kind that can never match — which under
+ * `subset` would fail for a reason that has nothing to do with the product, and is the
+ * "stringly-typed kind list" failure this key was designed against.
+ */
+const EvidenceKind = z.enum(EVIDENCE_KINDS);
+
+/**
+ * How to read `kinds`, and why it is required.
+ *
+ * Same rule as `criteria.assertion`, deliberately: one idiom in this format, not two. A
+ * fixture that pins `["gate"]` is usually saying "a gate ran", not "a gate ran and nothing
+ * else did" — but the file has to SAY which, because a defaulted discriminator lets a
+ * fixture be read as making the stronger claim when its author meant the weaker one.
+ */
+const EvidenceAssertion = z.enum(['exact', 'subset']);
+
+/**
+ * What a fixture pins about the evidence a run produced (story 6.10).
+ *
+ * KINDS ONLY, never contents. URLs, request bodies, command output and provider payloads are
+ * a much larger design question about normalisation and secrets, and pinning them here would
+ * put fixture-authored text on the path of a failure message. A kind is safe to print; a
+ * request body is not.
+ *
+ * ⚠️ **A SET, not a list.** Two runs differing only in the ORDER their evidence was recorded
+ * describe the same run, so order is not a fact and the comparison is set arithmetic. A
+ * duplicate entry is therefore refused rather than silently deduplicated: `["gate","gate"]`
+ * is not a stronger claim, it is an author who believes the field counts occurrences.
+ */
+const ExpectedEvidence = z
+  .object({
+    assertion: EvidenceAssertion,
+    /**
+     * The distinct kinds. Compared against the distinct kinds in the run's
+     * `document.evidence` — `exact` requires the two sets to be equal, `subset` requires
+     * every kind here to be present and permits others.
+     */
+    kinds: z.array(EvidenceKind),
+  })
+  .strict()
+  .refine((value) => new Set(value.kinds).size === value.kinds.length, {
+    path: ['kinds'],
+    message:
+      'lists the same kind more than once. This is a SET of kinds, not a count of evidence ' +
+      'members: two `gate` records and one are both simply "the run produced gate evidence". ' +
+      'Remove the duplicate.',
+  })
+  .refine((value) => !(value.assertion === 'subset' && value.kinds.length === 0), {
+    path: ['kinds'],
+    message:
+      "a 'subset' expectation over an EMPTY set asserts nothing and can never fail — every " +
+      'run that has ever happened satisfies it, including one where a verification surface ' +
+      'silently stopped producing evidence, which is the exact failure this key exists to ' +
+      "catch. Name the kinds this fixture is about, or use 'exact' with an empty list to " +
+      'pin that the run produced NO evidence at all.',
+  });
+
+export type ExpectedEvidence = z.infer<typeof ExpectedEvidence>;
+
+/**
  * `fixtures/corpus/<name>/expected.json`.
  *
  * `.strict()` throughout: an unknown key in an expectation is a typo, and a typo in the one
@@ -147,6 +238,21 @@ export const ExpectedOutcomeFileSchema = z
     exitCode: z.number().int().min(0).max(255),
     outcome: ExpectedOutcome,
     criteria: ExpectedCriteria,
+    /**
+     * The KINDS of evidence the run produced (story 6.10). OPTIONAL, and additive.
+     *
+     * ABSENT means "this fixture asserts nothing about evidence" — which is what every
+     * fixture merged before this key existed means, unchanged. This is the one place the
+     * format's silence is genuinely not a claim, and it is why the key could be added at all
+     * without moving `EXPECTED_VERSION` (see its doc comment).
+     *
+     * What it adds over pinning the rendered Evidence lines in `stderrContains`, which is how
+     * story 6.2's merged fixtures do it: that route asserts what the terminal report PRINTED,
+     * as a presence check, so it cannot say "and nothing else", and it moves off its target if
+     * the renderer changes while `document.evidence` does not. This compares the structured
+     * document. The two are complementary and the `stderrContains` assertions stay.
+     */
+    evidence: ExpectedEvidence.optional(),
     /**
      * Substrings that MUST appear in the run's stderr, matched against the NORMALISED text
      * (see `normalize.ts`) so a fixture can name `<RUN-ID>` or `<TMP>` without pinning a
