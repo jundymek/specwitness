@@ -1,0 +1,536 @@
+/**
+ * The dogfooding summary — FR-34, PRD SM-1, brief §54, ADR-008 §5 (story 6.6).
+ *
+ * ============================================================================
+ * THIS MODULE IS THE ARITHMETIC THAT DECIDES WHETHER THIS PRODUCT WAS WORTH BUILDING
+ * ============================================================================
+ *
+ * Every epic so far built machinery. The claim the machinery exists to justify is that
+ * independent epic-level verification finds real defects that already passed
+ * coding-agent tests, Codex review and supervisor review. Epic 7 tests that claim against
+ * a real epic, and **the way it tests it is by reading this summary.**
+ *
+ * Which gives this file an unusual property: **there is no downstream gate on its
+ * correctness.** A wrong verdict gets caught by a corpus fixture. A wrong metric gets
+ * BELIEVED — because by then the number is the evidence. So the discipline here is to be
+ * conservative with the arithmetic and loud about its limits:
+ *
+ *  - **show denominators**, never a bare percentage. At n=30 every rate is computed over
+ *    few records, and "false-positive rate: 100%" from one record is technically true and
+ *    practically a lie;
+ *  - **count what was skipped** (ADR-008 §5 requires it by name), so a silently shrinking
+ *    denominator is impossible;
+ *  - **count what nobody attributed**, so an unjudged finding can never be mistaken for a
+ *    confirmed defect;
+ *  - **a rate with no denominator is `null`**, never `NaN` and never `0`. Zero reads as
+ *    "we measured, and the answer was none"; null reads as "there was nothing to measure".
+ *
+ * ============================================================================
+ * ⚠️ AN UNATTRIBUTED FINDING IS NEVER `unique`
+ * ============================================================================
+ *
+ * FR-34's classification is human judgment and this module never supplies it. A finding
+ * with no attribution is counted in `findings.unattributed` and in NO metric numerator.
+ * A north-star metric computed as if unattributed findings were `unique` would be the
+ * most flattering possible lie about this product, so the resolution below starts from
+ * the ATTRIBUTIONS and never from the findings.
+ *
+ * ============================================================================
+ * WHY THE ARITHMETIC LIVES IN `src/report/**` — a real placement decision
+ * ============================================================================
+ *
+ * Arithmetic over records is domain-shaped, and `src/domain/**` would be the instinctive
+ * home. It cannot be: `domain-is-dependency-free` in `.dependency-cruiser.cjs` lets
+ * `src/domain/**` import `src/domain/**` and NOTHING else, and `ScorecardRecord` lives in
+ * `src/schemas/`. With `tsPreCompilationDeps: true` even a type-only import is a
+ * dependency, so a domain summariser could not name the type it summarises.
+ *
+ * `src/report/**` is the layer that may read `src/domain/**` AND `src/schemas/**` while
+ * being structurally forbidden from importing `src/infra/**` or any side-effectful Node
+ * built-in (`report-layer`). That is exactly the shape this computation wants:
+ *
+ *  - it **cannot open a file**, so reading the two logs stays at the CLI edge where it
+ *    belongs, and this function is pure and trivially testable;
+ *  - it **cannot reach the network**, which is how AC2's "computed from local records
+ *    only" becomes a property of the layer graph rather than a promise in a comment;
+ *  - it **cannot look up a fact the model does not carry**, which is AD-11's guarantee
+ *    that the terminal view and the `--json` document cannot drift apart.
+ *
+ * AD-11 in one line: **one model, two renderers.** `summarizeScorecard` computes every
+ * fact; `renderScorecardSummaryJson` and `renderScorecardSummaryTerminal` only format it.
+ * A number in one view and not the other is a renderer inventing a fact.
+ *
+ * AD-6: this changes no verdict and no exit code. The scorecard is instrumentation about
+ * verification, never part of it.
+ */
+
+import type {
+  AttributionRecord,
+  AttributionSkipReason,
+  AttributionValue,
+} from '../schemas/scorecard-attribution.js';
+import { ATTRIBUTION_VALUES } from '../schemas/scorecard-attribution.js';
+import type { ScorecardRecord } from '../schemas/scorecard.js';
+import { schemaVersionFor } from '../schemas/versions.js';
+
+/** The `--json` document's version. See `SCHEMA_VERSIONS.scorecardSummary`. */
+export const SCORECARD_SUMMARY_VERSION = schemaVersionFor('scorecardSummary');
+
+/* ── the input ────────────────────────────────────────────────────────────────────── */
+
+/**
+ * One skipped line, from either log.
+ *
+ * Structurally identical to `SkippedScorecardRecord` and `SkippedAttributionRecord`, and
+ * declared here as a shared STRUCTURAL shape rather than imported from either store,
+ * because `report-layer` forbids `src/report/**` from importing `src/infra/**` at all —
+ * type-only imports included, since `tsPreCompilationDeps` is on. Both stores' results
+ * are assignable to it structurally, so the CLI edge hands them over with no adapter.
+ *
+ * The `reason` union comes from `src/schemas/**`, which this layer MAY read, so the two
+ * logs and this summary cannot drift apart about what a skip reason is.
+ */
+export interface SkippedLine {
+  readonly line: number;
+  readonly reason: AttributionSkipReason;
+  readonly message: string;
+}
+
+export interface ScorecardSummaryInput {
+  readonly scorecard: {
+    readonly records: readonly ScorecardRecord[];
+    readonly skipped: readonly SkippedLine[];
+  };
+  readonly attributions: {
+    /** **In FILE ORDER.** The re-attribution rule depends on it — see `resolveAttributions`. */
+    readonly records: readonly AttributionRecord[];
+    readonly skipped: readonly SkippedLine[];
+  };
+}
+
+/* ── the model ────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A rate, always carrying the two numbers it was computed from.
+ *
+ * **The denominator is not decoration.** During the ~30–50-task dogfooding window every
+ * rate is computed over few records, and a percentage without its denominator is how a
+ * sample of one becomes a headline. SM-2 turns on whether the author keeps the gate
+ * mandatory, and that is a judgement nobody can make from "100%".
+ *
+ * `value` is `null` — never `NaN`, never `0` — when `denominator` is zero.
+ */
+export interface Rate {
+  readonly numerator: number;
+  readonly denominator: number;
+  readonly value: number | null;
+}
+
+/** The north star (SM-1), with both denominators it should ever be read against. */
+export interface UniqueDefects {
+  /** Findings a human judged `unique`. **The number this product exists to produce.** */
+  readonly count: number;
+  /** How many findings were judged at all. */
+  readonly ofAttributed: number;
+  /** How many findings exist, judged or not. */
+  readonly ofAllFindings: number;
+}
+
+export interface DurationSummary {
+  /** MEDIAN, not mean — durations are skewed by infra retries. `null` over no records. */
+  readonly medianMs: number | null;
+  readonly count: number;
+}
+
+export interface FindingCounts {
+  /**
+   * Every finding, from the EXACT per-status counts (`criteria.fail + needs_human +
+   * error`) — never from the id arrays, which story 6.5 caps at 200 across a record.
+   * Deriving this from ids would silently shrink the denominator for exactly the runs
+   * with the most findings.
+   */
+  readonly total: number;
+  /** How many findings are NAMED by an id, and so can be attributed at all. */
+  readonly enumerated: number;
+  readonly attributed: number;
+  /** `total - attributed`. **Never folded into any metric numerator.** */
+  readonly unattributed: number;
+  /** Runs whose id list was cut. A cut list must never be read as a complete one. */
+  readonly runsWithTruncatedFindingIds: number;
+  /**
+   * Attributions naming a `(runId, criterionId)` that no record enumerates.
+   *
+   * Reported, never counted. Including one would add to a numerator whose denominator it
+   * is not part of — the shape of a quietly wrong rate.
+   */
+  readonly orphanedAttributions: number;
+}
+
+export interface SkippedRecords {
+  readonly total: number;
+  readonly scorecard: number;
+  readonly attributions: number;
+  readonly detail: readonly (SkippedLine & { readonly source: 'scorecard' | 'attributions' })[];
+}
+
+export interface ScorecardSummary {
+  readonly schemaVersion: number;
+  readonly records: { readonly read: number };
+  readonly attributionsRead: number;
+  /** ADR-008 §5 requires this by name, *"so a silently shrinking denominator is impossible."* */
+  readonly skippedRecords: SkippedRecords;
+  readonly findings: FindingCounts;
+  /** The winning judgements, by value. Sums to `findings.attributed`. */
+  readonly attributionCounts: Readonly<Record<AttributionValue, number>>;
+  readonly metrics: {
+    readonly uniqueDefects: UniqueDefects;
+    readonly falsePositiveRate: Rate;
+    readonly needsHumanRate: Rate;
+    readonly infraErrorRate: Rate;
+    readonly aiFreeRunShare: Rate;
+    readonly flakyRate: Rate;
+    readonly duration: DurationSummary;
+  };
+}
+
+/* ── the arithmetic ───────────────────────────────────────────────────────────────── */
+
+/** Builds a rate, refusing to divide by zero. */
+function rate(numerator: number, denominator: number): Rate {
+  return {
+    numerator,
+    denominator,
+    value: denominator === 0 ? null : numerator / denominator,
+  };
+}
+
+/**
+ * The MEDIAN of a list of durations.
+ *
+ * The AC says median and the reason is in the data: durations are skewed by infra
+ * retries, and a mean would be dominated by them.
+ *
+ * The three cases that make a summary throw in front of a person deciding whether to keep
+ * the gate, all answered here rather than at a call site:
+ *
+ *  - **empty** → `null`. Not `0`, which would read as "these runs were instant";
+ *  - **one record** → that value;
+ *  - **an even count** → the mean of the two middle values, the ordinary convention.
+ *
+ * A COPY is sorted, never the caller's array — this function is pure and the input is a
+ * readonly view of a store's result.
+ */
+function medianOf(values: readonly number[]): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+
+  return sorted.length % 2 === 1
+    ? (sorted[middle] as number)
+    : ((sorted[middle - 1] as number) + (sorted[middle] as number)) / 2;
+}
+
+/** The join key. ` ` cannot occur in either id, so no pair can collide with another. */
+function key(runId: string, criterionId: string): string {
+  return `${runId} ${criterionId}`;
+}
+
+/**
+ * Resolves the attribution log to at most one judgement per finding.
+ *
+ * **THE LAST RECORD IN FILE ORDER WINS**, and that is the whole re-attribution rule.
+ * People change their minds — a finding called `unique` on Monday can be shown to be a
+ * duplicate on Friday — and an append-only log expresses a correction as a later record
+ * rather than by rewriting history. The alternative, refusing a second attribution, would
+ * force an operator to hand-edit the log to correct a mistake, which is strictly worse:
+ * it destroys the audit trail and invites exactly the corruption ADR-008 §5 exists to
+ * survive.
+ *
+ * **File order, not `recordedAt`.** The timestamps come from the machine that wrote each
+ * line, and two clocks that disagree — or two records written in the same millisecond —
+ * would make the winner ambiguous. Append order is the one total ordering the file
+ * actually has, and `AttributionStore.read` is documented never to sort.
+ */
+function resolveAttributions(
+  records: readonly AttributionRecord[],
+): ReadonlyMap<string, AttributionValue> {
+  const winning = new Map<string, AttributionValue>();
+  for (const entry of records) {
+    winning.set(key(entry.runId, entry.criterionId), entry.attribution);
+  }
+  return winning;
+}
+
+/**
+ * Computes every fact the two views can show. Pure, total, and free of I/O.
+ *
+ * Total in the strict sense: there is no input for which this throws. An empty scorecard,
+ * a scorecard whose every line was skipped, one record, an even count, a finding nobody
+ * judged, an attribution naming a run that is not there — each has an answer, because
+ * this function runs at the moment someone is deciding whether this gate is worth
+ * keeping, and a stack trace is not an answer.
+ */
+export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSummary {
+  const records = input.scorecard.records;
+  const runCount = records.length;
+
+  // ── the record-denominated rates ──────────────────────────────────────────────────
+  //
+  // `outcome` is a discriminated union: a verdict OR an infra error, never both (AD-6).
+  // The scorecard RECORDS infra-errored runs deliberately (story 6.5's PR §2) — excluding
+  // them would make the infra-error rate structurally zero, which looks like good news.
+  let needsHuman = 0;
+  let infraErrors = 0;
+  let aiFree = 0;
+  let flakyCriteria = 0;
+  let retriedCriteria = 0;
+  let findingsTotal = 0;
+  let findingsEnumerated = 0;
+  let truncatedRuns = 0;
+  const durations: number[] = [];
+
+  /** Every `(runId, criterionId)` a finding could be about, across every record. */
+  const enumeratedFindings = new Set<string>();
+
+  for (const record of records) {
+    durations.push(record.durationMs);
+
+    if ('infraError' in record.outcome) {
+      infraErrors += 1;
+    } else if (record.outcome.verdict === 'NEEDS_HUMAN') {
+      needsHuman += 1;
+    }
+
+    if (record.providerInvocations === 0) {
+      aiFree += 1;
+    }
+
+    flakyCriteria += record.flakiness.flakyCriteria;
+    retriedCriteria += record.flakiness.retriedCriteria;
+
+    // ⚠️ FROM THE EXACT COUNTS, NOT FROM THE ID ARRAYS. Story 6.5 caps the arrays at 200
+    // ids ACROSS the record and flags it; the per-status counts stay exact regardless. A
+    // denominator built from ids would silently shrink for the runs with the most
+    // findings — the ones that matter most.
+    findingsTotal +=
+      record.criteria.fail + record.criteria.needs_human + record.criteria.error;
+
+    if (record.findingCriterionIdsTruncated) {
+      truncatedRuns += 1;
+    }
+
+    for (const criterionId of [
+      ...record.findingCriterionIds.fail,
+      ...record.findingCriterionIds.needs_human,
+      ...record.findingCriterionIds.error,
+    ]) {
+      enumeratedFindings.add(key(record.runId, criterionId));
+      findingsEnumerated += 1;
+    }
+  }
+
+  // ── the human judgements ──────────────────────────────────────────────────────────
+  const winning = resolveAttributions(input.attributions.records);
+
+  const attributionCounts: Record<AttributionValue, number> = {
+    unique: 0,
+    duplicate: 0,
+    'false-positive': 0,
+  };
+  let orphanedAttributions = 0;
+
+  for (const [joinKey, value] of winning) {
+    if (enumeratedFindings.has(joinKey)) {
+      attributionCounts[value] += 1;
+    } else {
+      // Reported, never counted. See `FindingCounts.orphanedAttributions`.
+      orphanedAttributions += 1;
+    }
+  }
+
+  const attributed = ATTRIBUTION_VALUES.reduce(
+    (total, value) => total + attributionCounts[value],
+    0,
+  );
+
+  // `total`, not `enumerated`: a finding whose id was truncated away still EXISTS and
+  // still has nobody's judgement on it. Counting only enumerated findings here would hide
+  // the unjudged ones that are hardest to see.
+  const unattributed = Math.max(0, findingsTotal - attributed);
+
+  const skippedDetail = [
+    ...input.scorecard.skipped.map((entry) => ({ ...entry, source: 'scorecard' as const })),
+    ...input.attributions.skipped.map((entry) => ({ ...entry, source: 'attributions' as const })),
+  ];
+
+  return {
+    schemaVersion: SCORECARD_SUMMARY_VERSION,
+    records: { read: runCount },
+    attributionsRead: input.attributions.records.length,
+    skippedRecords: {
+      total: skippedDetail.length,
+      scorecard: input.scorecard.skipped.length,
+      attributions: input.attributions.skipped.length,
+      detail: skippedDetail,
+    },
+    findings: {
+      total: findingsTotal,
+      enumerated: findingsEnumerated,
+      attributed,
+      unattributed,
+      runsWithTruncatedFindingIds: truncatedRuns,
+      orphanedAttributions,
+    },
+    attributionCounts,
+    metrics: {
+      uniqueDefects: {
+        count: attributionCounts.unique,
+        ofAttributed: attributed,
+        ofAllFindings: findingsTotal,
+      },
+      // Denominated by ATTRIBUTED findings: a finding nobody judged is not evidence
+      // either way, and folding it into this denominator would flatter the rate.
+      // `findings.unattributed` sits beside it so the base is never mistaken.
+      falsePositiveRate: rate(attributionCounts['false-positive'], attributed),
+      needsHumanRate: rate(needsHuman, runCount),
+      infraErrorRate: rate(infraErrors, runCount),
+      aiFreeRunShare: rate(aiFree, runCount),
+      // Retry-to-green (SM-C3), exactly as story 6.5 documents the field pair:
+      // `flakyCriteria` over `retriedCriteria`. A run that retried nothing contributes
+      // nothing to either, so a project with no retries reports `null` rather than a
+      // perfect score.
+      flakyRate: rate(flakyCriteria, retriedCriteria),
+      duration: { medianMs: medianOf(durations), count: runCount },
+    },
+  };
+}
+
+/* ── the renderers — AD-11: two views, one model, no invented facts ───────────────── */
+
+/**
+ * The machine-readable summary: the model, serialized.
+ *
+ * Deliberately a straight `JSON.stringify` of the model and nothing more — the same
+ * discipline `src/report/json.ts` keeps, and for the same reason. Any transformation here
+ * would be a second shape, and the terminal view and the document would begin to disagree
+ * about the same numbers.
+ *
+ * Indented because, unlike `result.json`, this document is not byte-compared against a
+ * stored file: it is computed on demand, a human reads it over a harness's shoulder, and
+ * there is no persisted counterpart for it to match.
+ */
+export function renderScorecardSummaryJson(summary: ScorecardSummary): string {
+  return `${JSON.stringify(summary, null, 2)}\n`;
+}
+
+/** `1 of 5 (20.0%)`, or `— (no data)`. The denominator is always shown. */
+function formatRate(value: Rate): string {
+  if (value.value === null) {
+    return `— (0 of 0 — nothing to measure yet)`;
+  }
+  return `${value.numerator} of ${value.denominator} (${(value.value * 100).toFixed(1)}%)`;
+}
+
+function formatDuration(duration: DurationSummary): string {
+  if (duration.medianMs === null) {
+    return '— (no runs recorded)';
+  }
+  return `${duration.medianMs} ms (median of ${duration.count})`;
+}
+
+/**
+ * The human view.
+ *
+ * Carries **exactly** the facts of the model, with denominators beside every rate. Plain
+ * text, no colour and no cursor control: this is written to a pipe as often as to a
+ * terminal, and an escape sequence in a log is noise a reader has to decode.
+ *
+ * The order is deliberate. The north star first, because it is the question. The
+ * unattributed count immediately under it, because it is the number that says how much of
+ * the question is still unanswered — a reader who sees "1 unique defect" and stops has
+ * been misled unless "12 unattributed" is on the next line.
+ */
+export function renderScorecardSummaryTerminal(summary: ScorecardSummary): string {
+  const { findings, metrics, skippedRecords } = summary;
+  const lines: string[] = [];
+
+  lines.push('SpecWitness dogfooding scorecard');
+  lines.push('');
+
+  if (summary.records.read === 0) {
+    // Said plainly rather than rendered as a table of dashes. "No runs recorded" is an
+    // answer; a grid of `—` looks like a failure.
+    lines.push('  No runs recorded yet — this project has no completed verifications.');
+    lines.push('');
+    lines.push(`  Records read:        0`);
+    lines.push(`  Attributions read:   ${summary.attributionsRead}`);
+    lines.push(`  Records skipped:     ${skippedRecords.total}`);
+    lines.push('');
+    lines.push("  Run 'specwitness verify <epic>' to record one.");
+    return `${lines.join('\n')}\n`;
+  }
+
+  lines.push('  THE NORTH STAR (SM-1) — real defects SpecWitness found that earlier gates missed');
+  lines.push(
+    `    Unique real defects:   ${metrics.uniqueDefects.count} ` +
+      `of ${metrics.uniqueDefects.ofAttributed} judged, ` +
+      `of ${metrics.uniqueDefects.ofAllFindings} findings`,
+  );
+  lines.push(
+    `    Unattributed:          ${findings.unattributed} finding(s) nobody has judged yet`,
+  );
+  lines.push('');
+
+  lines.push('  RATES (numerator of denominator — a rate at n=1 is not a trend)');
+  lines.push(`    False-positive rate:   ${formatRate(metrics.falsePositiveRate)}`);
+  lines.push(`    NEEDS_HUMAN rate:      ${formatRate(metrics.needsHumanRate)}`);
+  lines.push(`    Infra-error rate:      ${formatRate(metrics.infraErrorRate)}`);
+  lines.push(`    AI-free run share:     ${formatRate(metrics.aiFreeRunShare)}`);
+  lines.push(`    Flaky (retry-to-green): ${formatRate(metrics.flakyRate)}`);
+  lines.push(`    Median duration:       ${formatDuration(metrics.duration)}`);
+  lines.push('');
+
+  lines.push('  JUDGEMENTS');
+  lines.push(`    unique:                ${summary.attributionCounts.unique}`);
+  lines.push(`    duplicate:             ${summary.attributionCounts.duplicate}`);
+  lines.push(`    false-positive:        ${summary.attributionCounts['false-positive']}`);
+  lines.push('');
+
+  lines.push('  COVERAGE');
+  lines.push(`    Records read:          ${summary.records.read}`);
+  lines.push(`    Attributions read:     ${summary.attributionsRead}`);
+  lines.push(`    Findings total:        ${findings.total}`);
+  lines.push(`    Findings attributed:   ${findings.attributed}`);
+
+  if (findings.runsWithTruncatedFindingIds > 0) {
+    lines.push(
+      `    ⚠ ${findings.runsWithTruncatedFindingIds} run(s) had more findings than the record ` +
+        `names individually — those cannot be attributed by id.`,
+    );
+  }
+
+  if (findings.orphanedAttributions > 0) {
+    lines.push(
+      `    ⚠ ${findings.orphanedAttributions} attribution(s) name a finding no record lists — ` +
+        `excluded from every metric above.`,
+    );
+  }
+
+  // ADR-008 §5, by name: "so a silently shrinking denominator is impossible".
+  lines.push(`    Records skipped:       ${skippedRecords.total}`);
+  if (skippedRecords.total > 0) {
+    lines.push(
+      `      (${skippedRecords.scorecard} from the scorecard, ` +
+        `${skippedRecords.attributions} from the attribution log — ` +
+        `every number above is computed WITHOUT them)`,
+    );
+    for (const entry of skippedRecords.detail) {
+      lines.push(`      - ${entry.source} line ${entry.line}: ${entry.reason}`);
+    }
+  }
+
+  return `${lines.join('\n')}\n`;
+}

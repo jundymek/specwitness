@@ -289,7 +289,19 @@ module.exports = {
         'two modules\' source for it, and plants a `node:https` import to watch this rule ' +
         'fire. Neither guard alone is sufficient; both are cheap.',
       severity: 'error',
-      from: { path: '^src/(schemas/scorecard|infra/scorecard-store)\\.ts$' },
+      // Story 6.6 extends this rule to its two new modules by the same argument. The
+      // attribution log is the same kind of file — local usage measurement, the one place
+      // a contributor might think telemetry belongs — and `src/infra/attribution-store.ts`
+      // is the half that earns it, since `src/infra/**` may otherwise import any Node
+      // built-in. `src/report/scorecard-summary.ts` is already covered by `report-layer`
+      // (which forbids every side-effectful built-in) and `src/schemas/scorecard-attribution.ts`
+      // by `schemas-core-only`; both are named here anyway so that the ban is stated where
+      // someone looks for it rather than inferred from two other rules.
+      from: {
+        path:
+          '^src/(schemas/scorecard|schemas/scorecard-attribution|infra/scorecard-store|' +
+          'infra/attribution-store|report/scorecard-summary)\\.ts$',
+      },
       to: {
         path: [
           '^(node:)?(http|https|http2|net|tls|dgram|dns)($|/)',

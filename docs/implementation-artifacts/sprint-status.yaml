@@ -94,7 +94,7 @@ development_status:
   6-3-classification-corpus-fixtures: done
   6-4-non-node-target-fixture: done
   6-5-scorecard-recording: done
-  6-6-defect-attribution-summary: backlog
+  6-6-defect-attribution-summary: review
   6-7-dogfooding-readiness-docs-packaging: review
   6-8-shared-prompt-assembly-helper: done
   6-9-browser-verification-in-ci: done
