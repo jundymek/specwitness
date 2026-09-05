@@ -487,9 +487,9 @@ nothing.
 > > nothing was installed.
 
 **Every command in this file is a security boundary** — for the commands SpecWitness runs
-*on your project's behalf*. Gates, service start-up, data commands, observations and shell
-probes come only from this file; a provider can never name one of those executables and can
-never produce a shell string.
+*on your project's behalf*. The install command, gates, service start-up, data commands,
+observations and shell probes come only from this file; a provider can never name one of those
+executables and can never produce a shell string.
 
 **That is not the same as "the only programs SpecWitness ever runs".** It also runs a small,
 fixed set of its own tools, which are hard-coded rather than configured and are therefore

@@ -293,6 +293,52 @@ describe('the setup stage when the install does not succeed (AC3)', () => {
     expect(error.message).toContain('EACCES');
   });
 
+  /**
+   * ⚠️ FOUND BY REVIEW, and it is a real AC3 gap rather than a formatting preference.
+   *
+   * The timeout and spawn-failure arms originally said only "the install command", naming
+   * neither the declared command line nor the config key. Unlike a gate — whose id the operator
+   * chose and which the message carries — an install is identified by a fixed key, so a
+   * diagnostic that does not spell out `setup.install` leaves the operator holding an exit 3
+   * with no pointer to the line they have to change.
+   *
+   * Asserted over EVERY runtime failure path at once, so a later arm added without the context
+   * fails here rather than being noticed in production.
+   */
+  it('names both the declared command and the config key on every failure path (AC3)', async () => {
+    const failures = [
+      processResult({ outcome: 'completed', exitCode: 1 }),
+      processResult({ outcome: 'timed-out', exitCode: null }),
+      processResult({ outcome: 'spawn-failed', exitCode: null, stderr: 'EACCES' }),
+    ];
+
+    for (const failure of failures) {
+      const error = await infraErrorFrom(
+        createSetupStage({
+          install: declaredInstall('pnpm install --frozen-lockfile'),
+          runner: recordingRunner(failure),
+        }).run(stageContext()),
+      );
+
+      expect(error.message).toContain('pnpm install --frozen-lockfile');
+      expect(`${error.message} ${error.hint ?? ''}`).toContain(SETUP_INSTALL_ID);
+      expect(`${error.message} ${error.hint ?? ''}`).toContain('.specwitness/config.yaml');
+    }
+
+    // `not-found` is the fourth path and states the config key in its hint; its MESSAGE names the
+    // binary rather than the whole line, deliberately, because the binary is the thing that could
+    // not be resolved and repeating the arguments would bury it.
+    const notFound = await infraErrorFrom(
+      createSetupStage({
+        install: declaredInstall('pnpm install --frozen-lockfile'),
+        runner: recordingRunner(processResult({ outcome: 'not-found', exitCode: null })),
+      }).run(stageContext()),
+    );
+    expect(notFound.message).toContain('pnpm');
+    expect(notFound.hint).toContain(SETUP_INSTALL_ID);
+    expect(notFound.hint).toContain('.specwitness/config.yaml');
+  });
+
   it('refuses to install into the project root when no worktree was created', async () => {
     const runner = refusingRunner();
 

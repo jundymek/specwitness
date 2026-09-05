@@ -386,6 +386,13 @@ function notFoundError(binary: string): InfraError {
  *
  * Note the shape of the `completed` arm: unlike the gates stage there is no `fail` result here,
  * because there is no product-negative row in this table at all.
+ *
+ * **EVERY ARM NAMES BOTH THE COMMAND AND THE CONFIG KEY** (AC3). That is not decoration and it
+ * was a review finding: the timeout and spawn-failure arms originally said only "the install
+ * command", which leaves an operator holding an exit 3 and no pointer to the line they have to
+ * change. Unlike a gate, there is exactly one install per run and it is identified by a key
+ * rather than by an id the operator chose, so if the diagnostic does not spell out
+ * `setup.install` nothing else in the message does.
  */
 async function classify(
   deps: SetupStageDeps,
@@ -398,13 +405,22 @@ async function classify(
   // operator needs, and every arm below except one throws.
   await record(deps, context, command, result);
 
+  // The declared command line, safe to print. Redacted with `{shellCommand: true}` because this
+  // IS declared text — the project owner wrote it — and it can legitimately carry a
+  // private-registry credential. Every message below reaches `printError`, which writes
+  // ERROR:/HINT: to stderr verbatim, so redacting where the text enters the message closes the
+  // leak wherever the message is later printed.
+  const shown = redactText(commandText(command), { shellCommand: true });
+  /** The remedy every arm ends with: the one line an operator has to look at. */
+  const inspect = `check ${SETUP_INSTALL_ID} in .specwitness/config.yaml`;
+
   switch (result.outcome) {
     case 'completed':
       if (result.exitCode === 0) {
         return;
       }
       throw new InfraError(
-        `the install command failed with exit code ${String(result.exitCode)}`,
+        `the install command '${shown}' failed with exit code ${String(result.exitCode)}`,
         `SpecWitness could not install the project's dependencies, which says nothing about ` +
           'whether the branch satisfies its contract — so this is reported as an environment ' +
           'problem rather than as a failing build. Check the command output in the run ' +
@@ -417,23 +433,24 @@ async function classify(
 
     case 'timed-out':
       throw new InfraError(
-        `the install command timed out after ` +
+        `the install command '${shown}' timed out after ` +
           `${String(deps.timeoutMs ?? SETUP_INSTALL_TIMEOUT_MS)}ms and was killed`,
         'an install that hung says nothing about whether the branch is mergeable, so this is ' +
           'reported as an environment problem rather than as a failing build — an unreachable ' +
-          'registry, or a package manager waiting on a prompt, are the usual causes',
+          `registry, or a package manager waiting on a prompt, are the usual causes. ${inspect}, ` +
+          'then rerun',
       );
 
     case 'spawn-failed':
       throw new InfraError(
-        // REDACTED before it goes into the message. This is the only error here that embeds
-        // CAPTURED OUTPUT, and an error travels further than evidence does: the pipeline redacts
-        // timeline details in its recorder, but the same error also reaches `printError` at the
-        // CLI edge, which writes ERROR:/HINT: to stderr verbatim. So the persisted copy would be
-        // clean while the terminal showed the secret.
-        `the install command could not be spawned: ` +
+        // The captured stderr is REDACTED before it goes into the message, undeclared. This is
+        // the only error here that embeds CAPTURED OUTPUT, and an error travels further than
+        // evidence does: the pipeline redacts timeline details in its recorder, but the same
+        // error also reaches `printError` at the CLI edge, which writes ERROR:/HINT: to stderr
+        // verbatim. So the persisted copy would be clean while the terminal showed the secret.
+        `the install command '${shown}' could not be spawned: ` +
           `${redactText(result.stderr).trim() || 'the process did not start'}`,
-        'check that the verification worktree exists and is readable, then rerun',
+        `check that the verification worktree exists and is readable, and ${inspect}, then rerun`,
       );
 
     default: {
@@ -441,7 +458,7 @@ async function classify(
       // classification here is a type error, not a silent success.
       const unreachable: never = result.outcome;
       throw new InfraError(
-        `the install command returned an unrecognised process outcome: ${String(unreachable)}`,
+        `the install command '${shown}' returned an unrecognised process outcome: ${String(unreachable)}`,
         'this is a defect in SpecWitness; please report it with the run directory',
       );
     }
