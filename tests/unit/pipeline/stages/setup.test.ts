@@ -339,6 +339,38 @@ describe('the setup stage when the install does not succeed (AC3)', () => {
     expect(notFound.hint).toContain('.specwitness/config.yaml');
   });
 
+  /**
+   * ⚠️ FOUND BY REVIEW — a credential leak on the `not-found` path, and the route is not obvious.
+   *
+   * The executable token is not always a program name. Under AD-3 there is no shell, so
+   * `NPM_TOKEN=… pnpm install` — the shape a developer reaches for when a private registry needs
+   * a token — tokenizes with the ASSIGNMENT as the executable. Nothing on PATH is called that, so
+   * it lands in `notFoundError`, which interpolated the token into both the message and the hint.
+   *
+   * The failure is a configuration mistake, which makes this exactly the message an operator
+   * pastes into an issue.
+   *
+   * The assertion is that the SECRET IS ABSENT, never that `[REDACTED]` is present — the idiom
+   * this repository settled on in Epic 3, because output containing the marker with the secret
+   * still beside it survives review in a way a raw leak does not.
+   */
+  it('never prints a credential from an unsupported assignment-shaped declaration', async () => {
+    const secret = 's3cr3t-registry-value';
+
+    const error = await infraErrorFrom(
+      createSetupStage({
+        install: declaredInstall(`NPM_TOKEN=${secret} pnpm install`),
+        runner: recordingRunner(processResult({ outcome: 'not-found', exitCode: null })),
+      }).run(stageContext()),
+    );
+
+    expect(error.message).not.toContain(secret);
+    expect(error.hint ?? '').not.toContain(secret);
+    // Still diagnostic: the operator is told which declaration failed and where to fix it.
+    expect(error.message).toContain('NPM_TOKEN');
+    expect(error.hint).toContain(SETUP_INSTALL_ID);
+  });
+
   it('refuses to install into the project root when no worktree was created', async () => {
     const runner = refusingRunner();
 

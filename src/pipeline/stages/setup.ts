@@ -357,20 +357,39 @@ async function record(
  * against the PROJECT ROOT, because it runs before any worktree exists. The install runs in the
  * worktree at the head SHA (AD-8). So a script that is present but UNTRACKED passes `doctor` and
  * legitimately cannot be executed here, and the useful instruction is "commit it".
+ *
+ * ⚠️ **THE BINARY IS REDACTED, AND THIS ARM IS THE ONE THAT NEEDS IT MOST.** Found by review, and
+ * the route is not obvious: the executable token is not always a program name. Under AD-3 there
+ * is no shell, so a plausible-but-unsupported declaration like
+ * `NPM_TOKEN=s3cr3t pnpm install` — the shape a developer reaches for when a private registry
+ * needs a token — tokenizes with `NPM_TOKEN=s3cr3t` AS THE EXECUTABLE. Nothing on PATH is called
+ * that, so it lands here, and an unredacted message would print the credential to the terminal
+ * and into the timeline detail. The failure is a config mistake, so it is exactly the message an
+ * operator will paste into an issue.
+ *
+ * Redacted with `{shellCommand: true}` because this token is DECLARED text the project owner
+ * wrote, which is the context that option is reserved for. Verified: `redactText` reduces the
+ * example above to `NPM_TOKEN=[REDACTED]`.
+ *
+ * **The same latent hole exists in the merged `gates.ts` and `data.ts`**, whose `notFoundError`
+ * functions interpolate their binary unredacted. Neither is this story's file to change, and it
+ * is reported to the owner in this story's PR body instead — the precedent `data.ts` set when it
+ * found the identical ordering defect in `services.ts`.
  */
 function notFoundError(binary: string): InfraError {
   const namesAFile = binary.includes('/') || binary.includes('\\');
+  const shown = redactText(binary, { shellCommand: true });
 
   return namesAFile
     ? new InfraError(
-        `the install command could not run: '${binary}' does not exist in the verification worktree`,
+        `the install command could not run: '${shown}' does not exist in the verification worktree`,
         `the install runs against the revision under verification, not your working copy — ` +
-          `commit '${binary}' (an untracked or uncommitted file will not be there), or correct ` +
+          `commit '${shown}' (an untracked or uncommitted file will not be there), or correct ` +
           `${SETUP_INSTALL_ID} in .specwitness/config.yaml`,
       )
     : new InfraError(
-        `the install command could not run: '${binary}' is not on PATH`,
-        `install '${binary}', or correct ${SETUP_INSTALL_ID} in .specwitness/config.yaml — this ` +
+        `the install command could not run: '${shown}' is not on PATH`,
+        `install '${shown}', or correct ${SETUP_INSTALL_ID} in .specwitness/config.yaml — this ` +
           'is an environment problem, not a failure of the branch under verification',
       );
 }
