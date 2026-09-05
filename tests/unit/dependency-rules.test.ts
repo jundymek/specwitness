@@ -796,3 +796,92 @@ describe('the scorecard is local-only, structurally (story 6.5)', () => {
     }
   });
 });
+
+describe('the attribution log is local-only too, structurally (story 6.6)', () => {
+  /**
+   * Story 6.6 extends `scorecard-is-local-only` to its own persisted-log modules, by
+   * exactly the argument story 6.5 made for its own: the attribution log is the same kind
+   * of file — local usage measurement — and `src/infra/**` may otherwise import any Node
+   * built-in, so a single `node:https` beside the `node:fs` one would pass every other
+   * rule in the config.
+   *
+   * These plant into the REAL module's path inside the temp tree, for the reason story
+   * 6.5's cases do: the rule is scoped to specific paths, so a probe at another path
+   * cannot trigger it. The real `src/` is never touched.
+   */
+  const OFFENDING_6_6 = (specifier: string): string =>
+    `import { request } from '${specifier}';\nexport const p = request;\n`;
+
+  it('blocks a networking built-in in the attribution store', async () => {
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/attribution-store.ts', OFFENDING_6_6('node:https'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks a networking built-in SUBPATH in the attribution store', async () => {
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/attribution-store.ts', OFFENDING_6_6('node:dns/promises'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('still permits the filesystem in the attribution store', async () => {
+    // The permit half. A ban that also broke `node:fs` would be a ban somebody deletes.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'infra/attribution-store.ts',
+      "import { appendFile } from 'node:fs/promises';\nimport { join } from 'node:path';\n" +
+        'export const p = { appendFile, join };\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('scorecard-is-local-only');
+    expect(exitCode).toBe(0);
+  });
+
+  it('has no global-fetch escape hatch in ANY of the five scorecard modules', async () => {
+    // THE HONEST GAP THE DEPCRUISE RULE CANNOT CLOSE, extended to story 6.6's modules.
+    // Node's `fetch`, `WebSocket` and `XMLHttpRequest` are GLOBALS: they need no import,
+    // so dependency-cruiser cannot see them. Every one of these modules discusses the ban
+    // in prose, so the search is for a CALL or a construction rather than for the word.
+    for (const relative of [
+      'schemas/scorecard.ts',
+      'schemas/scorecard-attribution.ts',
+      'infra/scorecard-store.ts',
+      'infra/attribution-store.ts',
+      'report/scorecard-summary.ts',
+    ]) {
+      const source = await readFile(join(SRC, relative), 'utf8');
+      expect(source).not.toMatch(/\bfetch\s*\(/);
+      expect(source).not.toMatch(/\bnew\s+(WebSocket|XMLHttpRequest)\b/);
+    }
+  });
+
+  it('keeps the summariser out of src/infra/** entirely (report-layer)', async () => {
+    // AD-11 expressed structurally: a summariser that could open a file could look up a
+    // fact the model does not carry, and the terminal view and the --json document would
+    // begin to disagree. It is also what makes AC2's "local records only" checkable
+    // rather than promised.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'report/scorecard-summary.ts',
+      "import { AttributionStore } from '../infra/attribution-store.js';\n" +
+        'export const p = AttributionStore;\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('report-layer');
+    expect(exitCode).not.toBe(0);
+  });
+});
