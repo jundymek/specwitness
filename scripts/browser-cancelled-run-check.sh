@@ -62,7 +62,21 @@ BROWSERS_PATH="${BROWSERS_PATH:-}"
 LAUNCH_TIMEOUT_SECONDS=180
 
 work="$(mktemp -d)"
-baseline="${work}/baseline.txt"
+# ⚠️ WHICH BASELINE, AND WHY IT CAN BE INHERITED.
+#
+# By default this check takes its own "before" snapshot. But in CI it is handed the JOB-level
+# baseline, taken before anything at all ran, and that is what closes a real gap the review
+# raised twice.
+#
+# The gap: the normal-exit step reports a survivor and, being unable to establish run-specific
+# ownership, does not reap it (see the P1 that removed path-based ownership). If this check then
+# took a FRESH baseline, that survivor would be in it, subtracted, and never mentioned again -
+# the job would end quietly carrying a leak that a step had already found. Reported-then-hidden.
+#
+# Inheriting the job baseline means anything the suites leaked is still outside the baseline here
+# and is still reported by the final scan. So the job ends LOUD rather than silent, without this
+# script acquiring the authority to kill processes it cannot prove are its own.
+baseline="${BASELINE_FILE:-${work}/baseline.txt}"
 
 leak_check_args=(scripts/browser-leak-check.mjs)
 if [ -n "${BROWSERS_PATH}" ]; then
@@ -73,10 +87,14 @@ fi
 # only the groups it spared itself, passed explicitly as --owned-pgid below.
 
 echo "==> [1/5] recording what is already running"
-node "${leak_check_args[@]}" --write-baseline "${baseline}" --label "before the cancelled run" || {
-  echo "ERROR: could not record a baseline; the cancelled-run check cannot interpret anything without one" >&2
-  exit 1
-}
+if [ -n "${BASELINE_FILE:-}" ] && [ -s "${BASELINE_FILE}" ]; then
+  echo "    inheriting the job baseline from ${BASELINE_FILE} - anything the suites leaked stays visible"
+else
+  node "${leak_check_args[@]}" --write-baseline "${baseline}" --label "before the cancelled run" || {
+    echo "ERROR: could not record a baseline; the cancelled-run check cannot interpret anything without one" >&2
+    exit 1
+  }
+fi
 
 echo "==> [2/5] starting ${SUITE} and waiting for a real browser"
 # ⚠️ DEFINED BEFORE THE RUNNER LAUNCHES, AND THEREFORE BEFORE THE TRAP IS ARMED.

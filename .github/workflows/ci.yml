@@ -379,10 +379,19 @@ jobs:
         # The script kills the runner's process GROUP and deliberately spares anything
         # `ProcessRunner` detached into its own, which is what a cancellation leaves behind.
         if: always()
+        #
+        # BASELINE_FILE hands this check the JOB-level baseline rather than letting it take a
+        # fresh one. That is what stops a survivor reported by the step above from being
+        # subtracted here and never mentioned again — reported-then-hidden, raised twice by
+        # review. The step above cannot reap (it cannot establish run-specific ownership), so the
+        # remedy is to keep the leak VISIBLE to the end of the job rather than to grant that step
+        # the authority to kill things it cannot prove are its own.
         env:
           WAIT_SECONDS: '180'
         run: |
-          BROWSERS_PATH="$HOME/.cache/ms-playwright" bash scripts/browser-cancelled-run-check.sh
+          BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+          BASELINE_FILE="$RUNNER_TEMP/browser-baseline.txt" \
+          bash scripts/browser-cancelled-run-check.sh
 
       - name: Job summary
         if: always()
