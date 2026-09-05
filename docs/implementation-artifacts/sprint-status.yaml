@@ -104,6 +104,12 @@ development_status:
   # removed from scope - fixtures/corpus/ is not in REVIEW_IGNORE_PATHS, and the closing
   # wave should not re-stale sign-offs for work that can be done at any time afterwards.
   6-10-corpus-evidence-kind-expectations: review
+  # Second follow-up story written by the epic-6 supervisor, during wave 3 (2026-09-05) with the
+  # owner's agreement; not in epics.md. The gap is inherited from Epic 4 - the setup stage is still
+  # the placeholder that names Epic 4 as its filler - and the 6.x number records where it was found,
+  # not where it belongs. UNASSIGNED and unscheduled; the row exists so that sprint-status.sh can
+  # see its key if the story is ever picked up and merged.
+  6-11-setup-stage-executes-configured-install: ready-for-dev
   epic-6-retrospective: optional
 
   epic-7: backlog
