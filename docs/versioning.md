@@ -13,11 +13,16 @@ What SpecWitness's version number means, and how releases reach npm.
 | --- | --- |
 | **Version** | `0.1.0` |
 | **Published** | no — the name is unclaimed on npm |
-| **Package contents** | `dist/cli.js`, `dist/cli.js.map`, `package.json`, `templates/config.yaml`, `templates/.gitkeep` — 5 files, 844 kB packed |
+| **Package contents** | `dist/cli.js`, `dist/cli.js.map`, `package.json`, `README.md`, `templates/config.yaml`, `templates/.gitkeep` — **6 files, 853.7 kB packed, 2.9 MB unpacked** |
 | **Node floor** | `>=22.13` (ADR-007) |
 
 Verified with `npm publish --dry-run`, which is run on every CI build by
 `scripts/pack-smoke.sh` alongside a real pack-install-and-run of the tarball.
+
+`README.md` is in that list even though `files` names only `dist` and `templates`: npm
+always includes the readme, the licence, the changelog and `package.json` regardless of
+the allow-list. That is npm's rule rather than a setting of ours, and it is why the
+packaging check allows those four by name.
 
 ---
 

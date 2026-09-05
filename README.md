@@ -265,12 +265,13 @@ a correction is a later line and the last record wins. `scorecard` adjudicates n
 can exit `0`, `64` or `3`, and never `1` or `2`.
 
 > **⚠️ Status.** These two commands are story 6.6 of this epic, developed in parallel with
-> this README and **not yet merged when this section was written**. The surface above is
-> the authoritative one its author published at intent-sync, and it is documented here so
-> the epic merges with complete documentation rather than a gap. **It is the only section
-> of this README not verified against a built binary.** If `specwitness scorecard --help`
-> disagrees with the text above, the binary is right and this is a documentation bug —
-> please report it.
+> this README and **not yet merged when this section was written**, so they are the one
+> part of this README not verified by running the binary. The surface above was
+> cross-checked against 6.6's implementation source — `--criterion` and `--attribution`
+> are both `requiredOption`s, and `duplicate-of-earlier-gate` is accepted as an alias for
+> `duplicate` — and matches the specification its author published. If
+> `specwitness scorecard --help` ever disagrees with the text above, the binary is right
+> and this is a documentation bug; please report it.
 
 ### `verify` flags
 
