@@ -1,0 +1,40 @@
+# SpecWitness Project Config for the corpus fixture `setup-install-fails`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Every command here is `sh <relative path inside this fixture>`:
+# argv, never a shell line, with nothing to quote and nothing for a shell to
+# interpret even if one were involved.
+#
+# ⚠️ THIS TARGET IS NOT A NODE PROJECT — no `package.json` at any depth. See the
+# sibling fixture `setup-install-runs` for why that is the point.
+#
+# ⚠️ EVERYTHING EXCEPT THE INSTALL WOULD SUCCEED, DELIBERATELY. The gate exits
+# zero on any tree and the probe reads a file that is committed rather than
+# produced. So a run in which the setup stage did nothing — which is exactly
+# what the placeholder story 6.11 replaced did — reaches PASS at exit 0. The
+# expectation pins exit 3, so the fixture can only be green if the install
+# actually ran AND its failure was classified as infrastructure.
+
+version: 1
+
+project:
+  baseBranch: master
+
+setup:
+  # THE FAILING INSTALL. It exits 7 — a distinctive code, so the expectation can
+  # pin that the run reported the child's real exit status rather than a
+  # normalised one.
+  install: sh scripts/prepare_deps.sh
+
+gates:
+  # WOULD PASS IF IT RAN, and it must never run: the pipeline stops at `setup`,
+  # so the gates stage is recorded `skipped` and this script is never spawned.
+  # `expected.json` pins that structurally — the run's evidence must contain NO
+  # `gate` kind.
+  - { id: always-ready, run: sh gates/always_ready.sh }
+
+observations:
+  manifest:
+    run: sh commands/report_manifest.sh

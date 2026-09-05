@@ -312,18 +312,34 @@ function notFoundError(gate: GateConfig, binary: string): InfraError {
   // The same test doctor's resolver applies, and for the same reason.
   const namesAFile = binary.includes('/') || binary.includes('\\');
 
+  // REDACTED, because the executable token is not always a program name. Under AD-3 there
+  // is no shell, so a plausible-but-unsupported declaration like `NPM_TOKEN=… pnpm test` —
+  // the shape a developer reaches for when a private registry needs a token — tokenizes
+  // with `NPM_TOKEN=…` AS THE EXECUTABLE. Nothing on PATH is called that, so it lands here,
+  // and an unredacted message would print the credential to the terminal and into the
+  // timeline detail. The failure is a CONFIGURATION mistake, which makes this exactly the
+  // message an operator pastes into an issue.
+  //
+  // `{shellCommand: true}` because this token is DECLARED text the project owner wrote,
+  // which is the context that option is reserved for.
+  //
+  // Found during story 6.11, whose own `setup.ts` closed the identical hole first; fixed
+  // here as owner-authorised follow-up work rather than silently, because this file
+  // belongs to story 3.4.
+  const shown = redactText(binary, { shellCommand: true });
+
   if (namesAFile) {
     return new InfraError(
-      `gate '${gate.id}' could not start: '${binary}' does not exist in the verification worktree`,
+      `gate '${gate.id}' could not start: '${shown}' does not exist in the verification worktree`,
       `gates run against the revision under verification, not your working copy — commit ` +
-        `'${binary}' (an untracked or uncommitted file will not be there), or correct ` +
+        `'${shown}' (an untracked or uncommitted file will not be there), or correct ` +
         `gates[${gate.id}].run in .specwitness/config.yaml`,
     );
   }
 
   return new InfraError(
-    `gate '${gate.id}' could not start: '${binary}' is not on PATH`,
-    `install '${binary}', or correct gates[${gate.id}].run in .specwitness/config.yaml — ` +
+    `gate '${gate.id}' could not start: '${shown}' is not on PATH`,
+    `install '${shown}', or correct gates[${gate.id}].run in .specwitness/config.yaml — ` +
       'this is an environment problem, not a failure of the branch under verification',
   );
 }

@@ -402,6 +402,40 @@ const SENSITIVE_SEGMENTS = new Set([
   'credential',
   'credentials',
   'auth',
+  // ── Added after a measured gap, and added as WHOLE SEGMENTS on purpose ──────────────
+  //
+  // Found during story 6.11's follow-up: `PGPASSWORD=…` and `MYSQL_PWD=…` passed through
+  // this redactor untouched while `PASSWORD=`, `DB_PASSWORD=` and `NPM_TOKEN=` were
+  // redacted. That is the redactor at its weakest exactly where a real credential is most
+  // likely — `PGPASSWORD` is libpq's standard variable, and a project's `data.reset` is
+  // where somebody writes it.
+  //
+  // ⚠️ THE OBVIOUS FIX WAS REJECTED. Loosening the matcher so `password` is found INSIDE
+  // `pgpassword` would find `key` inside `monkey`, which is the precise failure the
+  // comment above exists to prevent. A too-eager redactor produces evidence nobody can
+  // read, and people respond to that by opening the unredacted file. So the boundary rule
+  // is untouched and the vocabulary grows instead.
+  //
+  // `pgpassword` has no separator, so `nameSegments` yields the single segment
+  // `pgpassword` and this entry matches it exactly. (`pgPassword` already redacted, via
+  // the camelCase split to `pg` + `password`.)
+  'pgpassword',
+  // `pwd` is what `MYSQL_PWD` reduces to (`['mysql','pwd']`). It is SAFE as a whole
+  // segment and would be reckless as a substring: as a substring it would hit `password`,
+  // `passwd` and every innocent name containing those three letters, whereas as a segment
+  // it matches only a name whose final word IS `pwd`.
+  //
+  // The one real collision is worth stating rather than discovering: bare `PWD`, the POSIX
+  // working-directory variable, now redacts — it reduces to the single segment `pwd`. That
+  // is accepted, and it is closer to a small win than a cost: `PWD` holds an ABSOLUTE PATH,
+  // usually under the operator's home directory, and keeping absolute home paths out of
+  // persisted evidence is a requirement this project already has (AD-10). The name survives
+  // as `PWD=[REDACTED]`, so a reader still sees which variable was involved. Pinned by a
+  // test so it stays a recorded decision rather than a surprise.
+  //
+  // `OLDPWD` is NOT caught — it reduces to `oldpwd`, one segment, and no entry matches it.
+  // That asymmetry is the whole-segment rule working as designed, not an oversight.
+  'pwd',
 ]);
 
 /** Splits `ANTHROPIC_API_KEY` / `apiKey` / `db-credentials` into lowercase words. */

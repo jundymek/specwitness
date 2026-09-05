@@ -161,8 +161,9 @@ It permits the agent to run **any** `specwitness` subcommand with **any** argume
 is broader than "run the verification", and it includes at least:
 
 - `specwitness verify …` — which **executes commands declared in that project's
-  `.specwitness/config.yaml`**: gates, services, data commands, observation commands. The
-  grant is therefore effectively "run this project's declared commands".
+  `.specwitness/config.yaml`**: the `setup.install` command, gates, services, data commands,
+  observation commands. The grant is therefore effectively "run this project's declared
+  commands".
 - `specwitness init --force` — overwrites `config.yaml` (nothing else).
 - `specwitness clean --all` — reaps worktrees and process groups. It never deletes results.
 - `specwitness contract <epic> --freeze` — freezes a contract.
@@ -178,8 +179,8 @@ cannot express a command at all — a probe carries a `commandId` referring to a
 declared in `.specwitness/config.yaml`, and the path from a declared command to a child
 process is `ProcessRunner.run(binary, args)` with no shell anywhere in it, so `;` and
 `$(…)` arrive at the child as literal argv text. **The set of executables that can run
-against your project is exactly the set a human committed to the config** — gates,
-services, data commands, observations and shell probes.
+against your project is exactly the set a human committed to the config** — `setup.install`,
+gates, services, data commands, observations and shell probes.
 
 **SpecWitness also runs its own fixed toolchain, which your config does not list:** `git`
 (`src/infra/vcs.ts:495`), the `claude`/`codex` binary behind a configured AI role (the
@@ -443,6 +444,12 @@ it, it has its own section immediately below.
 > `64` deliberately sits outside `0`–`3` so a typo in a flag can never be read as
 > `NEEDS_HUMAN`. And a bare `specwitness` with no command exits `64`, not `0`, because `0`
 > means merge-eligible and the tool fails closed.
+>
+> **The commonest `3` for a project that declares `setup.install` is a failed install** —
+> a lockfile that no longer matches, an unreachable registry, a package manager not on
+> `PATH`. The run stops before the first gate and every later stage is recorded `skipped`.
+> Reporting that as a failing epic would blame a branch for a broken registry, which is
+> precisely what this row exists to prevent.
 
 A minimal, correct branch:
 

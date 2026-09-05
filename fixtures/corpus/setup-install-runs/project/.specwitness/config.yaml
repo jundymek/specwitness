@@ -1,0 +1,44 @@
+# SpecWitness Project Config for the corpus fixture `setup-install-runs`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Every command here is `sh <relative path inside this fixture>`:
+# argv, never a shell line, with nothing to quote and nothing for a shell to
+# interpret even if one were involved. Each script is a handful of lines of
+# POSIX shell that touch nothing outside the verification worktree, fetch
+# nothing, and read nothing from the machine running the suite.
+#
+# ⚠️ THIS TARGET IS NOT A NODE PROJECT. There is no `package.json` at any depth
+# and no ecosystem-specific tool anywhere. That is the point rather than an
+# economy: `setup.install` promises to run WHATEVER the operator declared, and a
+# fixture that only ever proved itself with a JavaScript package manager would
+# have proved something narrower than the key promises. The same stance story
+# 6.4 takes for gates, services and observations, one surface down.
+#
+# No services and no ports: this fixture is decided by the SETUP stage, and
+# everything that could fail for another reason is deliberately absent.
+
+version: 1
+
+project:
+  baseBranch: master
+
+setup:
+  # THE COMMAND THIS FIXTURE EXISTS FOR. It writes a marker into the
+  # verification worktree, and both the gate and the probe below require that
+  # marker — so if the setup stage ever stops executing this line, the gate
+  # fails and this fixture goes red with exit 1 instead of the pinned exit 0.
+  # That is the whole proof: under the placeholder this file replaced, this
+  # fixture does not pass.
+  install: sh scripts/prepare_deps.sh
+
+gates:
+  # Runs AFTER setup and BEFORE the probes (stage 5 of 11, setup is stage 4).
+  # Its failure message names the setup stage, because "the marker is missing"
+  # has exactly one cause here and a reader should not have to work it out.
+  - { id: deps-present, run: sh gates/deps_present.sh }
+
+observations:
+  deps:
+    run: sh commands/report_deps.sh

@@ -432,15 +432,25 @@ async function record(
 function notFoundError(dataId: string, binary: string): InfraError {
   const isPath = binary.includes('/') || binary.includes('\\');
 
+  // REDACTED, for the reason `gates.ts` records at its own `notFoundError`: under AD-3 there is
+  // no shell, so a declaration shaped `NPM_TOKEN=… ./scripts/reset.sh` tokenizes with the
+  // assignment AS THE EXECUTABLE, nothing on PATH is called that, and it lands here — in a
+  // message an operator pastes into an issue, because the failure is a configuration mistake.
+  // `{shellCommand: true}` because this token is DECLARED text the project owner wrote.
+  //
+  // Found during story 6.11 and fixed here as owner-authorised follow-up work rather than
+  // silently, because this file belongs to story 4.3.
+  const shown = redactText(binary, { shellCommand: true });
+
   return isPath
     ? new InfraError(
-        `data command '${dataId}' could not run: '${binary}' does not exist in the verification worktree`,
-        `'${binary}' names a file rather than a PATH lookup — check that it is committed on the ` +
+        `data command '${dataId}' could not run: '${shown}' does not exist in the verification worktree`,
+        `'${shown}' names a file rather than a PATH lookup — check that it is committed on the ` +
           'branch under verification and is executable',
       )
     : new InfraError(
-        `data command '${dataId}' could not run: '${binary}' is not on PATH`,
-        `install '${binary}', or correct data.${dataId} in .specwitness/config.yaml`,
+        `data command '${dataId}' could not run: '${shown}' is not on PATH`,
+        `install '${shown}', or correct data.${dataId} in .specwitness/config.yaml`,
       );
 }
 

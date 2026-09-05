@@ -1,0 +1,26 @@
+{
+  "expectedVersion": 1,
+  "fixture": "setup-install-runs",
+  "why": "Story 6.11: the setup stage executes the Project Config's setup.install command inside the verification worktree, before the gates stage. This embodies no defect class from brief section 7 -- it is the proof for a key that was accepted by the config schema, validated by doctor's commands-resolvable check, and never executed by verify, for the whole of Epics 4, 5 and 6. THE FIXTURE IS BUILT SO THAT THE PLACEHOLDER IT REPLACED WOULD FAIL IT: the declared install writes vendor/installed.txt into the worktree, and both the gate (stage 5) and the shell probe (stage 8) require that file. Under the merged placeholder the setup stage reported ok and spawned nothing, so the gate would exit 1 and this fixture would be FAIL at exit 1 -- an environment problem reported as the branch being wrong, which is exactly the inversion CLAUDE.md names as its first non-negotiable rule. Pinning exit 0 PASS is therefore pinning that the install actually ran. The target is deliberately NOT a Node project -- no package.json at any depth, POSIX shell only -- because setup.install promises to run whatever the operator declared, and a fixture that only ever proved itself with a JavaScript package manager would have proved something narrower than the key promises (the same stance story 6.4 takes for gates and services, one surface down). The stderrContains entries pin three separate things: the setup stage's own timeline detail carrying the command and its exit code (AC1); the gate's Evidence line, which is what proves the gate ran AFTER the install and saw its output; and the probe's Evidence line, which proves the probes stage four positions later still sees the tree the install prepared. The stderrAbsent entries pin that the placeholder's text is gone -- a stage that has been implemented must not keep announcing that it has not been.",
+  "proves": ["AC1", "AC5", "FR-4", "AD-3", "AD-8", "AD-11", "NFR-10", "AD-12", "ADR-002"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass"
+    }
+  },
+  "evidence": {
+    "assertion": "exact",
+    "kinds": ["command", "gate"]
+  },
+  "stderrContains": [
+    "installed with 'sh scripts/prepare_deps.sh' (exit code 0",
+    "  command setup.install (exit 0): sh scripts/prepare_deps.sh",
+    "  gate deps-present (pass, exit 0): sh gates/deps_present.sh",
+    "  command deps (exit 0): sh commands/report_deps.sh"
+  ],
+  "stderrAbsent": ["not implemented", "Epic 4 runs the configured install command", "FAIL"]
+}

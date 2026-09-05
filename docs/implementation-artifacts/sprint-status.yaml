@@ -107,9 +107,11 @@ development_status:
   # Second follow-up story written by the epic-6 supervisor, during wave 3 (2026-09-05) with the
   # owner's agreement; not in epics.md. The gap is inherited from Epic 4 - the setup stage is still
   # the placeholder that names Epic 4 as its filler - and the 6.x number records where it was found,
-  # not where it belongs. UNASSIGNED and unscheduled; the row exists so that sprint-status.sh can
-  # see its key if the story is ever picked up and merged.
-  6-11-setup-stage-executes-configured-install: ready-for-dev
+  # not where it belongs. SCHEDULED by owner decision 2026-09-05 as a SOLO follow-up cohort on
+  # epic/6-11-setup-stage, after Epic 6 merged to master (233b5b5, PR #77), answering action item
+  # e6-F. The setup stage now executes setup.install in the verification worktree; a failed install
+  # is an infra error (exit 3) with the gates stage skipped, never a product FAIL.
+  6-11-setup-stage-executes-configured-install: done
   epic-6-retrospective: done
 
   epic-7: backlog
@@ -145,6 +147,15 @@ action_items:
   - {id: e6-C, epic: 6, action: 'harness: e3-A is wrong in BOTH directions and on trivially-checkable inputs (findings reported over a one-markdown-file commit) - make the classifier content-based or stop emitting a label', owner: owner-harness, status: open}
   - {id: e6-D, epic: 6, action: 'harness: block-loops.sh has no run OR epic boundary - the first pass inherited four wave-2 incidents and one from a different epic dated 2026-09-03 (widens e5-H)', owner: owner-harness, status: open}
   - {id: e6-E, epic: 6, action: 'harness: a DIRECT push to the epic branch nudges nobody - no epic-updated, no rebase_pending; twice this wave the supervisor was the only detector', owner: owner-harness, status: open}
-  - {id: e6-F, epic: 6, action: 'decide setup.install: schedule story 6.11, or state the key is inert and make doctor say so', owner: owner, status: 'answered 2026-09-05: 6.11 scheduled as a solo follow-up cohort on its own branch, after Epic 6 closed - retro 6 names it the one thing that will bite immediately in Epic 7'}
+  # e6-F closed 2026-09-05: story 6.11 ran as a solo follow-up cohort on epic/6-11-setup-stage
+  # and merged (PR #78). The setup stage now executes the declared install in the verification
+  # worktree; a failed install is exit 3 with the gates stage skipped, never a product FAIL.
+  # doctor needed no change - it was already the correct half of the disagreement - and a test
+  # now drives both surfaces from one config. Status is the canonical 'done' rather than prose
+  # so that bmad-sprint-planning actually retires it (sprint_status.py ACTION_STATUSES).
+  - {id: e6-F, epic: 6, action: 'decide setup.install: schedule story 6.11, or state the key is inert and make doctor say so', owner: owner, status: done}
   - {id: e6-G, epic: 6, action: 'decide the closing-pipe exit-1 fix before 0.1.0 is dogfooded, or accept the documented limitation', owner: owner, status: open}
   - {id: e6-H, epic: 6, action: 'harness: running a peer test suite from the supervisor worktree logs tests-passed under the SUPERVISOR agent id', owner: owner-harness, status: open}
+  # From the epic/6-11-setup-stage retrospective (docs/findings/epic-6-11-retro-2026-09-05.md).
+  - {id: e6.11-A, epic: 6.11, action: 'process: a SUPERVISOR-authored spec must cite path:line read in the authoring session for every claim about merged behaviour - the rule such specs already impose on their implementer (e5-B). Two claims in the 6.11 spec were wrong: AC3 required an infra error to reach aggregate/persist, which run-pipeline.ts:322-329 has never done for any stage, and the placeholder call-site count was seven against a real two', owner: owner-process, status: open}
+  - {id: e6.11-B, epic: 6.11, action: 'decide URL-userinfo redaction: DATABASE_URL=postgres://admin:SECRET@db/app leaks whole, and so does a bare connection string in captured output with no assignment at all, which no name-based rule can reach. Needs a value-shaped rule in src/domain/evidence.ts (the single chokepoint before persistence), backtracking-free, idempotent against the marker pass, with its own corpus of URL shapes INCLUDING ones that must not change. Measured and reproduced by the supervisor; more consequential than the PGPASSWORD gap 6.11 closed', owner: owner, status: open}

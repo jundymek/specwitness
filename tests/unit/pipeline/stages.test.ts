@@ -416,7 +416,12 @@ describe('a full gates-only run through the real stages', () => {
     // which story fills it, and story 3.4 filling it is that assertion coming
     // true. Re-adding a gates row to check the new stage's wording would test
     // 3.4's strings from 3.3's file, which is worse than not testing them.
-    expect(detailOf('setup')).toContain('Epic 4');
+    // `setup` was on this list until story 6.11 filled it, and the line is REPLACED rather than
+    // deleted for the reason `persist` states below: the shrinking of this list is how a
+    // placeholder being replaced becomes visible. A filled stage must stop naming a story to
+    // come, and this one had named Epic 4 for two epics after Epic 4 shipped without it.
+    expect(detailOf('setup')).not.toContain('Epic 4');
+    expect(detailOf('setup')).not.toContain('not implemented');
     // `persist` was on this list until story 3.5 filled it. A stage that is implemented
     // no longer names a story to come — it reports what it actually did — so the shrinking
     // of this list is how a placeholder being replaced becomes visible. 3.1 and 3.4 remove
