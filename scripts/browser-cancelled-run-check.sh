@@ -257,6 +257,19 @@ echo "    SPARED, as pid:pgid (detached into their own group, as a real cancella
 echo "    already gone before the kill (no pgid to read; NOT orphans):${vanished:- none}"
 wait "${runner_pid}" 2>/dev/null
 
+# WARNING: A DEAD PID IS NOT A HANDLE, AND KEEPING ONE IS HOW THE TRAP TURNS DESTRUCTIVE.
+#
+# Raised as a P2 on this branch, and it is the THIRD time pid reuse has bitten this story - after
+# the baseline identity and the three-second tolerance. The runner has now been killed and
+# reaped, so runner_pid refers to nothing. The orphan wait below can run for up to WAIT_SECONDS,
+# and if the OS hands that pid to an unrelated process in the meantime, the EXIT trap would walk
+# ITS descendants and SIGKILL a process tree that has nothing to do with this check.
+#
+# Cleared rather than verified: there is no handle left worth keeping. The trap still reaps the
+# detached groups through `spared`, which is what actually needs cleaning up from here on, and
+# those are named by pgid with the scanner ownership guards in front of them.
+runner_pid=""
+
 # What actually became of each orphan, measured rather than inferred. This is the number the
 # PR body has to carry: "how long does a cancelled browser run leak for?" A spared process that
 # exits on its own says the detached tree is self-limiting after all; one that is still there
