@@ -274,9 +274,23 @@ function medianOf(values: readonly number[]): number | null {
     : ((sorted[middle - 1] as number) + (sorted[middle] as number)) / 2;
 }
 
-/** The join key. ` ` cannot occur in either id, so no pair can collide with another. */
+/**
+ * The join key for a `(runId, criterionId)` pair.
+ *
+ * The separator is NUL, written as the ESCAPE `\u0000` and never as a raw byte. A raw
+ * one is byte-identical at runtime and was how this was first written -- and it made the
+ * whole module `data` rather than text, so `grep`, `file` and every text-based scan
+ * SILENTLY SKIPPED IT. `grep -c "scorecard" src/report/scorecard-summary.ts` matched
+ * nothing in the file that computes the north-star metric, and a scan returning no
+ * matches looks exactly like a scan that passed. Caught by the supervisor on PR #76
+ * after eleven review rounds and two independent clean reviews missed it, because
+ * there was nothing to see: the diff renders as ordinary text.
+ *
+ * NUL is still the right separator -- it cannot occur in a canonical run id or criterion
+ * id, so no two pairs can collide. Only the spelling changed.
+ */
 function key(runId: string, criterionId: string): string {
-  return `${runId} ${criterionId}`;
+  return `${runId}\u0000${criterionId}`;
 }
 
 /**
