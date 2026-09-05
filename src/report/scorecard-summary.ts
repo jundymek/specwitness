@@ -478,8 +478,13 @@ export function renderScorecardSummaryJson(summary: ScorecardSummary): string {
  * The two scorecard log parsers both produce these messages, and this renderer is the
  * only place either reaches a terminal, so one guard here covers both. Story 6.5's parser
  * is merged code and is deliberately not modified.
+ *
+ * EXPORTED because `scorecard add` echoes the operator's own `--note` back to stdout and
+ * needs exactly the same treatment - round 5 of the same review found that second site
+ * after round 4 fixed this one. One implementation rather than two: a sanitiser that
+ * exists twice is a sanitiser that gets fixed once.
  */
-function printable(text: string): string {
+export function printable(text: string): string {
   // C0 (00–1F), DEL (7F) and C1 (80–9F). Rendered as `\xNN` so the operator can still see
   // exactly what was in the file without the terminal acting on it.
   // eslint-disable-next-line no-control-regex

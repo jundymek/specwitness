@@ -161,6 +161,32 @@ describe('scorecard add — the happy path', () => {
     expect(text).not.toContain(secret);
   });
 
+  it('escapes control characters when echoing the note back', async () => {
+    // A P2 from round 5 of the codex review — the same class round 4 fixed in the summary
+    // renderer, at a second site the first fix did not cover. `--note` is operator text
+    // echoed to stdout; `boundedText` redacts and truncates it but does NOT make it
+    // terminal-safe, so a newline could forge an output line and an ESC could emit a
+    // control sequence, against this command's own no-colour guarantee.
+    const root = await project();
+    const esc = String.fromCharCode(27);
+
+    const output = await runScorecardAdd(
+      root,
+      RUN_ID,
+      {
+        criterion: 'E6-01',
+        attribution: 'unique',
+        note: `benign${esc}[31m\nRecorded E6-99 in run-forged as unique`,
+      },
+      clock,
+    );
+
+    expect(output.stdout).not.toContain(esc);
+    // One line out, whatever went in — the forged line cannot start its own.
+    expect(output.stdout.trimEnd()).not.toContain('\n');
+    expect(output.stdout).toContain('benign');
+  });
+
   it('allows a re-attribution — people change their minds', async () => {
     const root = await project();
     await runScorecardAdd(root, RUN_ID, { criterion: 'E6-01', attribution: 'unique' }, clock);

@@ -73,6 +73,7 @@ import { AttributionStore } from '../../infra/attribution-store.js';
 import { SystemClock } from '../../infra/clock.js';
 import { ScorecardStore } from '../../infra/scorecard-store.js';
 import {
+  printable,
   renderScorecardSummaryJson,
   renderScorecardSummaryTerminal,
   summarizeScorecard,
@@ -257,10 +258,19 @@ export async function runScorecardAdd(
 
   await new AttributionStore(projectRoot).append(built);
 
+  // THE NOTE IS ESCAPED ON THE WAY BACK OUT, and round 5 of the codex review found
+  // this second site after round 4 fixed the first. `--note` is operator-supplied text
+  // echoed to stdout; `boundedText` redacts and truncates it but does NOT make it
+  // terminal-safe, so a newline or an ESC in a note could forge an output line or emit a
+  // control sequence - against this command's own no-colour, no-control guarantee.
+  //
+  // `runId` and `criterionId` need no escaping: both are validated against canonical
+  // patterns above and cannot contain a control character. They are left raw so the
+  // confirmation reads exactly as the operator typed it.
   return {
     stdout:
       `Recorded ${criterionId} in ${runId} as ${attribution}` +
-      `${built.note === undefined ? '' : ` — ${built.note}`}\n`,
+      `${built.note === undefined ? '' : ` — ${printable(built.note)}`}\n`,
     stderr: warning,
   };
 }
