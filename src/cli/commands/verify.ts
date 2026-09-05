@@ -404,6 +404,23 @@ async function verify(
     stages: createStages({
       assertVerifiableContract: () => assertVerifiableContract(loaded),
       worktree: { vcs, recorder: store, root },
+      // The declared `setup.install`, executed in the worktree BEFORE the gates
+      // (story 6.11). Bound UNCONDITIONALLY, not only when the project declared
+      // one: an absent `install` is a state the stage reports ("no install
+      // command declared"), whereas an absent `setup` key would be the state
+      // this story exists to remove — a run in which `doctor` validated the key
+      // and nothing executed it, so gates ran against an uninstalled worktree
+      // and a missing install surfaced as a product FAIL.
+      //
+      // Spread so a project that declared nothing gets an object with NO
+      // `install` key rather than an explicit `undefined`
+      // (`exactOptionalPropertyTypes`).
+      setup: {
+        ...(config.setup.install === undefined ? {} : { install: config.setup.install }),
+        runner,
+        writeEvidence,
+        onProcessGroup: recordProcessGroup,
+      },
       // The declared gates, executed in the worktree. `writeEvidence` is bound
       // to the run so the stage cannot address another run's directory, and
       // `onProcessGroup` records each pgid durably — which is what lets

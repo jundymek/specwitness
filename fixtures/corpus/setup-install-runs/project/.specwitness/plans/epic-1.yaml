@@ -1,0 +1,52 @@
+# Hand-written Verification Plan for the corpus fixture `setup-install-runs`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, story 6.1 AC1). The `contract.fingerprint` below must match the frozen
+# contract beside it; the runner does not patch it, so a contract re-freeze
+# means this line is re-copied by hand.
+#
+# ⚠️ NOTHING IN THIS FILE NAMES A LANGUAGE OR A PACKAGE MANAGER. The probe
+# references a `commandId` — a key the Project Config declares — and the config
+# is where `sh` appears. The plan for a target whose install is
+# `sh scripts/prepare_deps.sh` is byte for byte the shape it would have for any
+# other target, which is the separation FR-4 is about.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 1e255e22c64ac0490acd03c1022764aafef3da0d4bc58c7ceef9adaf5f3c6f98
+  data:
+    seed: corpusseed000611
+    bindings: []
+  criteria:
+    # The PROBES stage runs at position 8, four stages after `setup`. Reading the
+    # marker back here proves the probe sees the same prepared worktree the gate
+    # saw at position 5 — a fixture that only asserted the gate would not have
+    # said that.
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: deps-marker
+          surface: shell
+          mechanics:
+            commandId: deps
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the marker command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: the marker reports the installed version
+              target: { source: stdout }
+              comparison: contains
+              expected: deps-installed 1.0.0
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-05T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

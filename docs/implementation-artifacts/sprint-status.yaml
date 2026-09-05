@@ -107,9 +107,11 @@ development_status:
   # Second follow-up story written by the epic-6 supervisor, during wave 3 (2026-09-05) with the
   # owner's agreement; not in epics.md. The gap is inherited from Epic 4 - the setup stage is still
   # the placeholder that names Epic 4 as its filler - and the 6.x number records where it was found,
-  # not where it belongs. UNASSIGNED and unscheduled; the row exists so that sprint-status.sh can
-  # see its key if the story is ever picked up and merged.
-  6-11-setup-stage-executes-configured-install: ready-for-dev
+  # not where it belongs. SCHEDULED by owner decision 2026-09-05 as a SOLO follow-up cohort on
+  # epic/6-11-setup-stage, after Epic 6 merged to master (233b5b5, PR #77), answering action item
+  # e6-F. The setup stage now executes setup.install in the verification worktree; a failed install
+  # is an infra error (exit 3) with the gates stage skipped, never a product FAIL.
+  6-11-setup-stage-executes-configured-install: done
   epic-6-retrospective: done
 
   epic-7: backlog
