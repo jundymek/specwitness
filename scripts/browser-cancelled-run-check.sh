@@ -68,6 +68,10 @@ leak_check_args=(scripts/browser-leak-check.mjs)
 if [ -n "${BROWSERS_PATH}" ]; then
   leak_check_args+=(--browsers-path "${BROWSERS_PATH}")
 fi
+# The repository this check is running out of. A detached Playwright runner whose browser has
+# already exited names no browsers registry, but it does name its own cliPath, which lives here.
+# An operator's Playwright from a different project does not - which is the whole point.
+leak_check_args+=(--owned-under "$(pwd)")
 
 echo "==> [1/5] recording what is already running"
 node "${leak_check_args[@]}" --write-baseline "${baseline}" --label "before the cancelled run" || {

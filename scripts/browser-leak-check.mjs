@@ -100,7 +100,7 @@ function usage(message) {
       'usage: node scripts/browser-leak-check.mjs [--browsers-path <dir>]... ' +
       '[--ps-file <path>] [--baseline <path> | --write-baseline <path>] ' +
       '[--write-survivors <path>] [--reap] [--browsers-only] [--owned-pgid <n>]... ' +
-      '[--wait-seconds <n>] [--label <text>]\n',
+      '[--owned-under <dir>]... [--wait-seconds <n>] [--label <text>]\n',
   );
   process.exit(64);
 }
@@ -115,6 +115,7 @@ let writeSurvivorsFile;
 let reap = false;
 let browsersOnly = false;
 const ownedPgids = [];
+const ownedUnder = [];
 let waitSeconds = 0;
 let label = 'after the run';
 
@@ -157,6 +158,25 @@ for (let index = 0; index < argv.length; index += 1) {
     case '--browsers-only':
       browsersOnly = true;
       break;
+    // ⚠️ THE THIRD OWNERSHIP SIGNAL, for the case the other two cannot reach: a detached
+    // Playwright runner whose browser has already exited. Its argv names no browsers registry,
+    // and the normal-exit caller does not know its pgid — so it was reported and left running,
+    // and the NEXT check's fresh baseline then swallowed it. Reported-then-hidden is worse than
+    // reported. Its argv does carry its `cliPath`, which lives under the workspace this job
+    // checked out; an operator's own Playwright, in another project, does not. Raised as a P1
+    // on this branch.
+    case '--owned-under': {
+      if (value === undefined) usage(`ERROR: ${flag} needs a value`);
+      // A directory that claims everything is not an ownership signal.
+      if (!value.startsWith('/') || value === '/' || value.length < 2) {
+        usage(
+          `ERROR: ${flag} needs an absolute directory that is not the filesystem root, got '${value}'`,
+        );
+      }
+      ownedUnder.push(value.replace(/\/+$/, ''));
+      index += 1;
+      break;
+    }
     // The tighter ownership bound, for a caller that KNOWS which groups it spawned.
     //
     // ⚠️ VALIDATED, because an unvalidated value flag swallows the next FLAG. A caller emitted
@@ -562,7 +582,9 @@ function reapSurvivors() {
   // do not all name the registry themselves. `--owned-pgid` narrows it further for a caller that
   // knows exactly which groups it spawned.
   const ownedGroups = new Set(
-    survivors.filter((row) => isOwned(row)).map((row) => row.pgid),
+    survivors
+      .filter((row) => isOwned(row) || ownedUnder.some((dir) => row.args.includes(dir)))
+      .map((row) => row.pgid),
   );
 
   const signallable = [];
@@ -585,7 +607,8 @@ function reapSurvivors() {
     if (!ownedGroups.has(pgid) && !ownedPgids.includes(pgid)) {
       lines.push(
         `    NOT reaped, reported only: process group ${pgid} is not owned by this run ` +
-          '(no member came from the browsers registry given, and no caller claimed it)',
+          '(no member came from the browsers registry or an owned directory, and no caller ' +
+          'claimed it)',
       );
       continue;
     }

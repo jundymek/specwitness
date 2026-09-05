@@ -349,9 +349,17 @@ jobs:
         # Reaping happens after the report and does not change the exit code, so a leak that
         # had to be reaped still fails this step.
         if: always()
+        #
+        # `--owned-under` names this workspace, and it is not decoration: when chromium has
+        # exited but its detached `@playwright/test/cli.js` runner has not, that runner's argv
+        # carries no browsers-registry path and this step does not know its pgid — so without a
+        # third ownership signal it was reported and left running, and the cancelled-run check's
+        # fresh baseline then swallowed it. Reported-then-hidden is worse than reported. The
+        # runner's argv does carry its `cliPath`, which lives under the checkout.
         run: |
           node scripts/browser-leak-check.mjs \
             --browsers-path "$HOME/.cache/ms-playwright" \
+            --owned-under "$GITHUB_WORKSPACE" \
             --baseline "$RUNNER_TEMP/browser-baseline.txt" \
             --wait-seconds 30 \
             --reap \

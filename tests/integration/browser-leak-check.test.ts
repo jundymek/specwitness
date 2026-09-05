@@ -791,6 +791,91 @@ describe('the browser leak check', () => {
     expect(stdout).not.toContain('would signal process group 6001');
   });
 
+  /**
+   * ⚠️ **A THIRD OWNERSHIP SIGNAL, FOR THE CASE THE OTHER TWO CANNOT REACH.** Raised as a P1 by
+   * the Codex review of this branch, and it defeated my own reasoning about an accepted residual.
+   *
+   * When chromium exits but its detached `@playwright/test/cli.js` runner does not, the runner is
+   * reported — but the normal-exit CI step supplies no `--owned-pgid` (it does not know the
+   * pgids), and the runner's argv names no browsers registry. So it was reported and left. I had
+   * written that off as the conservative default.
+   *
+   * The part I had missed: **the very next check takes a fresh baseline, which then contains that
+   * process, and subtracts it.** So the job finishes carrying exactly the leaked tree AC4 exists
+   * to clean up, and nothing reports it a second time. Reported-then-hidden is worse than
+   * reported.
+   *
+   * `--owned-under <dir>` closes it precisely: the runner's argv carries its `cliPath`, which
+   * lives under the workspace this job checked out. An operator's own Playwright, in another
+   * project, does not.
+   */
+  it('claims a Playwright runner whose argv lives under an owned directory', async () => {
+    const psFile = await listing(
+      '   6001    6000    6001       00:20 /usr/bin/node /work/specwitness/node_modules/@playwright/test/cli.js test --config /tmp/x/pw.mjs',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-under',
+      '/work/specwitness',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('would signal process group 6001');
+  });
+
+  it('does not claim a Playwright runner from a different project', async () => {
+    const psFile = await listing(
+      '   6002    6000    6002       00:20 /usr/bin/node /home/dev/other-project/node_modules/@playwright/test/cli.js test',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-under',
+      '/work/specwitness',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('not owned by this run');
+    expect(stdout).not.toContain('would signal process group 6002');
+  });
+
+  /**
+   * ⚠️ A directory that claims everything is not an ownership signal. `/` would make every
+   * process on the machine "owned", which is the destructive direction this whole guard exists
+   * to close — so it is refused outright rather than accepted and regretted.
+   */
+  it('refuses an --owned-under that would claim the whole filesystem', async () => {
+    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
+
+    const { exitCode, stderr } = await run([
+      '--ps-file',
+      psFile,
+      '--owned-under',
+      '/',
+    ]);
+
+    expect(exitCode).toBe(64);
+    expect(stderr).toContain('--owned-under');
+  });
+
+  it('refuses a relative --owned-under, which would match unpredictably', async () => {
+    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
+
+    const { exitCode, stderr } = await run(['--ps-file', psFile, '--owned-under', 'node_modules']);
+
+    expect(exitCode).toBe(64);
+    expect(stderr).toContain('--owned-under');
+  });
+
   it('reaps nothing, and says so, when nothing survived', async () => {
     const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
 
