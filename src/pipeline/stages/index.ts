@@ -28,6 +28,7 @@ import { createResolveStage } from './resolve.js';
 import { createServicesStage } from './services.js';
 import type { ServicesStageDeps } from './services.js';
 import { createSetupStage } from './setup.js';
+import type { SetupStageDeps } from './setup.js';
 import { createTeardownStage } from './teardown.js';
 import type { TeardownDeps } from './teardown.js';
 import { createWorktreeStage } from './worktree.js';
@@ -54,6 +55,30 @@ export interface StageDependencies {
    * The CLI edge always binds it for a real `verify`.
    */
   readonly worktree?: WorktreeStageDeps;
+  /**
+   * The project's `setup.install` command plus the runner it needs (story 6.11).
+   *
+   * Optional, and the asymmetry with `gates` is the one `services` and `data` already have: an
+   * unwired setup stage installs nothing and SAYS SO in its timeline, and because it produces no
+   * `GateResult` and no criterion it cannot manufacture a verdict on its own, whereas an empty
+   * gate set aggregates to PASS and an unwired gates run would read as a green build.
+   *
+   * `install` is optional INSIDE this object rather than being expressed by omitting the object,
+   * because "the runner is wired and this project declared no install" and "nothing was wired at
+   * all" are different states and the timeline must be able to say which one a run was in.
+   *
+   * Note the interaction with `worktree` above, which is the same one gates, services and data
+   * have and is at its sharpest here: the install runs in the worktree, so a run that binds setup
+   * without binding the worktree seam raises an `InfraError` rather than falling back to the
+   * project root. `pnpm install` in the operator's own directory would not merely verify the
+   * wrong tree — it would rewrite that tree's dependencies (AD-8, FR-19).
+   *
+   * ⚠️ **The CLI edge must bind this whenever it binds gates.** Until story 6.11 there was no key
+   * to bind and `verify` never executed `setup.install` at all, while `doctor` validated it and
+   * reported it resolvable — so gates ran against an uninstalled worktree and a missing install
+   * surfaced as a product FAIL. That is the defect this key closes.
+   */
+  readonly setup?: SetupStageDeps;
   /**
    * The declared gates plus the runner and evidence writer they need (story 3.4).
    *
@@ -148,7 +173,7 @@ export function createStages(deps: StageDependencies): Stage[] {
     createResolveStage(),
     createIntegrityStage(deps.assertVerifiableContract),
     createWorktreeStage(deps.worktree),
-    createSetupStage(),
+    createSetupStage(deps.setup),
     deps.gates === undefined ? createUnwiredGatesStage() : createGatesStage(deps.gates),
     createServicesStage(deps.services),
     createDataStage(deps.data),

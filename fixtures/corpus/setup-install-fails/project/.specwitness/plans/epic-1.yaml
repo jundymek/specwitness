@@ -1,0 +1,50 @@
+# Hand-written Verification Plan for the corpus fixture `setup-install-fails`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, story 6.1 AC1). The `contract.fingerprint` below must match the frozen
+# contract beside it; the runner does not patch it, so a contract re-freeze
+# means this line is re-copied by hand.
+#
+# ⚠️ THE PLAN IS CORRECT, AND NOTHING IN IT EVER RUNS. The install fails at
+# stage 4, so the probes stage at position 8 is `skipped` and this probe is not
+# executed. That is not a reason to omit it: the plan must cover every criterion
+# of the frozen contract or the run is refused outright
+# (`assertPlanCoversContract`), and a fixture whose plan was wrong would fail
+# for the wrong reason while claiming to prove that an install failure is
+# infrastructure.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 7ec129181de781af166f883392da800ae741c6943bc1138e056672f5edcddee8
+  data:
+    seed: corpusseed000612
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: manifest-version
+          surface: shell
+          mechanics:
+            commandId: manifest
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the manifest command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: it reports the application name and version
+              target: { source: stdout }
+              comparison: contains
+              expected: corpus-fixture-app 1.0.0
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-05T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

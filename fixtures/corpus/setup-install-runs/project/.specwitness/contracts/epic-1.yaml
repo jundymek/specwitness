@@ -1,0 +1,34 @@
+# Hand-written Verification Contract for the corpus fixture `setup-install-runs`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-1 --freeze` — see `fixtures/corpus/README.md`
+# section "Adding a fixture", step 3. That is deliberate and it is NOT what
+# AD-12 forbids: a contract is an INPUT to the run, and its fingerprint is a
+# hash the product must be able to recompute from these bytes or refuse the run.
+# `expected.json` — the OUTCOME — is hand-written and never generated.
+#
+# ONE CRITERION, and `verifiability: automated`. This fixture is about the SETUP
+# stage; a second criterion, or a `human` one, would add an independent route to
+# a non-PASS verdict and the fixture would stop proving what it claims.
+spec:
+  epic: epic-1
+  version: 1
+  criteria:
+    - id: E1-01
+      statement: The dependency marker prepared by the install step is present and reports its version.
+      kind: structural
+      severity: critical
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 1e255e22c64ac0490acd03c1022764aafef3da0d4bc58c7ceef9adaf5f3c6f98
+  createdAt: 2026-09-05T09:00:00.000Z
+  frozenAt: 2026-09-05T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-05T09:00:00.000Z
+  history: []

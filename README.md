@@ -171,7 +171,7 @@ Stages
   ✓ ok          resolve           0 ms  epic-1: 4a58e65 against 4a58e65
   ✓ ok          integrity         0 ms  epic-1 v1 verified against its fingerprint (2 criteria)
   ✓ ok          worktree         30 ms  detached worktree at 4a58e65
-  ✓ ok          setup             0 ms  not implemented yet — Epic 4 runs the configured install command
+  ✓ ok          setup             0 ms  no install command declared
   ✓ ok          gates            27 ms  1 gate(s) passed
   ✓ ok          services         34 ms  1 service(s) started and ready
   ✓ ok          data              0 ms  no data commands declared
@@ -203,10 +203,9 @@ VERDICT: PASS
 
 Exit code `0`.
 
-> **Read the `setup` stage line.** It says *"not implemented yet — Epic 4 runs the
-> configured install command"*, and it means it: that stage is a placeholder that always
-> reports ok without running your `setup.install` command. It is reproduced here rather
-> than tidied away, and explained in
+> **Read the `setup` stage line.** This example project declares no `setup.install`, so the
+> stage says so and spawns nothing. A project that *does* declare one gets the command, its
+> exit code and its duration on that line instead — see
 > [the configuration reference](#configuration-reference).
 
 ### 5. Re-read a run later, without re-running it
@@ -431,7 +430,7 @@ nothing.
 | `planning.format` | no | `bmad-v6` | The only supported format in V0. |
 | `planning.planningArtifacts` | no | `docs/planning-artifacts` | Where the PRD, architecture and epics live. |
 | `planning.implementationArtifacts` | no | `docs/implementation-artifacts` | Where story files live. |
-| `setup.install` | no | — | **⚠️ Accepted and validated, but NOT EXECUTED in `0.1.0`** — see the warning below. |
+| `setup.install` | no | — | Run once inside the verification worktree, **after `worktree` and before `gates`**. A failure is an infrastructure error (exit 3), never a FAIL — see below. |
 | `gates[]` | no | `[]` | `{ id, run }`, **run in declaration order; the first failure stops the run.** Every `id` must be unique. |
 | `services.<name>.run` | — | — | Command that starts a long-running process. |
 | `services.<name>.port` | no | — | Declare it so `doctor` can warn when something already holds it. V0 does not auto-allocate. |
@@ -444,30 +443,53 @@ nothing.
 | `ai.providers.<name>` | no | — | `{ adapter, mode }`; adapter ∈ `claude-code-cli`, `codex-cli`, `fake`. |
 | `ai.roles.<role>` | no | — | Roles: `contract-author`, `plan-author`, `explainer`, `mechanics-adapter`. Each must name a declared provider. |
 
-> ### ⚠️ `setup.install` is not run in `0.1.0`
+> ### `setup.install` — how it runs, and what a failure means
 >
-> **`doctor` and `verify` disagree about whether this key is live, and `doctor` is the one
-> that misleads you.** Its `commands-resolvable` check validates `setup.install` and
-> reports that it resolves on your machine — which is exactly what a pre-flight validator
-> saying "you are configured correctly" looks like. But the pipeline's `setup` stage is
-> still a placeholder (`src/pipeline/stages/setup.ts`, whose header says *"Filled by
-> Epic 4"* — which has not happened), and nothing else reads the key.
+> ```yaml
+> setup:
+>   install: pnpm install --frozen-lockfile
+> ```
 >
-> To its credit, `verify` does not hide this: the stage reports `ok` with the detail
-> *"not implemented yet — Epic 4 runs the configured install command"*, deliberately, so
-> that a run says plainly which parts are unbuilt rather than implying they passed. **The
-> problem is that you have to read the timeline to find out**, after the command whose
-> whole job is checking your configuration told you the key was fine.
+> It runs **once**, inside the isolated verification worktree, at position 4 of the eleven
+> stages — after the worktree is created and **before the first gate**. That order is the
+> whole point: gates, services and probes then execute against a tree whose dependencies
+> exist. The `setup` line of the run report carries the command, its exit code and its
+> duration, and the command's output is recorded as evidence in the run directory.
 >
-> **Consequence:** if you rely on `setup.install` to install dependencies inside the
-> isolated worktree, they will not be installed and your gates will run against a worktree
-> that never had `node_modules`. Until it is filled, make the install your **first gate**
-> instead — gates genuinely execute.
+> Declare nothing and nothing is spawned; the stage reports `no install command declared`
+> and the run is exactly what it would have been.
+>
+> **A failed install is an infrastructure error — exit 3, never exit 1.** If the command
+> exits non-zero, its binary is not found, or it hangs past the ten-minute cap, the run
+> stops before the gates stage, every later stage is recorded `skipped`, and the outcome is
+> an infra error. It is **never** reported as a FAIL, because an install that did not happen
+> tells you nothing about whether your branch is correct — and a verification gate that
+> blames your branch for an unreachable registry is one you would be right to switch off.
+>
+> ```console
+> ERROR: the install command failed with exit code 1
+> HINT: SpecWitness could not install the project's dependencies, which says nothing about
+>       whether the branch satisfies its contract — so this is reported as an environment
+>       problem rather than as a failing build. …
+> ```
+>
+> The command is subject to the same rules as every other declared command: it is split
+> into a binary and arguments with **no shell**, so `&&`, `$(…)` and `;` reach the child as
+> literal arguments, and a malformed quote is refused before anything is spawned. It is not
+> Node-specific — `sh scripts/install.sh`, `make deps` and `pip install -r requirements.txt`
+> are all ordinary values.
+>
+> > **Historical note, kept because it changes what an old run means.** In every build
+> > before this one the key was accepted by the config schema and validated by `doctor`, and
+> > `verify` never executed it: the `setup` stage was a placeholder that reported `ok` with
+> > the detail *"not implemented yet"*. If you are reading a run report from an older build,
+> > that is what its `setup` line means, and its gates ran against a worktree in which
+> > nothing was installed.
 
 **Every command in this file is a security boundary** — for the commands SpecWitness runs
-*on your project's behalf*. Gates, service start-up, data commands, observations and shell
-probes come only from this file; a provider can never name one of those executables and can
-never produce a shell string.
+*on your project's behalf*. The install command, gates, service start-up, data commands,
+observations and shell probes come only from this file; a provider can never name one of those
+executables and can never produce a shell string.
 
 **That is not the same as "the only programs SpecWitness ever runs".** It also runs a small,
 fixed set of its own tools, which are hard-coded rather than configured and are therefore
@@ -551,9 +573,10 @@ Listed because a README that describes an intended product is worse than none.
 
 - `--root` is accepted by `verify` only; every other command resolves from the working
   directory.
-- **The `setup` stage is a placeholder and never runs `setup.install`**, while `doctor`
-  validates the key and reports it resolves. See the warning in the configuration
-  reference — it is the one gap in `0.1.0` that can change what a run means.
+- `setup.install` **is** executed as of this build. Earlier builds accepted the key, had
+  `doctor` validate it, and never ran it — so a run report from one of those describes gates
+  that ran against a worktree in which nothing was installed. See the note in the
+  configuration reference.
 - `contract --amend` requires an interactive terminal and cannot be scripted — deliberately,
   since it is an operator action, but it means it is the one command an agent cannot call.
 

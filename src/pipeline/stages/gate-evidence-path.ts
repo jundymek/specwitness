@@ -196,3 +196,29 @@ export function dataEvidenceRelativePath(
 
   return `${GATE_EVIDENCE_DIR}/${stem}.${stream}.txt`;
 }
+
+/**
+ * The relative path of the SETUP stage's install output, for one stream (story 6.11).
+ *
+ *   `evidence/setup-install.stdout.txt`
+ *   `evidence/setup-install.stderr.txt`
+ *
+ * @param stream Which captured stream this file holds.
+ *
+ * NO ID AND NO INDEX, and that is the difference from the two functions above rather than an
+ * omission. A gate id and a data-command id are the operator's own text, so both have to be
+ * slugified — an id containing `..` or one longer than a filesystem component limit would turn a
+ * perfectly good run into exit 3 — and both need an index to stay unique. `setup.install` is a
+ * single FIXED config key: there is exactly one install per run, its name is chosen by this
+ * repository rather than by the project, and it is already a safe path component. Deriving
+ * nothing is therefore not a shortcut; a `slugify` call over a constant would be dead code
+ * implying a hazard this call site does not have.
+ *
+ * It lives in this module rather than in `setup.ts` for the reason `dataEvidenceRelativePath`
+ * states above: evidence-path derivation has ONE owner, so the day the containment rules change
+ * there is one file to change rather than three that can disagree. The `gate-` in this module's
+ * filename is historical rather than a scope.
+ */
+export function setupEvidenceRelativePath(stream: GateOutputStream): string {
+  return `${GATE_EVIDENCE_DIR}/setup-install.${stream}.txt`;
+}
