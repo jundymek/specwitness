@@ -262,6 +262,45 @@ module.exports = {
       },
     },
     {
+      name: 'scorecard-is-local-only',
+      comment:
+        'NFR-4 / AC1 of story 6.5 / the founding local-first product rule: the dogfooding ' +
+        'scorecard is written to the operator\'s own disk and goes NOWHERE ELSE. The two ' +
+        'scorecard modules may not import a networking built-in (http, https, http2, net, ' +
+        'tls, dgram, dns) or an HTTP client. ' +
+        'WHY A RULE AND NOT A CONVENTION. `.specwitness/scorecard.jsonl` is the one place ' +
+        'in this product where a contributor might reasonably think telemetry belongs — ' +
+        'it is literally a file of usage metrics — which is exactly why the acceptance ' +
+        'criterion forecloses it and why the ban is structural rather than a comment ' +
+        'somebody has to read. `src/schemas/scorecard.ts` is already covered by ' +
+        '`schemas-core-only` (schemas may import no built-in at all), so the half that ' +
+        'earns this rule its keep is `src/infra/scorecard-store.ts`: `src/infra/**` may ' +
+        'legitimately use any Node built-in, and without this rule a single `node:https` ' +
+        'import beside the `node:fs` one would pass every other check in this file. ' +
+        'THE SUBPATH SUFFIX IS NOT DECORATION: `node:dns/promises` is a real module and an ' +
+        'anchored `$` alone would have let it straight through — the same shape as ' +
+        '`node:fs/promises`, which this codebase uses everywhere, so it is the natural ' +
+        'thing for someone to reach for. It is written `($|/)` rather than `(/.*)?$` because ' +
+        'dependency-cruiser REFUSES the latter as an unsafe regular expression and bails ' +
+        'out of the whole run — which would have disabled every rule in this file, not ' +
+        'just this one. Raised as a P2 by the codex review of story 6.5. ' +
+        'THE HONEST LIMIT: dependency-cruiser sees IMPORTS. Node\'s global `fetch` needs ' +
+        'none, so it is not caught here — `tests/unit/dependency-rules.test.ts` scans the ' +
+        'two modules\' source for it, and plants a `node:https` import to watch this rule ' +
+        'fire. Neither guard alone is sufficient; both are cheap.',
+      severity: 'error',
+      from: { path: '^src/(schemas/scorecard|infra/scorecard-store)\\.ts$' },
+      to: {
+        path: [
+          '^(node:)?(http|https|http2|net|tls|dgram|dns)($|/)',
+          // Anything whose job is to fetch. Named rather than inferred: a future
+          // dependency added for an unrelated reason must not silently become reachable
+          // from this path.
+          'node_modules/(axios|node-fetch|undici|got|superagent|ws|request)/',
+        ],
+      },
+    },
+    {
       name: 'no-circular',
       comment:
         'A cycle means the layer boundary is already gone and the modules can no longer ' +

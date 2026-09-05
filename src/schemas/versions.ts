@@ -128,6 +128,29 @@ export const SCHEMA_VERSIONS = Object.freeze({
    * AD-2 conversation, never a routine bump.
    */
   adaptation: 1,
+
+  /**
+   * One line of the dogfooding scorecard, `.specwitness/scorecard.jsonl`
+   * (`src/schemas/scorecard.ts`), story 6.5.
+   *
+   * The one-line addition this file's header promises, and the first artifact
+   * born under ADR-008 — whose §5 is written about this key specifically. It
+   * differs from every other persisted artifact here in ONE respect: the file
+   * is an append-only LOG, so the version lives on each LINE rather than on the
+   * document, and every line is parsed independently.
+   *
+   * That is what makes the softer consequence §5 prescribes possible. A record
+   * whose only failure is unknown keys is skipped with a warning and the read
+   * continues; a malformed line likewise. Refusing to summarise 200 good
+   * records because record 47 came from a newer build would destroy the very
+   * measurement the file exists for — and a partially-readable log accumulated
+   * across versions is still evidence.
+   *
+   * NOTE WHAT DID NOT MOVE. `jsonReport` above is UNCHANGED. The scorecard is a
+   * derived PROJECTION of the same `RunResult` that becomes `result.json`
+   * (AD-11); it adds no field to that document and changes none.
+   */
+  scorecard: 1,
 } as const satisfies Record<string, number>);
 
 /** Keys of the registry. Derived — never hand-maintained. */

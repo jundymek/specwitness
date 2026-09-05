@@ -84,6 +84,7 @@ import { RandomIds } from '../../infra/ids.js';
 import { createProcessRunner, terminateProcessGroup } from '../../infra/process-runner.js';
 import { resolvePlaywrightEnvironment } from '../../infra/playwright-env.js';
 import { RunStore } from '../../infra/run-store.js';
+import { ScorecardStore } from '../../infra/scorecard-store.js';
 import { createGitVcs } from '../../infra/vcs.js';
 import { runPipeline } from '../../pipeline/run-pipeline.js';
 import { createStages } from '../../pipeline/stages/index.js';
@@ -91,6 +92,7 @@ import { createServiceGroupRegistry } from '../../pipeline/stages/services.js';
 import { providerForRole } from '../../providers/index.js';
 import { renderJson, renderTerminal } from '../../report/index.js';
 import { parseContract } from '../../schemas/contract.js';
+import { toScorecardRecord } from '../../schemas/scorecard.js';
 import {
   assertPlanMatchesContract,
   isReferenceableId,
@@ -581,6 +583,46 @@ async function verify(
       });
     }
   }
+
+  // ==========================================================================
+  // THE SCORECARD — story 6.5, FR-33, NFR-4, brief §54. Automatic, and inert.
+  // ==========================================================================
+  //
+  // WITHOUT CEREMONY IS THE REQUIREMENT, NOT A NICETY. There is no flag, no
+  // opt-in and no command to run afterwards, because the measurement window is
+  // ~30-50 real tasks across weeks and anything the operator has to remember to
+  // do will not be done. An opt-in scorecard produces a biased sample that
+  // nobody can detect after the fact, which is a worse outcome than no
+  // scorecard at all.
+  //
+  // WHICH RUNS RECORD, decided here by POSITION rather than by a condition.
+  // `store.createRun` above is the moment an invocation becomes a run;
+  // everything that throws before it — an invalid config, an unresolvable ref,
+  // a contract that is absent, unfrozen or tampered, `--no-ai` with no plan —
+  // never became a run and leaves no record. Everything from here records:
+  // PASS, FAIL, NEEDS_HUMAN, and — the case that matters most — a run that
+  // ended in the infrastructure arm. Infra-error rate is one of the metrics
+  // story 6.6 must report, so a run that dies of infrastructure and leaves no
+  // record makes that rate structurally zero, which is a wrong number that
+  // reads as good news.
+  //
+  // `published`, not `result`: this is a projection of the document that was
+  // actually persisted and rendered, so the scorecard cannot disagree with
+  // `result.json` about what happened (AD-11). Where they could ever disagree,
+  // `result.json` wins and the scorecard is the one to fix. It also means an
+  // explained run records the explainer's provider call, which is the whole
+  // point of `providerInvocations`.
+  //
+  // ⚠️ IT CANNOT CHANGE THE OUTCOME, AND THAT IS ENFORCED BY THE SIGNATURE.
+  // `appendRecord` has no rejection path: a full disk, a read-only directory or
+  // a deleted `.specwitness/` becomes a `WARNING:` on stderr and nothing else.
+  // There is deliberately no try/catch here, because a caller that had to guard
+  // would be a caller that could get the guard wrong. Instrumentation that can
+  // fail a verification is worse than no instrumentation.
+  //
+  // No exit code is added and none is changed; `exitCodeForOutcome(result.outcome)`
+  // below is untouched by this block, and nothing it can do is on the path to it.
+  await new ScorecardStore(projectRoot).appendRecord(toScorecardRecord(published), printWarning);
 
   // AD-11: one model, many renderers. Nothing is computed here.
   if (options.json === true) {
