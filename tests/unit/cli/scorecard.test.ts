@@ -23,6 +23,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { runScorecardAdd, runScorecardSummary } from '../../../src/cli/commands/scorecard.js';
+import { RunStore } from '../../../src/infra/run-store.js';
+import { RandomIds } from '../../../src/infra/ids.js';
+import { fullyPopulatedRunResult } from '../../fixtures/run-result.js';
 import { InfraError, UsageError } from '../../../src/domain/errors.js';
 import type { Clock } from '../../../src/domain/ports.js';
 import {
@@ -330,6 +333,97 @@ describe('scorecard add — a truncated finding list is REFUSED, not accepted', 
 
     await runScorecardAdd(root, RUN_ID, { criterion: 'E6-01', attribution: 'unique' }, clock);
     expect(await attributionsOf(root)).toHaveLength(1);
+  });
+});
+
+describe('a truncated finding list falls back to the run\'s stored result', () => {
+  /**
+   * The third round of codex review on one design point, and the resolution the first two
+   * did not have. The scorecard's id list is a CAPPED projection (200 ids across a
+   * record); `.specwitness/runs/<runId>/result.json` is the uncapped evidence. Refusing on
+   * the capped list alone meant a run with more than 200 findings could NEVER have
+   * findings 201+ attributed — they stayed permanently unattributed, so the north-star
+   * metric was structurally incomplete for exactly the largest runs.
+   */
+
+  /** Seeds a real `result.json` whose criteria include `criterionId` as a FAILURE. */
+  async function seedStoredResult(root: string, criterionId: string): Promise<void> {
+    // `writeResult` writes INTO an existing run directory; `createRun` would mint its own
+    // id, so the directory for this fixture's fixed run id is created directly.
+    await mkdir(join(root, '.specwitness', 'runs', RUN_ID), { recursive: true });
+    const store = new RunStore(root, clock, new RandomIds());
+    const base = fullyPopulatedRunResult();
+    const failing = base.criteria[0];
+    if (failing === undefined) {
+      throw new Error('fixture has no criteria');
+    }
+    await store.writeResult(RUN_ID, {
+      ...base,
+      runId: RUN_ID,
+      criteria: [{ ...failing, criterionId, status: 'fail' }],
+    });
+  }
+
+  it('ACCEPTS a criterion the stored result confirms, with a warning naming the source', async () => {
+    const root = await project([
+      scorecardRecord({
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+      }),
+    ]);
+    await seedStoredResult(root, 'E6-250');
+
+    const output = await runScorecardAdd(
+      root,
+      RUN_ID,
+      { criterion: 'E6-250', attribution: 'unique' },
+      clock,
+    );
+
+    expect(await attributionsOf(root)).toHaveLength(1);
+    expect(output.stderr).toMatch(/stored result/i);
+  });
+
+  it('still REFUSES a criterion the stored result does not list', async () => {
+    // Widening the check must not become a way around it.
+    const root = await project([
+      scorecardRecord({
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+      }),
+    ]);
+    await seedStoredResult(root, 'E6-250');
+
+    await expect(
+      runScorecardAdd(root, RUN_ID, { criterion: 'E6-777', attribution: 'unique' }, clock),
+    ).rejects.toThrow(UsageError);
+  });
+
+  it('FAILS CLOSED when no result is stored — refuses rather than trusting the caller', async () => {
+    const root = await project([
+      scorecardRecord({
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+      }),
+    ]);
+
+    await expect(
+      runScorecardAdd(root, RUN_ID, { criterion: 'E6-250', attribution: 'unique' }, clock),
+    ).rejects.toThrow(UsageError);
+  });
+
+  it('does not read the stored result at all when the list was NOT truncated', async () => {
+    // The ordinary path stays one file. A record that names its findings completely is
+    // authoritative, so a stored result cannot widen it.
+    const root = await project();
+    await seedStoredResult(root, 'E6-500');
+
+    await expect(
+      runScorecardAdd(root, RUN_ID, { criterion: 'E6-500', attribution: 'unique' }, clock),
+    ).rejects.toThrow(UsageError);
   });
 });
 

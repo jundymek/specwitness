@@ -71,6 +71,8 @@ import type { Clock } from '../../domain/ports.js';
 import { isRunId, parseRunId } from '../../domain/run-id.js';
 import { AttributionStore } from '../../infra/attribution-store.js';
 import { SystemClock } from '../../infra/clock.js';
+import { RandomIds } from '../../infra/ids.js';
+import { RunStore } from '../../infra/run-store.js';
 import { ScorecardStore } from '../../infra/scorecard-store.js';
 import {
   printable,
@@ -83,6 +85,7 @@ import {
   makeAttributionRecord,
   parseAttributionValue,
 } from '../../schemas/scorecard-attribution.js';
+import { toRunResult } from '../../schemas/result.js';
 import type { ScorecardRecord } from '../../schemas/scorecard.js';
 
 /**
@@ -278,7 +281,19 @@ export async function runScorecardAdd(
     );
   }
 
-  const warning = assertCriterionIsAFinding(record, criterionId);
+  // The scorecard's id list is a CAPPED projection (200 ids across the record). When it
+  // was cut, its silence is not evidence, so the run's own stored result — which is
+  // uncapped — is consulted before refusing. Read only on that rare path, so an ordinary
+  // attribution still touches one file.
+  const stored = record.findingCriterionIdsTruncated
+    ? await storedFindingIds(projectRoot, runId, clock)
+    : undefined;
+
+  const warning =
+    stored !== undefined && stored.has(criterionId)
+      ? `WARNING: run ${runId} names only some of its findings in the scorecard; ${criterionId} ` +
+        `was confirmed against ${runId}'s stored result instead.\n`
+      : assertCriterionIsAFinding(record, criterionId);
 
   const built = makeAttributionRecord({
     runId,
@@ -358,8 +373,9 @@ function assertCriterionIsAFinding(record: ScorecardRecord, criterionId: string)
     return '';
   }
 
+  const total = record.criteria.fail + record.criteria.needs_human + record.criteria.error;
+
   if (record.findingCriterionIdsTruncated) {
-    const total = record.criteria.fail + record.criteria.needs_human + record.criteria.error;
     throw new UsageError(
       `run ${record.runId} names only ${findings.length} of its ${total} findings individually, ` +
         `and ${criterionId} is not among them, so SpecWitness cannot confirm it produced one`,
@@ -369,14 +385,62 @@ function assertCriterionIsAFinding(record: ScorecardRecord, criterionId: string)
     );
   }
 
-  const total = record.criteria.fail + record.criteria.needs_human + record.criteria.error;
-
   throw new UsageError(
     `criterion ${criterionId} produced no finding in run ${record.runId}, so there is nothing to attribute`,
     total === 0
       ? 'that run had no failures, needs-human criteria or errors at all — check the run id'
       : `that run's findings are: ${findings.join(', ')}`,
   );
+}
+
+/**
+ * The criterion ids a run's STORED RESULT records as findings, or `undefined`.
+ *
+ * ⚠️ THE AUTHORITATIVE LIST, consulted only when the scorecard's own is TRUNCATED. A P2
+ * from round 7 of the codex review, and the third round to visit this one design point —
+ * the two before it are worth stating because the sequence is the argument:
+ *
+ *  - **round 1:** `add` accepted an unlisted criterion on a truncated record while the
+ *    summary orphaned it, so the operator was told "Recorded" for a judgement no metric
+ *    could count;
+ *  - **round 2:** counting them instead let ANY valid id count, so the north star could
+ *    exceed the number of findings that exist. I made `add` refuse;
+ *  - **round 7:** refusing means a run with more than 200 findings can NEVER have findings
+ *    201+ attributed — they stay permanently unattributed, so the north-star metric is
+ *    structurally incomplete for exactly the largest runs.
+ *
+ * All three are right, and the resolution none of the first two had is to stop treating
+ * the capped projection as the source of truth. `.specwitness/runs/<runId>/result.json` is
+ * the full evidence for a run — story 6.5's record header calls it exactly that — and it
+ * is uncapped. `report` already reads it the same way, at this same CLI edge.
+ *
+ * FAIL CLOSED: `undefined` on any failure — no result stored, unreadable, unparseable.
+ * The caller then refuses, because an attribution SpecWitness cannot verify must never
+ * reach the metric. Widening the check must not become a way around it.
+ *
+ * The run id was validated as canonical before this is reached, and `RunStore` builds the
+ * path; no operator string is concatenated into one here.
+ */
+async function storedFindingIds(
+  projectRoot: string,
+  runId: string,
+  clock: Clock,
+): Promise<ReadonlySet<string> | undefined> {
+  try {
+    const store = new RunStore(projectRoot, clock, new RandomIds());
+    if (!(await store.hasResult(runId))) {
+      return undefined;
+    }
+    const stored = await store.readResult(runId);
+    const result = toRunResult(stored.document);
+    return new Set(
+      result.criteria
+        .filter((criterion) => criterion.status !== 'pass' && criterion.status !== 'skipped')
+        .map((criterion) => criterion.criterionId),
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 /**
