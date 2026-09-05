@@ -1,0 +1,21 @@
+{
+  "expectedVersion": 1,
+  "fixture": "06-subjective-criterion",
+  "why": "Brief section 7 defect class 6: a criterion whose author wrote that no machine may decide it. The frozen contract marks E1-02 'verifiability: human', which is the first of Q39's exactly two NEEDS_HUMAN triggers and a property of the CONTRACT rather than a judgement made at run time — so it can never auto-PASS, and the run stops at exit 2. THIS FIXTURE IS NAMED BY STORY 5.3, WHICH SHIPPED WITHOUT IT: 5.3's own spec records that its acceptance criterion names 'Golden Corpus fixture 6', which did not exist. This is it. Pinning exit 2 alone would leave 5.3's actual deliverable unproven, because 5.3 was not about reaching exit 2 — the product already did that — it was about a stop that SAYS SOMETHING. A stop that arrives carrying only the contract statement is a stop reviewers learn to override, and before 5.3 the plan-author's reviewer guidance was required by the schema, written by the plan-author, and then dropped at the probes stage. So this fixture pins the RENDERED reviewer block: the 'why' line naming which of the two triggers fired, and the 'check' line carrying the plan-author's own guidance text. Those reach stderr because with --json the document goes to stdout and the human-readable report goes to stderr, so the report is assertable without a new field in this format. THE OUTCOME IS MIXED ON PURPOSE: E1-01 is automated and PASSES. A fixture in which everything was needs_human could not tell 'the human clause fired' from 'nothing was adjudicated at all', which is the green-for-nothing shape one directory over. Here exactly one criterion stops the run, one criterion really was decided mechanically, and NEEDS_HUMAN outranks the pass in aggregation (ADR-003, Q45/Q46).",
+  "proves": ["AC1", "FR-16", "FR-22", "ADR-002", "ADR-003", "Q39", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 2,
+  "outcome": { "verdict": "NEEDS_HUMAN" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass",
+      "E1-02": "needs_human"
+    }
+  },
+  "stderrContains": [
+    "why:      the frozen contract declares this criterion verifiability: human — no machine may decide it",
+    "check:    Open the printed checkout receipt and confirm the wording reads as courteous rather than merely correct; a person must judge tone, and no assertion in this plan can."
+  ],
+  "stderrAbsent": ["FAIL"]
+}

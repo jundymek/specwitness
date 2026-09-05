@@ -1,0 +1,30 @@
+# SpecWitness Project Config for the corpus fixture `11-plan-exists-no-ai`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Both commands here are `node <relative path inside this fixture>`:
+# argv, never a shell line, with nothing to quote and nothing for a shell to
+# interpret even if one were involved.
+#
+# ⚠️ THERE IS NO `ai:` BLOCK, AND THAT IS THE FIXTURE. No providers are declared
+# and no roles are assigned, so there is nothing this run could invoke even if
+# it wanted to. Combined with the precompiled plan beside this file, that makes
+# "zero provider calls" a property of the configuration rather than a promise
+# about the code path — and `--no-ai` in the invocation makes it the operator's
+# explicit assertion as well.
+#
+# No services and no ports: a service is a second way to reach exit 3, and this
+# fixture is about reaching exit 0 offline.
+
+version: 1
+
+project:
+  baseBranch: master
+
+gates:
+  - { id: lint, run: node gates/lint.cjs }
+
+observations:
+  version:
+    run: node commands/version.cjs

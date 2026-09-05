@@ -13,6 +13,7 @@ import {
   type DeclaredIds,
 } from '../../../src/schemas/plan.js';
 import { ConstantIds, FixedClock } from '../../fakes/ports.js';
+import { SEEDED_SECRET } from '../../fixtures/run-result.js';
 import { COMPILED_AT, criterion, draftContract, frozenContract } from '../../helpers/plan.js';
 
 /**
@@ -404,5 +405,83 @@ describe('compilation refuses a contract that cannot gate verification', () => {
     // ADR-005: freezing over a tamper launders it. The remedy is --amend.
     expect((thrown as IntegrityError).hint).toMatch(/--amend/);
     expect((thrown as IntegrityError).hint).not.toMatch(/--freeze/);
+  });
+});
+
+/**
+ * The run's `RedactionOptions` reach the prompt through `compilePlan` — story 6.8.
+ *
+ * ⚠️ RAISED AS A P1 BY THE CODEX REVIEW, and correct on the facts. Story 6.8's first version
+ * added a `redaction` parameter to `buildPlanPrompt` and did NOT add one to `compilePlan`,
+ * so the run's config-declared `extraPatterns` could not reach the builder from production
+ * at all — the parameter was reachable only from a direct builder test, which is the
+ * weakest possible form of "the behaviour is implemented".
+ *
+ * The built-in patterns always applied and still do; what was unreachable is AD-10's
+ * *config-declared extra* patterns, which are exactly the shapes a project adds because the
+ * built-ins do not recognise its own secrets.
+ *
+ * The seam is now continuous through the whole of `src/authoring/**`. It is still not fed
+ * from the CLI edge, because **nothing in this product constructs a `RedactionOptions` from
+ * config anywhere** — see the PR body. That remaining half is a feature, not a refactor, and
+ * it is outside this story's layer.
+ */
+describe('the run redaction options reach the prompt (story 6.8, AD-10)', () => {
+  it('applies a config-declared extra pattern to the criterion statement', async () => {
+    const contract = frozenContract([
+      criterion('E7-01', { statement: 'the release is codenamed ORCHID' }),
+    ]);
+    const provider = scripted(
+      JSON.stringify({
+        data: { bindings: [] },
+        criteria: [
+          {
+            criterionId: 'E7-01',
+            disposition: 'needs-human',
+            reason: 'not-safely-automatable',
+            guidance: 'a reviewer decides this one',
+          },
+        ],
+      }),
+    );
+
+    await compilePlan({
+      loadedContract: loaded(contract),
+      declared: DECLARED,
+      provider,
+      clock: new FixedClock(COMPILED_AT),
+      ids: new ConstantIds(SEED),
+      providerName: 'hermetic',
+      model: null,
+      providerCliVersion: null,
+      redaction: { extraPatterns: [/ORCHID/g] },
+    });
+
+    // The bytes that actually left the process, not the builder called directly.
+    expect(provider.prompts).toHaveLength(1);
+    expect(provider.prompts[0]?.prompt).not.toContain('ORCHID');
+  });
+
+  it('still redacts built-in shapes when no options are supplied', async () => {
+    const contract = frozenContract([
+      criterion('E7-01', { statement: `the API accepts AUTH_TOKEN=${SEEDED_SECRET}` }),
+    ]);
+    const provider = scripted(
+      JSON.stringify({
+        data: { bindings: [] },
+        criteria: [
+          {
+            criterionId: 'E7-01',
+            disposition: 'needs-human',
+            reason: 'not-safely-automatable',
+            guidance: 'a reviewer decides this one',
+          },
+        ],
+      }),
+    );
+
+    await compile(provider, contract);
+
+    expect(provider.prompts[0]?.prompt).not.toContain(SEEDED_SECRET);
   });
 });

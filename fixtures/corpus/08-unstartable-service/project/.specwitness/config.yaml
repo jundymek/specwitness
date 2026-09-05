@@ -1,0 +1,40 @@
+# SpecWitness Project Config for the corpus fixture `08-unstartable-service`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. The single command here is `node app/server.cjs {{PORT:app}}`:
+# argv, never a shell line, with nothing to quote and nothing for a shell to
+# interpret even if one were involved.
+#
+# `{{PORT:app}}` is substituted by the corpus runner with a freshly allocated
+# ephemeral loopback port at materialisation time. THAT IS LOAD-BEARING FOR THIS
+# FIXTURE SPECIFICALLY, not just hygiene: a hardcoded port could be occupied by
+# something else, and the run would then fail with "declares port N, which is
+# already in use" — still exit 3, still an InfraError, and the fixture would
+# look green while proving a completely different row of the classification
+# table. A fresh port proved free before the spawn is what makes this fixture
+# fail for its STATED reason.
+#
+# No gates: this fixture is decided by the SERVICES stage, and a failing gate
+# would stop the pipeline before it ever got there.
+
+version: 1
+
+project:
+  baseBranch: master
+
+services:
+  app:
+    run: node app/server.cjs {{PORT:app}}
+    port: {{PORT:app}}
+    ready:
+      url: http://127.0.0.1:{{PORT:app}}/health
+      # NEVER PAID. The service exits immediately, and `services.ts` diagnoses a
+      # process that exited before becoming ready at once rather than waiting
+      # for the deadline — that is the common real failure (a bad env var, a
+      # missing migration) and burning the full timeout would report the wrong
+      # cause slowly. The value is kept small anyway so that IF the diagnosis
+      # ever regressed to deadline-waiting, this fixture would cost the suite
+      # five seconds rather than thirty, and would say so by getting slower.
+      timeoutSec: 5

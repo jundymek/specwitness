@@ -41,6 +41,9 @@
  */
 
 import type { AdaptationCandidate } from '../domain/adaptation-port.js';
+import type { RedactionOptions } from '../domain/evidence.js';
+
+import { assemblePrompt } from './prompt-assembly.js';
 
 /**
  * The most candidates one prompt will describe.
@@ -50,7 +53,25 @@ import type { AdaptationCandidate } from '../domain/adaptation-port.js';
  */
 export const MAX_PROMPTED_CANDIDATES = 20;
 
-/** One candidate, rendered. Values are already redacted and bounded by the caller. */
+/**
+ * The whole-prompt cap, in BYTES. Story 6.8.
+ *
+ * ⚠️ **BEFORE STORY 6.8 THERE WAS NO SIZE CAP HERE AT ALL** — only
+ * `MAX_PROMPTED_CANDIDATES`, which bounds how MANY candidates are described and says
+ * nothing about how large each one is. A single candidate carries a statement, a path and a
+ * scenario, none of which the plan schema length-limits, so twenty of them was an unbounded
+ * prompt wearing a count cap.
+ *
+ * 24 000, matching 5.5's `PROMPT_CAP_BYTES`: both provider paths sit on the verify edge,
+ * both make exactly one invocation per run, and both already share a deliberate `20`. A
+ * reader learns one number for the edge. The authoring roles are capped two orders of
+ * magnitude higher, and `authoring/prompt.ts` says why — losing a criterion there would
+ * narrow a definition of done, while losing a candidate here costs one probe a proposal it
+ * was free to decline anyway.
+ */
+export const ADAPTATION_PROMPT_CAP_BYTES = 24_000;
+
+/** One candidate, rendered. */
 function candidateBlock(candidate: AdaptationCandidate, index: number): string {
   const lines = [
     `${index + 1}. probeId: ${candidate.probeId}`,
@@ -77,68 +98,100 @@ function candidateBlock(candidate: AdaptationCandidate, index: number): string {
  * `schemas/adaptation.ts` for why the payload is shaped that way and what the alternative
  * would cost in quota.
  */
-export function buildAdaptationPrompt(candidates: readonly AdaptationCandidate[]): string {
+export function buildAdaptationPrompt(
+  candidates: readonly AdaptationCandidate[],
+  redaction?: RedactionOptions,
+): string {
   // The caller already caps the candidate set (`MAX_ADAPTED_PROBES`); this is the same bound
   // asserted here so the function is safe for any caller, present or future. A prompt whose
   // size depends on how many criteria a plan happens to have is a context-limit failure and
   // a quota bill waiting to happen. Raised as a P2 by the codex review.
-
-  return [
-    'You are adapting the MECHANICS of browser probes in a verification plan.',
-    '',
-    'Each probe below failed because an element it looked for was not found. The usual',
-    'cause is cosmetic drift: a control was relabelled or moved, while the behaviour the',
-    'criterion describes did not change. Your job is to propose a new way to LOOK for the',
-    'same thing.',
-    '',
-    '=== WHAT YOU MAY CHANGE ===',
-    '',
-    'ONLY these two fields, per probe:',
-    '',
-    '  path      - the service-relative starting path. Must begin with a single "/".',
-    '  scenario  - the interaction script (the grammar is below).',
-    '',
-    'At least one of them must be present in each proposal.',
-    '',
-    '=== WHAT YOU MAY NOT CHANGE, AND CANNOT ===',
-    '',
-    'You may NOT change what must be TRUE. Assertions, expected values, comparisons and',
-    'assertion targets are not yours to touch. Neither is a probe id, a surface, a',
-    'criterion id, or the service the probe points at.',
-    '',
-    'You also may not introduce a URL, a host, an origin, a shell command or any argument',
-    'to one. A probe names a declared service and a relative path; it never names a host.',
-    '',
-    'This is not a request. The response schema has no field for any of them, so a response',
-    'containing one is rejected in full and NOTHING you proposed is applied - including the',
-    'parts that were legitimate. If you believe a criterion can only pass by changing what',
-    'is asserted, propose nothing for that probe: a human amends the contract, and doing',
-    'that is an explicit, audited step that is not available to you.',
-    '',
-    '=== THE SCENARIO GRAMMAR ===',
-    '',
-    'One directive per line, arguments double-quoted. A line that is not one of these four',
-    'verbs is refused before the browser starts, so do not write prose:',
-    '',
-    '  goto     "/orders"',
-    '  click    "#submit"',
-    '  fill     "#email" "alice@example.com"',
-    '  waitFor  "#confirmation"',
-    '',
-    'Prefer a stable selector over a brittle one: an id or a data attribute beats a text',
-    'match, and a text match beats a positional or generated class name.',
-    '',
-    '=== THE FAILING PROBES ===',
-    '',
-    candidates.slice(0, MAX_PROMPTED_CANDIDATES).map(candidateBlock).join('\n\n'),
-    '',
-    '=== YOUR RESPONSE ===',
-    '',
-    'Respond with ONLY a JSON document of this shape, with no prose and no markdown fence:',
-    '',
-    '  {"proposals": [{"probeId": "...", "mechanics": {"scenario": "..."}}]}',
-    '',
-    'Include a probe only if you have a concrete reason to believe your proposal fixes it.',
-    'Omitting a probe you cannot help is correct and costs nothing; guessing is not.',
-  ].join('\n');
+  //
+  // ⚠️ STORY 6.8 CHANGED WHERE REDACTION IS GUARANTEED, and the distinction is worth being
+  // exact about because a loose version of it was wrong here once already.
+  //
+  // BEFORE: this builder redacted NOTHING. Every value it renders was redacted and bounded
+  // by its caller, `src/pipeline/stages/probes.ts:512, 529-530`, and that is still true —
+  // the production path never sent an unredacted candidate. What was missing is that the
+  // guarantee lived entirely in a DIFFERENT LAYER, so it held for the one caller that
+  // exists and for no other. A test could call this function directly with a credential in
+  // a statement and watch it come out the far side; `prompt-characterisation.test.ts` pins
+  // exactly that, from before this change.
+  //
+  // AFTER: `assemblePrompt` redacts everything in `body`, so the guarantee is a property of
+  // this function rather than a property of who happens to call it. Redaction is idempotent
+  // (`evidence.ts:427`), so for the production caller this second pass changes no byte —
+  // which is why the characterisation snapshot for the real path is unchanged. It is
+  // defence in depth, not a relocation: `probes.ts` keeps its own redaction and should.
+  return assemblePrompt({
+    head: [
+      'You are adapting the MECHANICS of browser probes in a verification plan.',
+      '',
+      'Each probe below failed because an element it looked for was not found. The usual',
+      'cause is cosmetic drift: a control was relabelled or moved, while the behaviour the',
+      'criterion describes did not change. Your job is to propose a new way to LOOK for the',
+      'same thing.',
+      '',
+      '=== WHAT YOU MAY CHANGE ===',
+      '',
+      'ONLY these two fields, per probe:',
+      '',
+      '  path      - the service-relative starting path. Must begin with a single "/".',
+      '  scenario  - the interaction script (the grammar is below).',
+      '',
+      'At least one of them must be present in each proposal.',
+      '',
+      '=== WHAT YOU MAY NOT CHANGE, AND CANNOT ===',
+      '',
+      'You may NOT change what must be TRUE. Assertions, expected values, comparisons and',
+      'assertion targets are not yours to touch. Neither is a probe id, a surface, a',
+      'criterion id, or the service the probe points at.',
+      '',
+      'You also may not introduce a URL, a host, an origin, a shell command or any argument',
+      'to one. A probe names a declared service and a relative path; it never names a host.',
+      '',
+      'This is not a request. The response schema has no field for any of them, so a response',
+      'containing one is rejected in full and NOTHING you proposed is applied - including the',
+      'parts that were legitimate. If you believe a criterion can only pass by changing what',
+      'is asserted, propose nothing for that probe: a human amends the contract, and doing',
+      'that is an explicit, audited step that is not available to you.',
+      '',
+      '=== THE SCENARIO GRAMMAR ===',
+      '',
+      'One directive per line, arguments double-quoted. A line that is not one of these four',
+      'verbs is refused before the browser starts, so do not write prose:',
+      '',
+      '  goto     "/orders"',
+      '  click    "#submit"',
+      '  fill     "#email" "alice@example.com"',
+      '  waitFor  "#confirmation"',
+      '',
+      'Prefer a stable selector over a brittle one: an id or a data attribute beats a text',
+      'match, and a text match beats a positional or generated class name.',
+      '',
+      '=== THE FAILING PROBES ===',
+      '',
+    ],
+    // The variable, untrusted middle: everything a provider is being SHOWN. This is the
+    // only part a size cap may reach.
+    body: [candidates.slice(0, MAX_PROMPTED_CANDIDATES).map(candidateBlock).join('\n\n')],
+    // ⚠️ THE INSTRUCTION TAIL. The response shape lives here, at the END of the document,
+    // which is precisely the arrangement story 5.6 found bounding would destroy — and story
+    // 5.5 had found the same thing in `explain.ts` hours earlier. Until story 6.8 this
+    // prompt was never bounded at all, so its tail survived by luck rather than by design.
+    // `assemblePrompt` never cuts a tail, whatever the candidates weigh.
+    tail: [
+      '',
+      '=== YOUR RESPONSE ===',
+      '',
+      'Respond with ONLY a JSON document of this shape, with no prose and no markdown fence:',
+      '',
+      '  {"proposals": [{"probeId": "...", "mechanics": {"scenario": "..."}}]}',
+      '',
+      'Include a probe only if you have a concrete reason to believe your proposal fixes it.',
+      'Omitting a probe you cannot help is correct and costs nothing; guessing is not.',
+    ],
+    capBytes: ADAPTATION_PROMPT_CAP_BYTES,
+    ...(redaction === undefined ? {} : { redaction }),
+  });
 }

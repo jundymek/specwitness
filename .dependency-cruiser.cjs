@@ -192,6 +192,43 @@ module.exports = {
       },
     },
     {
+      name: 'authoring-layer',
+      comment:
+        'AD-1: src/authoring/** is application-layer — the contract and plan authoring ' +
+        'services (generate, freeze, amend, compile, explain, and 5.6\'s mechanics ' +
+        'adaptation). The spine\'s layer graph gives it AUTH -> DOM (domain + schemas), ' +
+        'AUTH -> ING and AUTH -> PROV, so it may import domain, schemas, its own ' +
+        'siblings, ingest, providers and npm. What it may NOT import is an adapter that ' +
+        'is not `providers` (config, infra, surfaces), another application layer ' +
+        '(pipeline, report) or the edge (cli). ' +
+        'THE HALF WITH TEETH IS `infra`. Authoring reads and writes contract and plan ' +
+        'FILES with `node:fs` directly (contract-file.ts, plan-file.ts), which is ' +
+        'allowed — built-ins are not a layer. But reaching `src/infra/run-store.ts` or ' +
+        '`src/infra/vcs.ts` from here would let an authoring service touch run evidence ' +
+        'or the repository, and the spine puts both of those behind the pipeline; the ' +
+        'CLI edge orchestrates authoring before and outside the pipeline, and the ' +
+        'pipeline never authors. `providers` is permitted because AD-2 routes every ' +
+        'provider call through the ONE shared invoke gate in src/providers/invoke.ts, ' +
+        'which authoring is the principal caller of; `ingest` is permitted because the ' +
+        'spine draws that edge, even though nothing under src/authoring uses it today — ' +
+        'narrowing a rule below the binding graph would be a redesign made by a lint ' +
+        'file rather than by an ADR. ' +
+        'This rule is Epic 5 action item e5-C. Its three siblings (`ingest-core-only`, ' +
+        '`pipeline-layer`, `report-layer`) existed while `authoring` appeared only ' +
+        'inside their prose, so the layer that holds plan.ts, amend.ts, explain.ts and ' +
+        'the adaptation modules was fenced by nothing at all: an Epic 5 agent planted ' +
+        '`authoring -> infra` and watched depcruise pass, and that is what proved the ' +
+        'rule missing. `tests/unit/dependency-rules.test.ts` pins both directions.',
+      severity: 'error',
+      // `cli` is absent from the permit list rather than called out separately, exactly as
+      // `ingest-core-only` and `pipeline-layer` leave it: `nothing-imports-cli` also fires.
+      from: { path: '^src/authoring/' },
+      to: {
+        path: '^src/',
+        pathNot: ['^src/(domain|schemas|authoring|ingest|providers)/'],
+      },
+    },
+    {
       name: 'report-layer',
       comment:
         'AD-11/AD-1: src/report/** is application-layer and the STRICTEST of them — the ' +
@@ -222,6 +259,57 @@ module.exports = {
         // built-ins like `node:path` — string work is not I/O.
         path: ['^src/', builtinPattern],
         pathNot: ['^src/(domain|schemas|report)/'],
+      },
+    },
+    {
+      name: 'scorecard-is-local-only',
+      comment:
+        'NFR-4 / AC1 of story 6.5 / the founding local-first product rule: the dogfooding ' +
+        'scorecard is written to the operator\'s own disk and goes NOWHERE ELSE. The two ' +
+        'scorecard modules may not import a networking built-in (http, https, http2, net, ' +
+        'tls, dgram, dns) or an HTTP client. ' +
+        'WHY A RULE AND NOT A CONVENTION. `.specwitness/scorecard.jsonl` is the one place ' +
+        'in this product where a contributor might reasonably think telemetry belongs — ' +
+        'it is literally a file of usage metrics — which is exactly why the acceptance ' +
+        'criterion forecloses it and why the ban is structural rather than a comment ' +
+        'somebody has to read. `src/schemas/scorecard.ts` is already covered by ' +
+        '`schemas-core-only` (schemas may import no built-in at all), so the half that ' +
+        'earns this rule its keep is `src/infra/scorecard-store.ts`: `src/infra/**` may ' +
+        'legitimately use any Node built-in, and without this rule a single `node:https` ' +
+        'import beside the `node:fs` one would pass every other check in this file. ' +
+        'THE SUBPATH SUFFIX IS NOT DECORATION: `node:dns/promises` is a real module and an ' +
+        'anchored `$` alone would have let it straight through — the same shape as ' +
+        '`node:fs/promises`, which this codebase uses everywhere, so it is the natural ' +
+        'thing for someone to reach for. It is written `($|/)` rather than `(/.*)?$` because ' +
+        'dependency-cruiser REFUSES the latter as an unsafe regular expression and bails ' +
+        'out of the whole run — which would have disabled every rule in this file, not ' +
+        'just this one. Raised as a P2 by the codex review of story 6.5. ' +
+        'THE HONEST LIMIT: dependency-cruiser sees IMPORTS. Node\'s global `fetch` needs ' +
+        'none, so it is not caught here — `tests/unit/dependency-rules.test.ts` scans the ' +
+        'two modules\' source for it, and plants a `node:https` import to watch this rule ' +
+        'fire. Neither guard alone is sufficient; both are cheap.',
+      severity: 'error',
+      // Story 6.6 extends this rule to its two new modules by the same argument. The
+      // attribution log is the same kind of file — local usage measurement, the one place
+      // a contributor might think telemetry belongs — and `src/infra/attribution-store.ts`
+      // is the half that earns it, since `src/infra/**` may otherwise import any Node
+      // built-in. `src/report/scorecard-summary.ts` is already covered by `report-layer`
+      // (which forbids every side-effectful built-in) and `src/schemas/scorecard-attribution.ts`
+      // by `schemas-core-only`; both are named here anyway so that the ban is stated where
+      // someone looks for it rather than inferred from two other rules.
+      from: {
+        path:
+          '^src/(schemas/scorecard|schemas/scorecard-attribution|infra/scorecard-store|' +
+          'infra/attribution-store|report/scorecard-summary)\\.ts$',
+      },
+      to: {
+        path: [
+          '^(node:)?(http|https|http2|net|tls|dgram|dns)($|/)',
+          // Anything whose job is to fetch. Named rather than inferred: a future
+          // dependency added for an unrelated reason must not silently become reachable
+          // from this path.
+          'node_modules/(axios|node-fetch|undici|got|superagent|ws|request)/',
+        ],
       },
     },
     {

@@ -1,0 +1,16 @@
+{
+  "expectedVersion": 1,
+  "fixture": "runner-criterion-fail",
+  "why": "The red direction of the corpus runner itself, and the half that matters more: a runner that cannot tell a failing fixture from a passing one reports green for nothing. The application reports the release channel as `beta` where its frozen contract requires `stable` (commands/release.cjs), so criterion E1-02 must be `fail` while E1-01 stays `pass` — a MIXED outcome, chosen so the fixture cannot pass by accident and cannot fail for an incidental reason. The verdict is FAIL with exit 1 and NO `gateFailed`: this fixture declares no gates, so a `gateFailed` marker appearing here would mean the product attributed a criterion failure to the build. It embodies no numbered defect class from brief section 7; those belong to stories 6.2, 6.3 and 6.4.",
+  "proves": ["AC1", "NFR-10", "AD-12", "ADR-002", "ADR-003"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 1,
+  "outcome": { "verdict": "FAIL" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass",
+      "E1-02": "fail"
+    }
+  }
+}

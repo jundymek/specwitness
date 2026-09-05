@@ -1,0 +1,40 @@
+# SpecWitness Project Config for the corpus fixture `01-all-correct`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Every command here is `node <relative path inside this fixture>`:
+# argv, never a shell line, with nothing to quote and nothing for a shell to
+# interpret even if one were involved. None of them reaches the network, reads
+# anything outside this directory, or installs anything.
+#
+# `{{PORT:app}}` is substituted by the corpus runner with a freshly allocated
+# ephemeral loopback port at materialisation time. A hardcoded port would make
+# two concurrent runs of this suite fight over one socket; see
+# `fixtures/corpus/README.md` for the placeholder rules.
+
+version: 1
+
+project:
+  baseBranch: master
+
+# The application's own unit tests, as a Deterministic Gate. Green here, in the
+# same run in which every criterion also passes — this fixture is the control
+# against which the four FAIL fixtures' "the gate was green and the system was
+# still broken" claim is read.
+gates:
+  - { id: tests, run: node gates/tests.cjs }
+
+services:
+  app:
+    run: node app/server.cjs {{PORT:app}}
+    port: {{PORT:app}}
+    ready:
+      url: http://127.0.0.1:{{PORT:app}}/health
+      timeoutSec: 30
+
+observations:
+  # Drives the observation surface: exits 0 and prints one JSON object.
+  orders: { run: node commands/orders-observation.cjs }
+  # Drives the shell surface: asserted on for exit code and stdout.
+  report: { run: node commands/report.cjs }

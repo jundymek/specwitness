@@ -1,0 +1,49 @@
+# Hand-written Verification Plan for the corpus fixture `09-meta-only-change`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, story 6.1 AC1).
+#
+# ⚠️ `contract.version` IS 2, NOT 1. The contract beside this file carries a
+# version-1 entry in `meta.history`, and the schema requires every superseded
+# version to be strictly below `spec.version` — so the amendment record this
+# fixture exists to demonstrate is only representable at version 2. The
+# fingerprint below is the hash of THOSE version-2 spec bytes, and it is
+# deliberately the SAME fingerprint that `09-tampered-fingerprint` carries: the
+# two fixtures share a spec, and differ only in whether the thing that was
+# altered is inside the fingerprinted half.
+plan:
+  epic: epic-1
+  contract:
+    version: 2
+    fingerprint: 2d83c13d957531182965feeef22ec01bb4a9d2010a05dba92723a81d1107c978
+  data:
+    seed: corpusseed000009
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: version-probe
+          surface: shell
+          mechanics:
+            commandId: version
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: it prints its own name and version
+              target: { source: stdout }
+              comparison: contains
+              expected: corpus-fixture-app 1.0.0
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

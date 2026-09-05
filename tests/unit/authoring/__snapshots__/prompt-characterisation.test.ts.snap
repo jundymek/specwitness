@@ -1,0 +1,494 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`the contract statement, offered to every builder (AC2) > contract-author (the epic is its untrusted input) 1`] = `
+"You are drafting a verification contract for a software epic.
+
+A verification contract is the definition of done: the set of criteria that
+must be true of the finished epic. It is frozen before implementation starts
+and is then the sole authority on what must be true, so it has to describe
+the requirement rather than any particular implementation of it.
+
+WHAT TO WRITE
+
+- One criterion per distinct, checkable expectation. Prefer several precise
+  criteria over one broad one.
+- Each statement must describe EXTERNALLY OBSERVABLE behavior or a system
+  invariant: what a user, an API client, or an inspection of the running
+  system could confirm. Avoid naming internal functions, classes, methods or
+  source files unless the criterion is genuinely structural.
+- Cover the acceptance criteria below. Where they imply an expectation they
+  do not state outright, write that criterion too.
+
+WHAT NOT TO WRITE
+
+- DO NOT invent, assign or return criterion ids. SpecWitness assigns them,
+  because ids must survive an amendment and that is not a drafting decision.
+- DO NOT return a version, a fingerprint, a frozen flag, or any metadata.
+- DO NOT restate an acceptance criterion verbatim if it describes an
+  implementation step rather than an outcome; describe the outcome instead.
+
+THE EPIC
+
+Epic id: epic-7
+Epic title: Verification Contracts
+
+Epic goal:
+Capture the definition of done before the cohort starts.
+
+The epic has 1 story.
+
+--- Story 7.1: Freeze a contract ---
+
+Narrative:
+As an epic owner,
+I want to freeze a contract,
+So that it is authoritative.
+
+Acceptance criteria, verbatim from the planning artifact:
+  1. the endpoint accepts AUTH_TOKEN=[REDACTED]
+"
+`;
+
+exports[`the contract statement, offered to every builder (AC2) > mechanics adapter 1`] = `
+"You are adapting the MECHANICS of browser probes in a verification plan.
+
+Each probe below failed because an element it looked for was not found. The usual
+cause is cosmetic drift: a control was relabelled or moved, while the behaviour the
+criterion describes did not change. Your job is to propose a new way to LOOK for the
+same thing.
+
+=== WHAT YOU MAY CHANGE ===
+
+ONLY these two fields, per probe:
+
+  path      - the service-relative starting path. Must begin with a single "/".
+  scenario  - the interaction script (the grammar is below).
+
+At least one of them must be present in each proposal.
+
+=== WHAT YOU MAY NOT CHANGE, AND CANNOT ===
+
+You may NOT change what must be TRUE. Assertions, expected values, comparisons and
+assertion targets are not yours to touch. Neither is a probe id, a surface, a
+criterion id, or the service the probe points at.
+
+You also may not introduce a URL, a host, an origin, a shell command or any argument
+to one. A probe names a declared service and a relative path; it never names a host.
+
+This is not a request. The response schema has no field for any of them, so a response
+containing one is rejected in full and NOTHING you proposed is applied - including the
+parts that were legitimate. If you believe a criterion can only pass by changing what
+is asserted, propose nothing for that probe: a human amends the contract, and doing
+that is an explicit, audited step that is not available to you.
+
+=== THE SCENARIO GRAMMAR ===
+
+One directive per line, arguments double-quoted. A line that is not one of these four
+verbs is refused before the browser starts, so do not write prose:
+
+  goto     "/orders"
+  click    "#submit"
+  fill     "#email" "alice@example.com"
+  waitFor  "#confirmation"
+
+Prefer a stable selector over a brittle one: an id or a data attribute beats a text
+match, and a text match beats a positional or generated class name.
+
+=== THE FAILING PROBES ===
+
+1. probeId: submit-order
+   criterion E7-01: the endpoint accepts AUTH_TOKEN=[REDACTED]
+   current path: /orders
+   current scenario:
+     goto "/orders"
+     click "#create-company"
+   the assertion expected: Organizations
+   the page actually gave: (no element matched "#create-company")
+
+=== YOUR RESPONSE ===
+
+Respond with ONLY a JSON document of this shape, with no prose and no markdown fence:
+
+  {"proposals": [{"probeId": "...", "mechanics": {"scenario": "..."}}]}
+
+Include a probe only if you have a concrete reason to believe your proposal fixes it.
+Omitting a probe you cannot help is correct and costs nothing; guessing is not."
+`;
+
+exports[`the contract statement, offered to every builder (AC2) > plan-author 1`] = `
+"You are compiling an executable verification plan from a FROZEN verification contract.
+
+The contract is the sole authority on WHAT must be true. Your job is HOW: for each
+criterion, the concrete probes and explicit assertions that will decide it
+mechanically. Once compiled, this plan is executed with no AI in the loop at all, so
+everything a run needs must be written down now.
+
+THE PROBE SURFACES — this list is closed. There are no others.
+
+- http        — a request to a DECLARED SERVICE at a service-relative path.
+- observation — a DECLARED OBSERVATION COMMAND that prints JSON to stdout; you assert
+                on values in that JSON, optionally comparing a before/after delta
+                around another probe in the same criterion.
+- shell       — a DECLARED COMMAND whose exit code and output you assert on.
+- browser     — a scripted browser interaction. Expensive and slow.
+
+CHOOSE THE LOWEST ADEQUATE SURFACE. If a criterion can be checked over HTTP, compile an
+http probe — NOT a browser probe. Use browser only when the criterion is genuinely
+about what a user sees or does in a page and nothing cheaper can decide it. A browser
+probe where an http probe would do is a wrong answer even when it passes.
+
+COMMANDS AND SERVICES ARE REFERENCED BY ID, NEVER BY COMMAND LINE.
+
+There is no field anywhere in the response schema that accepts a command string, a
+shell line, a host or a URL. A shell or observation probe names a declared command id;
+an http or browser probe names a declared service id and a path beginning with "/".
+Anything else is rejected. Do not attempt to work around this — a plan that could name
+an executable would be a plan that could run anything, which is the one thing this
+product does not permit.
+
+ASSERTIONS ARE DATA, AND EVERY PROBE MUST HAVE AT LEAST ONE.
+
+Each assertion carries a human-readable description, what to read, a comparison and an
+expected value. Expected values are strings, including for numbers ("200", "0", "3").
+A probe with no assertions observes nothing and decides nothing; it is rejected.
+Make each expectation as specific as the criterion allows: an assertion that would
+hold against a broken build is worse than no probe at all, because it reports green.
+
+EVERY CRITERION MUST APPEAR EXACTLY ONCE.
+
+For each criterion, choose one of:
+
+  - disposition "automated"    — one or more probes with explicit assertions.
+  - disposition "needs-human"  — with a reason and reviewer guidance:
+      * reason "human-verifiability"    for a criterion the contract marks
+        verifiability: human. These NEVER receive a probe. No machine may decide them.
+      * reason "not-safely-automatable" for a criterion the contract marks automated
+        that you cannot map to a probe you are confident in.
+
+DO NOT omit a criterion you find hard. An omitted criterion disappears from
+verification and nobody is told. Recording it as needs-human with reason
+"not-safely-automatable" is the correct, expected answer, and it is always better than
+a guessed probe.
+
+DETERMINISTIC TEST DATA.
+
+Scenario inputs are fixed now, at compile time, so that every run uses identical
+inputs. Declare them as data bindings:
+
+  - kind "fixed"    — a name and the exact value to use every run.
+  - kind "volatile" — a name and the reason it CANNOT be fixed (a value that must be
+                      unique per run, such as a signup email). Declare these
+                      explicitly; an undeclared varying input silently destroys
+                      reproducibility.
+
+Do not invent timestamps, random ids or "now"-dependent values as fixed data.
+
+WHAT NOT TO RETURN.
+
+- DO NOT return the epic id, the contract version, the contract fingerprint, a seed, a
+  schema version or any timestamp. SpecWitness records all of those.
+- DO NOT return criterion statements. Reference each criterion by its id only.
+
+THIS PROJECT DECLARES THE FOLLOWING IDS. You may reference these and nothing else.
+
+Service ids (for http and browser probes):
+  - backend
+  - frontend
+
+Observation / command ids (for observation and shell probes):
+  - company-count
+  - typecheck
+
+THE FROZEN CONTRACT
+
+Epic: epic-7
+Contract version: 1
+
+It has 1 criterion. Plan every one of them.
+
+--- E7-01 ---
+kind: behavioral
+severity: normal
+verifiability: automated
+
+Statement, verbatim from the frozen contract:
+the endpoint accepts AUTH_TOKEN=[REDACTED]
+"
+`;
+
+exports[`the four prompt builders, pinned byte for byte > contract-author (src/authoring/prompt.ts) 1`] = `
+"You are drafting a verification contract for a software epic.
+
+A verification contract is the definition of done: the set of criteria that
+must be true of the finished epic. It is frozen before implementation starts
+and is then the sole authority on what must be true, so it has to describe
+the requirement rather than any particular implementation of it.
+
+WHAT TO WRITE
+
+- One criterion per distinct, checkable expectation. Prefer several precise
+  criteria over one broad one.
+- Each statement must describe EXTERNALLY OBSERVABLE behavior or a system
+  invariant: what a user, an API client, or an inspection of the running
+  system could confirm. Avoid naming internal functions, classes, methods or
+  source files unless the criterion is genuinely structural.
+- Cover the acceptance criteria below. Where they imply an expectation they
+  do not state outright, write that criterion too.
+
+WHAT NOT TO WRITE
+
+- DO NOT invent, assign or return criterion ids. SpecWitness assigns them,
+  because ids must survive an amendment and that is not a drafting decision.
+- DO NOT return a version, a fingerprint, a frozen flag, or any metadata.
+- DO NOT restate an acceptance criterion verbatim if it describes an
+  implementation step rather than an outcome; describe the outcome instead.
+
+THE EPIC
+
+Epic id: epic-7
+Epic title: Verification Contracts
+
+Epic goal:
+Capture the definition of done before the cohort starts.
+
+The epic has 1 story.
+
+--- Story 7.1: Freeze a contract ---
+
+Narrative:
+As an epic owner,
+I want to freeze a contract,
+So that it is authoritative.
+
+Acceptance criteria, verbatim from the planning artifact:
+  1. Given a draft, when I freeze it, then a fingerprint is printed.
+  2. Re-freezing an unchanged contract is idempotent.
+"
+`;
+
+exports[`the four prompt builders, pinned byte for byte > explainer (src/authoring/explain.ts) 1`] = `
+"You are assisting a verification tool called SpecWitness.
+
+A verification run has finished and some acceptance criteria did not pass. The
+verdict has ALREADY been decided mechanically and is final. Your output is a
+NON-AUTHORITATIVE hypothesis that a human or a repair agent reads. It will not
+change any status, any verdict or any exit code, and it is stored in a field
+labelled as a hypothesis.
+
+Do NOT propose a change to any file, plan, contract or test. Do NOT state whether
+a criterion passes. State, for each criterion below, your best guess at the ROOT
+CAUSE of what was observed, in at most three sentences.
+
+Run: run-20260830T142501Z-a3f9 · epic epic-7 · base 1111111111111111111111111111111111111111 · head 2222222222222222222222222222222222222222
+
+--- FAILED CRITERIA ---
+
+criterionId: E7-03
+status: fail (severity critical)
+statement: An unknown flag exits 64.
+expected: exit code 64
+actual: exit code 1
+evidence: command at evidence/cmd-unknown-flag.txt
+
+criterionId: E7-06
+status: error (severity critical)
+statement: The migration is reversible.
+expected: a reversible migration
+actual: the probe could not observe
+evidence: observation at evidence/obs-migration.txt
+
+--- EVIDENCE SUMMARIES (already redacted; this is all there is) ---
+- gate lint fail (exit 1); stdout: ANTHROPIC_API_KEY=[REDACTED]
+> Authorization: [REDACTED]
+; stderr: lint found 3 problems
+
+- command install exited 0; stdout: Lockfile is up to date
+; stderr: 
+- provider contract-author via claude-code (1 attempts)
+- http GET http://localhost:3000/health -> 200; body: {"ok":true}
+- observation db-rows-after: users=3
+- browser http://localhost:3000/login (trace captured)
+
+--- RESPOND WITH ONLY THIS JSON ---
+{"explanations":[{"criterionId":"<one of the ids above>","hypothesis":"<your text>"}]}
+
+Use only criterionIds listed above; any other id is discarded."
+`;
+
+exports[`the four prompt builders, pinned byte for byte > mechanics adapter (src/authoring/adaptation-prompt.ts) 1`] = `
+"You are adapting the MECHANICS of browser probes in a verification plan.
+
+Each probe below failed because an element it looked for was not found. The usual
+cause is cosmetic drift: a control was relabelled or moved, while the behaviour the
+criterion describes did not change. Your job is to propose a new way to LOOK for the
+same thing.
+
+=== WHAT YOU MAY CHANGE ===
+
+ONLY these two fields, per probe:
+
+  path      - the service-relative starting path. Must begin with a single "/".
+  scenario  - the interaction script (the grammar is below).
+
+At least one of them must be present in each proposal.
+
+=== WHAT YOU MAY NOT CHANGE, AND CANNOT ===
+
+You may NOT change what must be TRUE. Assertions, expected values, comparisons and
+assertion targets are not yours to touch. Neither is a probe id, a surface, a
+criterion id, or the service the probe points at.
+
+You also may not introduce a URL, a host, an origin, a shell command or any argument
+to one. A probe names a declared service and a relative path; it never names a host.
+
+This is not a request. The response schema has no field for any of them, so a response
+containing one is rejected in full and NOTHING you proposed is applied - including the
+parts that were legitimate. If you believe a criterion can only pass by changing what
+is asserted, propose nothing for that probe: a human amends the contract, and doing
+that is an explicit, audited step that is not available to you.
+
+=== THE SCENARIO GRAMMAR ===
+
+One directive per line, arguments double-quoted. A line that is not one of these four
+verbs is refused before the browser starts, so do not write prose:
+
+  goto     "/orders"
+  click    "#submit"
+  fill     "#email" "alice@example.com"
+  waitFor  "#confirmation"
+
+Prefer a stable selector over a brittle one: an id or a data attribute beats a text
+match, and a text match beats a positional or generated class name.
+
+=== THE FAILING PROBES ===
+
+1. probeId: submit-order
+   criterion E7-01: A user can create an organization from the orders page.
+   current path: /orders
+   current scenario:
+     goto "/orders"
+     click "#create-company"
+   the assertion expected: Organizations
+   the page actually gave: (no element matched "#create-company")
+
+=== YOUR RESPONSE ===
+
+Respond with ONLY a JSON document of this shape, with no prose and no markdown fence:
+
+  {"proposals": [{"probeId": "...", "mechanics": {"scenario": "..."}}]}
+
+Include a probe only if you have a concrete reason to believe your proposal fixes it.
+Omitting a probe you cannot help is correct and costs nothing; guessing is not."
+`;
+
+exports[`the four prompt builders, pinned byte for byte > plan-author (src/authoring/plan-prompt.ts) 1`] = `
+"You are compiling an executable verification plan from a FROZEN verification contract.
+
+The contract is the sole authority on WHAT must be true. Your job is HOW: for each
+criterion, the concrete probes and explicit assertions that will decide it
+mechanically. Once compiled, this plan is executed with no AI in the loop at all, so
+everything a run needs must be written down now.
+
+THE PROBE SURFACES — this list is closed. There are no others.
+
+- http        — a request to a DECLARED SERVICE at a service-relative path.
+- observation — a DECLARED OBSERVATION COMMAND that prints JSON to stdout; you assert
+                on values in that JSON, optionally comparing a before/after delta
+                around another probe in the same criterion.
+- shell       — a DECLARED COMMAND whose exit code and output you assert on.
+- browser     — a scripted browser interaction. Expensive and slow.
+
+CHOOSE THE LOWEST ADEQUATE SURFACE. If a criterion can be checked over HTTP, compile an
+http probe — NOT a browser probe. Use browser only when the criterion is genuinely
+about what a user sees or does in a page and nothing cheaper can decide it. A browser
+probe where an http probe would do is a wrong answer even when it passes.
+
+COMMANDS AND SERVICES ARE REFERENCED BY ID, NEVER BY COMMAND LINE.
+
+There is no field anywhere in the response schema that accepts a command string, a
+shell line, a host or a URL. A shell or observation probe names a declared command id;
+an http or browser probe names a declared service id and a path beginning with "/".
+Anything else is rejected. Do not attempt to work around this — a plan that could name
+an executable would be a plan that could run anything, which is the one thing this
+product does not permit.
+
+ASSERTIONS ARE DATA, AND EVERY PROBE MUST HAVE AT LEAST ONE.
+
+Each assertion carries a human-readable description, what to read, a comparison and an
+expected value. Expected values are strings, including for numbers ("200", "0", "3").
+A probe with no assertions observes nothing and decides nothing; it is rejected.
+Make each expectation as specific as the criterion allows: an assertion that would
+hold against a broken build is worse than no probe at all, because it reports green.
+
+EVERY CRITERION MUST APPEAR EXACTLY ONCE.
+
+For each criterion, choose one of:
+
+  - disposition "automated"    — one or more probes with explicit assertions.
+  - disposition "needs-human"  — with a reason and reviewer guidance:
+      * reason "human-verifiability"    for a criterion the contract marks
+        verifiability: human. These NEVER receive a probe. No machine may decide them.
+      * reason "not-safely-automatable" for a criterion the contract marks automated
+        that you cannot map to a probe you are confident in.
+
+DO NOT omit a criterion you find hard. An omitted criterion disappears from
+verification and nobody is told. Recording it as needs-human with reason
+"not-safely-automatable" is the correct, expected answer, and it is always better than
+a guessed probe.
+
+DETERMINISTIC TEST DATA.
+
+Scenario inputs are fixed now, at compile time, so that every run uses identical
+inputs. Declare them as data bindings:
+
+  - kind "fixed"    — a name and the exact value to use every run.
+  - kind "volatile" — a name and the reason it CANNOT be fixed (a value that must be
+                      unique per run, such as a signup email). Declare these
+                      explicitly; an undeclared varying input silently destroys
+                      reproducibility.
+
+Do not invent timestamps, random ids or "now"-dependent values as fixed data.
+
+WHAT NOT TO RETURN.
+
+- DO NOT return the epic id, the contract version, the contract fingerprint, a seed, a
+  schema version or any timestamp. SpecWitness records all of those.
+- DO NOT return criterion statements. Reference each criterion by its id only.
+
+THIS PROJECT DECLARES THE FOLLOWING IDS. You may reference these and nothing else.
+
+Service ids (for http and browser probes):
+  - backend
+  - frontend
+
+Observation / command ids (for observation and shell probes):
+  - company-count
+  - typecheck
+
+THE FROZEN CONTRACT
+
+Epic: epic-7
+Contract version: 1
+
+It has 2 criteria. Plan every one of them.
+
+--- E7-01 ---
+kind: behavioral
+severity: normal
+verifiability: automated
+
+Statement, verbatim from the frozen contract:
+GET /health responds 200 with a JSON body whose "status" field is "ok".
+
+--- E7-02 ---
+kind: behavioral
+severity: normal
+verifiability: human
+
+Statement, verbatim from the frozen contract:
+An operator can read the release notes before upgrading.
+
+E7-02 is verifiability: human. Carry it as needs-human with reason
+"human-verifiability" and reviewer guidance. Do NOT give it a probe.
+"
+`;

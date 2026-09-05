@@ -1,0 +1,20 @@
+{
+  "expectedVersion": 1,
+  "fixture": "11-plan-exists-no-ai",
+  "why": "Brief section 7 defect class 11, and the product claim that matters most operationally: with a plan already compiled and committed, SpecWitness verifies COMPLETELY OFFLINE, making zero provider calls. Epic 4 story 4.7 shipped --no-ai for this, and the flag is the operator ASSERTING that a plan exists and must be executed without AI — so a missing plan is a refusal rather than a silent compilation. Here the plan exists, the gate passes, the criterion is adjudicated mechanically, and the answer is PASS at exit 0. THE CLAIM IS ABOUT WHAT DID NOT HAPPEN, so a fixture asserting only the verdict would prove the uninteresting half. Three independent witnesses cover the interesting half, and none of them is this fixture taking its own word for it. Two are runner invariants that hold for EVERY fixture and are asserted in tests/corpus/corpus.test.ts rather than here: the run document's own providerUsage must be empty, and claude/codex tripwire executables are placed first on PATH so an invocation leaves a marker file and fails the suite. The third is local to this fixture and is the stderrAbsent list below: the tripwire prints an identifying line when it is run, so asserting that line is ABSENT is this fixture saying, in its own file, that no provider CLI was executed. That is the Epic 3 retro section 7 idiom applied to provider calls rather than to secrets — assert the bad thing is absent, never that a marker of its handling is present. The last stderrAbsent entry distinguishes this fixture from hazard-e4d-skipped-is-inert, which reaches exit 0 through the OPPOSITE route: no plan at all, every criterion skipped, and that warning printed. Both exit 0; only this one adjudicated anything. A reader comparing the two learns what the exit code alone cannot tell them.",
+  "proves": ["AC1", "FR-18", "ADR-002", "NFR-10", "AD-12", "Q66"],
+  "command": ["verify", "epic-1", "--no-ai", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass"
+    }
+  },
+  "stderrContains": [],
+  "stderrAbsent": [
+    "corpus tripwire",
+    "no provider is assigned to the"
+  ]
+}

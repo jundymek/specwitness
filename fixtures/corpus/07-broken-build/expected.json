@@ -1,0 +1,18 @@
+{
+  "expectedVersion": 1,
+  "fixture": "07-broken-build",
+  "why": "Brief section 7 defect class 7: the branch under verification does not build. A Deterministic Gate ('build') exits non-zero, and ADR-003 says that is a PRODUCT problem in the branch, not a SpecWitness malfunction — a branch that does not build is demonstrably not mergeable. So the verdict is FAIL at exit 1, carrying the failing gate's id in 'gateFailed' so repair automation routes to 'fix the build' rather than to a criterion. THE ASSERTION WITH TEETH IS THE NEGATIVE ONE: this fixture must NEVER report an infrastructure error. Exit 3 would tell an operator that rerunning might help, and a gate failure excused as infrastructure is how a verification gate becomes unfair to trust — the exact mirror of fixture 08, which must never report FAIL. Both directions are pinned because getting these two wrong in opposite directions is how a gate becomes either ignorable or unfair, and neither failure announces itself. The negative direction needs no extra field: the runner compares the WHOLE outcome object structurally, so an '{infraError: ...}' outcome fails this fixture on the 'outcome' line. Do not 'strengthen' this by adding anything; it is already exact. Both criteria are 'skipped' because a failing gate stops the pipeline before probes run (ADR-003) — that is the documented behaviour, not an oversight, and pinning it here is what would catch a change to it.",
+  "proves": ["AC1", "FR-22", "ADR-002", "ADR-003", "AD-6", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 1,
+  "outcome": { "verdict": "FAIL", "gateFailed": "build" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "skipped",
+      "E1-02": "skipped"
+    }
+  },
+  "stderrContains": ["gate 'build' failed"],
+  "stderrAbsent": ["infraError", "InfraError"]
+}

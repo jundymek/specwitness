@@ -1,0 +1,5 @@
+# Local-only SpecWitness artifacts — evidence of runs on THIS machine.
+# config.yaml, contracts/ and plans/ are deliberately not listed: they are
+# reviewable product artifacts and belong in version control.
+runs/
+scorecard.jsonl

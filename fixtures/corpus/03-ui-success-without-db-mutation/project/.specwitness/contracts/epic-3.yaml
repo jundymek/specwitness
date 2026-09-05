@@ -1,0 +1,43 @@
+# Hand-written Verification Contract for the corpus fixture
+# `03-ui-success-without-db-mutation`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-3 --freeze`; see `fixtures/corpus/README.md`.
+#
+# TWO CRITERIA ABOUT ONE ACTION, AND THAT SEPARATION IS THE FIXTURE. E3-01 is
+# what the USER is told; E3-02 is what the SYSTEM did. A specification that only
+# had E3-01 would be satisfied by this application, which is precisely brief
+# section 7's complaint about story-level verification. E3-03 exists so the
+# fixture cannot fail for an incidental reason.
+spec:
+  epic: epic-3
+  version: 1
+  criteria:
+    - id: E3-01
+      statement: Confirming an order answers 200 and reports the confirmation to the user.
+      kind: behavioral
+      severity: normal
+      verifiability: automated
+    - id: E3-02
+      statement: Confirming an order records exactly one confirmation in the persisted store.
+      kind: integration
+      severity: critical
+      verifiability: automated
+    - id: E3-03
+      statement: The confirmation module test suite passes.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 818d6eab20f1e93bb96d55f232f98e03542c1e539cf3fc3cef9129e4ae7f87f4
+  createdAt: 2026-09-04T09:00:00.000Z
+  frozenAt: 2026-09-04T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-04T09:00:00.000Z
+  history: []

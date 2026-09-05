@@ -7,6 +7,7 @@ import { register as registerDoctor } from './commands/doctor.js';
 import { register as registerInit } from './commands/init.js';
 import { register as registerPlan } from './commands/plan.js';
 import { register as registerReport } from './commands/report.js';
+import { register as registerScorecard } from './commands/scorecard.js';
 import { register as registerVerify } from './commands/verify.js';
 import {
   EXIT,
@@ -65,6 +66,7 @@ export function buildProgram(): Command {
   registerReport(program);
   registerClean(program);
   registerVerify(program);
+  registerScorecard(program);
 
   return program;
 }

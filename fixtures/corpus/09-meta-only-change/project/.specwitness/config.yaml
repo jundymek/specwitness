@@ -1,0 +1,24 @@
+# SpecWitness Project Config for the corpus fixture `09-meta-only-change`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. The single command here is `node commands/version.cjs`: argv, never
+# a shell line, with nothing to quote and nothing for a shell to interpret even
+# if one were involved.
+#
+# No gates, no services, no ports. This fixture must reach a GENUINE pass — a
+# criterion actually adjudicated — so that "integrity did not fire" is
+# demonstrated by a run that really verified something, rather than by a run
+# that happened to reach exit 0 without checking anything. That distinction is
+# exactly what `hazard-e4d-skipped-is-inert` exists to make visible, and this
+# fixture is deliberately on the other side of it.
+
+version: 1
+
+project:
+  baseBranch: master
+
+observations:
+  version:
+    run: node commands/version.cjs

@@ -128,6 +128,72 @@ export const SCHEMA_VERSIONS = Object.freeze({
    * AD-2 conversation, never a routine bump.
    */
   adaptation: 1,
+
+  /**
+   * One line of the dogfooding scorecard, `.specwitness/scorecard.jsonl`
+   * (`src/schemas/scorecard.ts`), story 6.5.
+   *
+   * The one-line addition this file's header promises, and the first artifact
+   * born under ADR-008 — whose §5 is written about this key specifically. It
+   * differs from every other persisted artifact here in ONE respect: the file
+   * is an append-only LOG, so the version lives on each LINE rather than on the
+   * document, and every line is parsed independently.
+   *
+   * That is what makes the softer consequence §5 prescribes possible. A record
+   * whose only failure is unknown keys is skipped with a warning and the read
+   * continues; a malformed line likewise. Refusing to summarise 200 good
+   * records because record 47 came from a newer build would destroy the very
+   * measurement the file exists for — and a partially-readable log accumulated
+   * across versions is still evidence.
+   *
+   * NOTE WHAT DID NOT MOVE. `jsonReport` above is UNCHANGED. The scorecard is a
+   * derived PROJECTION of the same `RunResult` that becomes `result.json`
+   * (AD-11); it adds no field to that document and changes none.
+   */
+  scorecard: 1,
+
+  /**
+   * One line of the attribution log, `.specwitness/attributions.jsonl`
+   * (`src/schemas/scorecard-attribution.ts`), story 6.6.
+   *
+   * The FR-34 human judgement — `unique` / `duplicate` / `false-positive` —
+   * keyed by `(runId, criterionId)`. A SEPARATE artifact from `scorecard`
+   * above, with its own version, because it has a different writer, a
+   * different file and a different lifecycle: a scorecard line is written by
+   * `verify` the instant a run finishes, while an attribution is written by a
+   * human days later, possibly several times for the same finding.
+   *
+   * Born under ADR-008 like the scorecard beside it, and read the same way:
+   * an append-only LOG, so the version lives on each LINE and every line is
+   * parsed independently. A record whose only failure is unknown keys is
+   * skipped with a warning and the read continues; a malformed line likewise,
+   * and `scorecard summary` reports the count of both (ADR-008 §5).
+   *
+   * NOTE WHAT DID NOT MOVE. `scorecard` above is UNCHANGED. Story 6.6 reads
+   * story 6.5's record and writes none: the attribution is a SECOND file
+   * joined to the first on `(runId, criterionId)`, never a field added to it.
+   * Appending a foreign line to `scorecard.jsonl` would parse as `malformed`
+   * against that file's strict schema and would corrupt the very skipped-record
+   * count ADR-008 §5 exists to protect.
+   */
+  attribution: 1,
+
+  /**
+   * The `specwitness scorecard summary --json` document, story 6.6
+   * (`src/report/scorecard-summary.ts`).
+   *
+   * A DERIVED document — computed on demand from the two logs above and never
+   * written to disk — registered here for the reason `epicSpec` and
+   * `adaptation` are: it is a machine contract a harness parses, so the seam
+   * is versioned from the day it exists rather than from the day it changes.
+   * Epic 7 reads this document to answer the product hypothesis (SM-1), and a
+   * consumer that cannot tell which shape it is holding cannot tell whether
+   * the north-star number means what it thinks it means.
+   *
+   * Bump this when an existing field changes meaning, type or requiredness —
+   * ADR-008 §3's rule. Adding a metric is additive and does not bump it.
+   */
+  scorecardSummary: 1,
 } as const satisfies Record<string, number>);
 
 /** Keys of the registry. Derived — never hand-maintained. */

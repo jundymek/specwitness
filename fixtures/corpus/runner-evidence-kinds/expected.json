@@ -1,0 +1,20 @@
+{
+  "expectedVersion": 1,
+  "fixture": "runner-evidence-kinds",
+  "why": "The proving fixture for the `evidence` expectation added by story 6.10. The corpus pins what a run CONCLUDED - verdict, exit code, criterion statuses - and was entirely silent about what a run OBSERVED, so a change that leaves every verdict correct while a verification surface quietly stops producing evidence was invisible to every fixture merged before this one. This fixture makes that failure loud: a green Deterministic Gate, an observation probe and a shell probe produce exactly the kinds `gate`, `command` and `observation`, pinned with `exact` so a kind that disappears AND a kind that newly appears both turn it red. It embodies no numbered defect class from brief section 7; those belong to stories 6.2 (1, 2, 3, 5, 10), 6.3 (6, 7, 8, 9, 11) and 6.4. It declares no service, so `http` and `browser` cannot appear here, and `provider` cannot appear in any corpus fixture because every fixture ships a precompiled plan (FR-18).",
+  "proves": ["AC1", "AC3", "AC5", "FR-15", "AD-6", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass",
+      "E1-02": "pass"
+    }
+  },
+  "evidence": {
+    "assertion": "exact",
+    "kinds": ["command", "gate", "observation"]
+  }
+}

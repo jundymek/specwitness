@@ -1,0 +1,59 @@
+# Hand-written Verification Contract for the corpus fixture
+# `09-meta-only-change` — the NEGATIVE half of brief section 7 defect class 9.
+#
+# ⚠️ READ THIS BESIDE `fixtures/corpus/09-tampered-fingerprint/`. The two are a
+# matched pair and neither proves anything alone. They carry the SAME `spec`
+# block and therefore the SAME fingerprint. One of them alters `spec` and MUST
+# trip integrity; this one alters only `meta` and MUST NOT. A pair is what
+# demonstrates a PARTITION; a single fixture only demonstrates an alarm, and an
+# alarm that fires on everything is indistinguishable from one that fires on
+# nothing.
+#
+# ⚠️ EVERYTHING BELOW `meta:` HAS BEEN DELIBERATELY CHANGED since this contract
+# was frozen, and the run must still verify clean:
+#
+#   - `createdAt` and `frozenAt` are not the values a fresh freeze produced;
+#   - `provenance` names a different provider, model and CLI version;
+#   - `history` carries a real FR-10 amendment record for the superseded
+#     version 1, which is why `spec.version` is 2.
+#
+# NONE of that is fingerprinted. `src/schemas/canonical.ts` hashes the `spec`
+# block and only the `spec` block — `canonicalize` and `fingerprint` take a
+# `ContractSpec`, so `meta` is not even representable in their input. That is
+# what makes "meta is never fingerprinted" a property of the type system rather
+# than a rule someone remembered.
+#
+# WHY THIS MATTERS ENOUGH TO SPEND A FIXTURE ON: if a `meta` change tripped
+# integrity, every routine schema evolution and every recorded amendment would
+# look like an attack, operators would learn that the integrity alarm means
+# nothing, and the one signal that is supposed to mean tampering would be the
+# first thing they silence.
+#
+# The `spec:` half was hand-written; `meta.fingerprint` was produced ONCE by the
+# shipped `specwitness contract epic-1 --freeze` over these exact spec bytes.
+# `expected.json` — the OUTCOME — is hand-written and never generated.
+spec:
+  epic: epic-1
+  version: 2
+  criteria:
+    - id: E1-01
+      statement: The packaged command reports its own name and version.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 2d83c13d957531182965feeef22ec01bb4a9d2010a05dba92723a81d1107c978
+  createdAt: 2026-08-30T08:00:00.000Z
+  frozenAt: 2026-09-01T11:45:00.000Z
+  provenance:
+    provider: claude
+    model: a-model-name-that-was-not-here-at-freeze-time
+    providerCliVersion: 9.9.9
+    generatedAt: 2026-08-30T08:00:00.000Z
+  history:
+    - version: 1
+      fingerprint: 00000000000000000000000000000000000000000000000000000000000000ff
+      timestamp: 2026-08-31T10:00:00.000Z
+      reason: Sharpened the criterion after review; superseded by version 2.

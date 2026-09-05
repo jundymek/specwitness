@@ -1,0 +1,61 @@
+# Hand-written Verification Plan for the corpus fixture
+# `06-subjective-criterion`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, story 6.1 AC1). The `contract.fingerprint` below must match the frozen
+# contract beside it; the runner does not patch it, so a contract re-freeze
+# means this line is re-copied by hand.
+#
+# ⚠️ E1-02 IS CARRIED AS `needs-human`, AND IT HAS TO BE. The contract marks it
+# `verifiability: human`, and the plan gate refuses any plan that claims
+# otherwise — a human criterion planned as `automated` would be claiming a
+# machine may decide what its author said no machine may. `reason` must be
+# `human-verifiability` and not `not-safely-automatable`: the two are different
+# facts with different remedies, and the gate refuses a plan whose reason
+# disagrees with its contract. `not-safely-automatable` would tell a reviewer
+# that compilation merely failed to map this criterion and that sharpening it
+# might help, when in truth no amount of sharpening will change it.
+#
+# ⚠️ `guidance` IS THE POINT OF THIS FIXTURE, NOT DECORATION. Exit 2 is a STOP,
+# and a stop that does not say what to look at is a stop people learn to
+# override. `expected.json` pins this exact sentence as it is RENDERED, so
+# rewording it here without updating the expectation is caught rather than
+# silently absorbed — which is precisely the failure story 5.3 was written to
+# close, when guidance the schema required and the plan-author wrote was
+# dropped before it ever reached a person.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 138252eb59694b483cf8af8fd9e920be6addbc2346658bf1c129abff27528332
+  data:
+    seed: corpusseed000006
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: receipt-total
+          surface: shell
+          mechanics:
+            commandId: receipt
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the receipt states the order total
+              target: { source: stdout }
+              comparison: contains
+              expected: "total: 41.50"
+    - criterionId: E1-02
+      disposition: needs-human
+      reason: human-verifiability
+      guidance: Open the printed checkout receipt and confirm the wording reads as courteous rather than merely correct; a person must judge tone, and no assertion in this plan can.
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

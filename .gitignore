@@ -1,5 +1,9 @@
 # Dependencies
 node_modules/
+# pnpm's content-addressable store. Normally resolved outside the project, but an npm or
+# pnpm invocation configured with a project-local store writes it here — its SQLite files
+# are large binaries that must never be committed.
+.pnpm-store/
 
 # Build output
 dist/
@@ -7,6 +11,11 @@ dist/
 
 # Test output
 coverage/
+# vitest's JSON report, written by `pnpm test:ci` and read by the skipped-suite report.
+.vitest-report.json
+# The same report for the browser-only run (`pnpm test:browser`, story 6.9's CI job), which
+# is what proves those suites RAN rather than skipped.
+.vitest-browser-report.json
 
 # Environment / secrets
 .env

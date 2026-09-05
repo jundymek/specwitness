@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: '2026-08-30'
-last_updated: '2026-09-03'
+last_updated: '2026-09-05'
 project: specwitness
 project_key: NOKEY
 tracking_system: file-system
@@ -88,17 +88,29 @@ development_status:
   5-6-mechanics-adaptation-boundary: done
   epic-5-retrospective: done
 
-  epic-6: backlog
-  6-1-corpus-infrastructure-hermetic-e2e-runner: backlog
-  6-2-behavioral-corpus-fixtures-pass-fail-classes: backlog
-  6-3-classification-corpus-fixtures: backlog
-  6-4-non-node-target-fixture: backlog
-  6-5-scorecard-recording: backlog
-  6-6-defect-attribution-summary: backlog
-  6-7-dogfooding-readiness-docs-packaging: backlog
-  6-8-shared-prompt-assembly-helper: backlog
-  6-9-browser-verification-in-ci: backlog
-  epic-6-retrospective: optional
+  epic-6: in-progress
+  6-1-corpus-infrastructure-hermetic-e2e-runner: done
+  6-2-behavioral-corpus-fixtures: done
+  6-3-classification-corpus-fixtures: done
+  6-4-non-node-target-fixture: done
+  6-5-scorecard-recording: done
+  6-6-defect-attribution-summary: done
+  6-7-dogfooding-readiness-docs-packaging: done
+  6-8-shared-prompt-assembly-helper: done
+  6-9-browser-verification-in-ci: done
+  # Follow-up story written by the epic-6 supervisor during wave 2 (2026-09-04) with the
+  # owner's agreement; not in epics.md. SCHEDULED into wave 3 by owner decision 2026-09-05,
+  # with its Task 5 (retro-fitting evidence expectations onto story 6.2's merged fixtures)
+  # removed from scope - fixtures/corpus/ is not in REVIEW_IGNORE_PATHS, and the closing
+  # wave should not re-stale sign-offs for work that can be done at any time afterwards.
+  6-10-corpus-evidence-kind-expectations: done
+  # Second follow-up story written by the epic-6 supervisor, during wave 3 (2026-09-05) with the
+  # owner's agreement; not in epics.md. The gap is inherited from Epic 4 - the setup stage is still
+  # the placeholder that names Epic 4 as its filler - and the 6.x number records where it was found,
+  # not where it belongs. UNASSIGNED and unscheduled; the row exists so that sprint-status.sh can
+  # see its key if the story is ever picked up and merged.
+  6-11-setup-stage-executes-configured-install: ready-for-dev
+  epic-6-retrospective: done
 
   epic-7: backlog
   7-1-harness-integration-first-real-contract: backlog
@@ -115,16 +127,24 @@ action_items:
   - {id: e3-D, epic: 3, action: 'ADR-003 prose to gateFailed?: string (carried A3)', owner: owner, status: 'scheduled as a rider on story 6.3'}
   - {id: e3-E, epic: 3, action: 'CI restore-or-retire decision (carried A1, three epics)', owner: owner, status: 'answered 2026-09-04 by fa2647b - Node floor 22.13, triggers restored, repo public; Epic 6 makes corpus e2e a required check'}
   - {id: e3-F, epic: 3, action: 'SIGINT/Ctrl+C messaging on verify path - ADR or Epic 4 story', owner: owner, status: 'scheduled as a rider on story 6.3'}
-  - {id: e3-G, epic: 3, action: 'pre-registration empty-container window - follow-up or Epic 4 rider', owner: owner, status: 'scheduled as a rider on story 6.1'}
+  - {id: e3-G, epic: 3, action: 'pre-registration empty-container window - follow-up or Epic 4 rider', owner: owner, status: 'investigated in story 6.1 and NOT fixed, deliberately - measured 1 empty container in 40 SIGKILL-at-random-point runs on macOS; the leftover holds no git registration, no process and no lock, clean correctly no-ops on it, and src/infra/vcs.ts:1056-1061 records why closing the last syscall would trade it for a predictable temp path. Recommendation and evidence in the 6.1 PR body'}
   - {id: e3-H, epic: 3, action: 'spec template: PR title becomes squash subject, must be conventional', owner: owner, status: 'applied to all eight Epic 6 specs'}
   - {id: e3-I, epic: 3, action: 'correct supervisor-brief 10 delta: docs/findings exists', owner: owner-harness, status: open}
-  - {id: e2-B3, epic: 2, action: 'addendum B stale line (carried from Epic 2)', owner: owner, status: 'scheduled as a rider on story 6.2'}
-  - {id: e2-5a-i, epic: 2, action: 'fenceMask closes on tagged inner fence (named follow-up, no ingest story yet)', owner: unassigned, status: 'scheduled as a rider on story 6.2 - its fixtures ingest real BMAD markdown'}
+  - {id: e2-B3, epic: 2, action: 'addendum B stale line (carried from Epic 2)', owner: owner, status: 'done in story 6.2 - the line now records --json-schema and states, with merged-source citations, that SpecWitness deliberately does not use it. Flagged as a deliberate edit to a finalized planning artifact, named by 6.2 Exact scope; no decision, FR or NFR changed'}
+  - {id: e2-5a-i, epic: 2, action: 'fenceMask closes on tagged inner fence (named follow-up, no ingest story yet)', owner: unassigned, status: 'done in story 6.2 - a closing fence may carry no info string (CommonMark 4.5); fix plus a regression test SEEN RED in tests/unit/ingest/fence-mask-tagged-inner-fence.test.ts. NOTE the scheduling premise was wrong: corpus fixtures ship precompiled plans, so verify never ingests BMAD markdown and no fixture can reach src/ingest; pinned at the unit boundary instead'}
   - {id: e5-A, epic: 5, action: 'follow-up story: one shared prompt-assembly helper (redact, bound, preserve the instruction tail)', owner: unassigned, status: 'scheduled as story 6.8, Epic 6 wave 2'}
   - {id: e5-B, epic: 5, action: 'give Epic 4 lesson 5 teeth - an agent quoting it still characterised a peer''s merged code from memory', owner: owner, status: 'answered in the Epic 6 spec template: every claim about a peer must cite path:line read this session'}
-  - {id: e5-C, epic: 5, action: 'add a dependency-cruiser rule for src/authoring/** - four modules, no enforcement', owner: owner, status: 'scheduled as a rider on story 6.1, Epic 6 wave 1'}
+  - {id: e5-C, epic: 5, action: 'add a dependency-cruiser rule for src/authoring/** - four modules, no enforcement', owner: owner, status: 'done in story 6.1 - authoring-layer rule added and SEEN RED against a planted authoring -> infra import; three cases in tests/unit/dependency-rules.test.ts pin both directions'}
   - {id: e5-D, epic: 5, action: 'ADR: .strict() persisted envelope vs additive optional keys, across all four registry keys', owner: owner, status: 'answered 2026-09-04 by ADR-008; binds story 6.5, reader branch scheduled in 6.3'}
-  - {id: e5-E, epic: 5, action: 'decide report --explain: narrow the Q52 guard, or amend the 5.5 spec clarification', owner: owner, status: 'scheduled as a rider on story 6.7 - the README forces the answer'}
-  - {id: e5-F, epic: 5, action: 'decide whether FR-18 narrowed coverage (step-target miss only) is the intended scope, and record it', owner: owner, status: 'scheduled as a rider on story 6.3 - a classification fixture pins the real scope'}
+  - {id: e5-E, epic: 5, action: 'decide report --explain: narrow the Q52 guard, or amend the 5.5 spec clarification', owner: owner, status: 'done in story 6.7 - option 1 taken: the absence is documented in the README and the integration guide, and story 5.5 clarification now carries a dated amendment block. Verified from the binary (report --explain exits 64), not inherited'}
+  - {id: e5-F, epic: 5, action: 'decide whether FR-18 narrowed coverage (step-target miss only) is the intended scope, and record it', owner: owner, status: 'NOT DONE - carried. It fell between the 6.3 spec (three riders, e5-F not among them) and this file, which scheduled it there. It asks a decision question whose owner field says owner, so no fixture could have answered it. Story 6.3 author is not responsible'}
   - {id: e5-G, epic: 5, action: 'harness: push block claims deleted-on-merge for a branch never pushed', owner: owner-harness, status: open}
   - {id: e5-H, epic: 5, action: 'harness: block-loops.sh has no run boundaries; a fresh supervisor inherits the previous wave blocks', owner: owner-harness, status: open}
+  - {id: e6-A, epic: 6, action: 'harness: a rebase ORPHANS a recorded verdict and the Stage-4 gate cannot see it - check reachability (merge-base --is-ancestor) alongside content freshness', owner: owner-harness, status: open}
+  - {id: e6-B, epic: 6, action: 'harness: the gate checks that a verdict exists and is fresh, not that the fix which followed it was re-reviewed; four rounds this epic found defects introduced by the immediately preceding fix', owner: owner-harness, status: open}
+  - {id: e6-C, epic: 6, action: 'harness: e3-A is wrong in BOTH directions and on trivially-checkable inputs (findings reported over a one-markdown-file commit) - make the classifier content-based or stop emitting a label', owner: owner-harness, status: open}
+  - {id: e6-D, epic: 6, action: 'harness: block-loops.sh has no run OR epic boundary - the first pass inherited four wave-2 incidents and one from a different epic dated 2026-09-03 (widens e5-H)', owner: owner-harness, status: open}
+  - {id: e6-E, epic: 6, action: 'harness: a DIRECT push to the epic branch nudges nobody - no epic-updated, no rebase_pending; twice this wave the supervisor was the only detector', owner: owner-harness, status: open}
+  - {id: e6-F, epic: 6, action: 'decide setup.install: schedule story 6.11, or state the key is inert and make doctor say so', owner: owner, status: open}
+  - {id: e6-G, epic: 6, action: 'decide the closing-pipe exit-1 fix before 0.1.0 is dogfooded, or accept the documented limitation', owner: owner, status: open}
+  - {id: e6-H, epic: 6, action: 'harness: running a peer test suite from the supervisor worktree logs tests-passed under the SUPERVISOR agent id', owner: owner-harness, status: open}

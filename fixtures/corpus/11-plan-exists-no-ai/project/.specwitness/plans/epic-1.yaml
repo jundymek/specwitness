@@ -1,0 +1,49 @@
+# Hand-written Verification Plan for the corpus fixture
+# `11-plan-exists-no-ai`.
+#
+# PRECOMPILED AND CHECKED IN, and for THIS fixture that is not merely how the
+# corpus stays hermetic — it is the subject. `--no-ai` is the operator asserting
+# that a plan already exists and must be executed without AI, so a missing plan
+# is a refusal rather than a silent compilation. This file is what makes the
+# assertion true, and the run therefore executes it and reaches PASS at exit 0
+# with no provider in scope at any point (FR-18, Q66).
+#
+# The `contract.fingerprint` below must match the frozen contract beside it; the
+# runner does not patch it, so a contract re-freeze means this line is re-copied
+# by hand. That check is what stops a plan from being executed against an
+# expectation nobody froze.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: d7a93d0877247df5e232d8c841cbdf9189623f6de5e4fd7e4c8c62efd36e58df
+  data:
+    seed: corpusseed000011
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: version-probe
+          surface: shell
+          mechanics:
+            commandId: version
+            args: ["--version"]
+            argumentAllowlist: ["--version"]
+          assertions:
+            - description: the command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: it prints its own name and version
+              target: { source: stdout }
+              comparison: contains
+              expected: corpus-fixture-app 1.0.0
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

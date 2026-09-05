@@ -1,0 +1,59 @@
+# Hand-written Verification Plan for the corpus fixture `07-broken-build`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, story 6.1 AC1). The `contract.fingerprint` below must match the frozen
+# contract beside it; the runner does not patch it, so a contract re-freeze
+# means this line is re-copied by hand.
+#
+# ⚠️ THE PLAN IS CORRECT, AND NOTHING IN IT EVER RUNS. A failing gate stops the
+# pipeline before the probes stage (ADR-003), so both criteria are reported
+# `skipped` and neither probe below is executed. That is not a reason to omit
+# them: the plan must cover every criterion of the frozen contract or the run is
+# refused outright (`assertPlanCoversContract`), and a fixture whose plan was
+# wrong would fail for the wrong reason while claiming to prove class 7.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 3fb04aecfbb54b5eceb139a53850f90318d3a2e64ffa81f60b6f0f2226ab0aab
+  data:
+    seed: corpusseed000007
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: version-name
+          surface: shell
+          mechanics:
+            commandId: version
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: it prints its own name and version
+              target: { source: stdout }
+              comparison: contains
+              expected: corpus-fixture-app 1.0.0
+    - criterionId: E1-02
+      disposition: automated
+      probes:
+        - id: version-exit
+          surface: shell
+          mechanics:
+            commandId: version
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

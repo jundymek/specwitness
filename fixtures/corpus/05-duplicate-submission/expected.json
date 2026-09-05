@@ -1,0 +1,25 @@
+{
+  "expectedVersion": 1,
+  "fixture": "05-duplicate-submission",
+  "why": "Brief section 7 and section 50 class 5: a repeated user action creates duplicate rows. THE SECOND REQUEST IS THE ONE THAT REVEALS THE DEFECT, and the fixture is built so nothing else can: E5-01 submits once and is pinned as PASS, and E5-02 submits again with the same idempotency key. Its http probe asserts only that the answer was a success - a 2xx expressed as two numeric bounds, because a correct implementation would answer 200 (duplicate) where this one answers 201 (created), so pinning either code would assert the defect or fail on the fix. Every response-level check therefore stays green while a second row appears in the store, which is brief section 35's example exactly. The failure lands on the observation, whose after-snapshot shows the store holding order-1 and order-2 where only order-1 should be. WHY NO STORY-LEVEL GATE COULD HAVE CAUGHT IT: the duplicate check is present and correct, and it can never match, because toRow does not persist the idempotency key isDuplicate looks for. Reading an absent property is legal JavaScript and yields undefined, which is exactly what a correct not-a-duplicate answer looks like, so there is nothing for a linter or a type checker to see; and the module's unit suite is green because each function is tested against inputs the test itself constructs. The defect is in the composition of two individually correct functions. The verdict is FAIL with exit 1 and NO gateFailed: the project's test gate exits 0 in this same run. Evidence kinds are pinned through the stderr report: gate, http, observation and command.",
+  "proves": ["AC1", "NFR-10", "AD-12", "AD-13", "AD-6", "FR-25", "FR-26", "FR-28", "ADR-002", "ADR-003"],
+  "command": ["verify", "epic-5", "--json"],
+  "exitCode": 1,
+  "outcome": { "verdict": "FAIL" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E5-01": "pass",
+      "E5-02": "fail",
+      "E5-03": "pass"
+    }
+  },
+  "stderrContains": [
+    "  gate tests (pass, exit 0): node gates/tests.cjs",
+    "  http POST http://127.0.0.1:<PORT:app>/orders -> 201",
+    "  observation orders",
+    "  command module-tests (exit 0): node commands/module-tests.cjs",
+    "      expected: [\"order-1\"]",
+    "      actual:   [\"order-1\",\"order-2\"]"
+  ]
+}

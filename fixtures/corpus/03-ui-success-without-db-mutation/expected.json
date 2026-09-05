@@ -1,0 +1,25 @@
+{
+  "expectedVersion": 1,
+  "fixture": "03-ui-success-without-db-mutation",
+  "why": "Brief section 7 and section 50 class 3: the UI displays success while a required persistent mutation did not happen. Confirming an order answers 200 with the message a person is shown, and app/confirmations.cjs never writes the confirmation to store/orders.json. THE FAILURE MUST LAND ON THE OBSERVATION AND NOT ON THE UI, which is why E3-01 - the pure response-level criterion - is pinned as PASS: a fixture whose http probe went red would be testing a broken endpoint, a defect class every story-level test already catches. E3-02 fails on its observation probe, whose before/after pair around a second confirm request finds no confirmation in the persisted store; the http probe inside that same criterion answers 200 and passes, so fail outranks pass and the criterion's failure is unambiguously the observation's. WHY NO STORY-LEVEL GATE COULD HAVE CAUGHT IT: there is no type error and no lint error - record() returns exactly the object its caller expects - and the module's own unit suite is green because every assertion a suite can make about the module in isolation is true. A unit test observes the module's own state; the missing write is a fact about a different subsystem. Only a before/after observation of persisted state can see it, which is the surface brief section 35 asks for. The verdict is FAIL with exit 1 and NO gateFailed: the project's test gate exits 0 in this same run. Evidence kinds are pinned through the stderr report: gate, http, observation and command.",
+  "proves": ["AC1", "NFR-10", "AD-12", "AD-13", "AD-6", "FR-25", "FR-26", "FR-28", "ADR-002", "ADR-003"],
+  "command": ["verify", "epic-3", "--json"],
+  "exitCode": 1,
+  "outcome": { "verdict": "FAIL" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E3-01": "pass",
+      "E3-02": "fail",
+      "E3-03": "pass"
+    }
+  },
+  "stderrContains": [
+    "  gate tests (pass, exit 0): node gates/tests.cjs",
+    "  http POST http://127.0.0.1:<PORT:app>/orders/order-1/confirm -> 200",
+    "  observation confirmations",
+    "  command module-tests (exit 0): node commands/module-tests.cjs",
+    "      expected: order-1",
+    "      actual:   absent: '$.lastConfirmedOrderId' is not present in the snapshot"
+  ]
+}

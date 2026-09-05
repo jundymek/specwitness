@@ -1,0 +1,154 @@
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+
+import { describe, expect, it } from 'vitest';
+
+/**
+ * The PUBLISH SURFACE, as a test rather than a promise (story 6.7, AC2).
+ *
+ * ⚠️ THIS FILE IS THE MANIFEST HALF ONLY, AND THE DIVISION IS DELIBERATE.
+ * `scripts/pack-smoke.sh` asserts what a real `npm pack` actually PRODUCED — it packs,
+ * lists the tarball, installs it into a throwaway directory and runs the binary. That is
+ * the assertion that matters, because `files` and the tarball disagree in ways only
+ * packing reveals (`.npmignore`, npm's always-include rules, a `files` entry matching
+ * nothing). It runs in CI on ubuntu-latest AND macos-latest.
+ *
+ * What it cannot do cheaply is fail FAST and LOCALLY on a manifest edit. Packing costs a
+ * build, a registry install and ~20s; the checks below cost a `readFile` and run inside
+ * `pnpm test`. So this file guards the declarations a developer actually edits, and the
+ * shell script guards the artifact they never look at. Neither replaces the other, and
+ * a claim proved only here is a claim about `package.json`, never about the tarball.
+ */
+
+const MANIFEST = fileURLToPath(new URL('../../package.json', import.meta.url));
+
+interface Manifest {
+  readonly name: string;
+  readonly version: string;
+  readonly bin: Record<string, string>;
+  readonly files: readonly string[];
+  readonly engines: Record<string, string>;
+  readonly dependencies?: Record<string, string>;
+  readonly devDependencies?: Record<string, string>;
+  readonly peerDependencies?: Record<string, string>;
+  readonly peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
+}
+
+async function manifest(): Promise<Manifest> {
+  return JSON.parse(await readFile(MANIFEST, 'utf8')) as Manifest;
+}
+
+describe('the published package declares the surface story 6.7 documents', () => {
+  it('ships the built CLI and templates and nothing else', async () => {
+    // Order-independent: `files` is a set, and a reorder is not a regression.
+    expect([...(await manifest()).files].sort()).toEqual(['dist', 'templates']);
+  });
+
+  it('maps the specwitness bin to the built entry point', async () => {
+    // The README and the integration guide both tell a reader to run `npx specwitness`;
+    // that only works because of this mapping. `pack-smoke.sh` proves the mapped file is
+    // executable once installed — here we only prove we asked for the right one.
+    expect((await manifest()).bin).toEqual({ specwitness: 'dist/cli.js' });
+  });
+
+  it('declares the ADR-007 Node floor', async () => {
+    // ADR-007 raised this from 22.12 to 22.13 (pnpm 11.24.0 requires it). CI pins
+    // `node-version: '22.13'` to this exact floor, and the README documents it, so a
+    // change here without a change there would make one of the three a lie.
+    expect((await manifest()).engines.node).toBe('>=22.13');
+  });
+
+  it('carries a version the documented release process can actually produce', async () => {
+    // ⚠️ THIS WAS `/^\d+\.\d+\.\d+$/` AND THAT CONTRADICTED docs/versioning.md, which
+    // Codex review caught as a P2 on this branch. The release plan requires a candidate
+    // to carry a prerelease identifier (`0.2.0-next.1`) before it is published under the
+    // `next` dist-tag — and the plan's own step 1 is "pnpm test green". A test that
+    // rejects the exact version the process prescribes makes that process unrunnable the
+    // moment the version is bumped, and CI would go red on every release branch.
+    //
+    // So the shape permitted here is exactly the shape the plan describes and no more:
+    // MAJOR.MINOR.PATCH, optionally followed by `-next.<n>`. Build metadata, arbitrary
+    // prerelease tags and multi-part identifiers are still rejected, because the point of
+    // the assertion is that the version is one of the plan's TWO cases — a release or a
+    // `next` candidate — rather than something nobody has a publishing rule for.
+    // Each numeric component is `0|[1-9]\d*`, not `\d+`. Semver forbids leading zeroes,
+    // so `01.2.3`, `1.02.3` and `1.2.3-next.01` are not versions at all — and a plain
+    // `\d+` accepted every one of them, which Codex review caught as a P2 on this branch.
+    // That mattered for the same reason the Playwright assertion above did: the comment
+    // claims "the plan's two shapes and no more", and a guard that admits a string the
+    // plan cannot produce is a guard whose stated purpose and behaviour disagree. The
+    // practical cost is a release branch passing this step and failing later at pack or
+    // publish time, which is exactly the "release process that cannot execute itself"
+    // failure this file already exists to prevent.
+    const SEMVER_COMPONENT = String.raw`(?:0|[1-9]\d*)`;
+    const PLAN_VERSION = new RegExp(
+      `^${SEMVER_COMPONENT}\\.${SEMVER_COMPONENT}\\.${SEMVER_COMPONENT}(?:-next\\.${SEMVER_COMPONENT})?$`,
+    );
+    expect((await manifest()).version).toMatch(PLAN_VERSION);
+  });
+});
+
+describe('the product rules that are visible in the manifest', () => {
+  /**
+   * CLAUDE.md, first non-negotiable rule: "No direct LLM API usage. AI is delegated to
+   * local `claude` / `codex` CLIs as subprocesses. An `@anthropic-ai/sdk` or `openai`
+   * dependency in `package.json` is a defect, not a convenience."
+   *
+   * The README makes that a promise to a reader, and a promise a reader cannot check is
+   * worth nothing — so it is checked here, over EVERY dependency block including
+   * `devDependencies`. A model SDK pulled in "just for a test" would ship the same
+   * capability and break the same rule.
+   */
+  const FORBIDDEN = [
+    '@anthropic-ai/sdk',
+    'openai',
+    '@google/generative-ai',
+    '@mistralai/mistralai',
+    'cohere-ai',
+    'langchain',
+  ];
+
+  it('depends on no direct model-API SDK, in any dependency block', async () => {
+    const pkg = await manifest();
+    const declared = Object.keys({
+      ...pkg.dependencies,
+      ...pkg.devDependencies,
+      ...pkg.peerDependencies,
+    });
+
+    // Asserting the intersection rather than looping gives a failure that NAMES the
+    // offending package instead of only the first one it happened to reach.
+    expect(declared.filter((name) => FORBIDDEN.includes(name))).toEqual([]);
+  });
+
+  it('keeps its runtime dependency set small enough to state in the README', async () => {
+    // The README tells a reader exactly what `npm install specwitness` pulls in. That
+    // sentence goes stale silently, so it is pinned: adding a runtime dependency is a
+    // decision that must also update the documentation.
+    expect(Object.keys((await manifest()).dependencies ?? {}).sort()).toEqual([
+      'commander',
+      'execa',
+      'yaml',
+      'zod',
+    ]);
+  });
+
+  it('keeps @playwright/test an OPTIONAL peer, never a runtime dependency', async () => {
+    // The README says browser verification needs Playwright and that everything else
+    // works without it. That is only true while this stays an optional peer: promoting
+    // it to `dependencies` would put a ~150MB browser toolchain in the install path of
+    // every user who only ever runs gates and HTTP probes.
+    const pkg = await manifest();
+    expect(pkg.peerDependencies?.['@playwright/test']).toBe('1.62.1');
+    expect(pkg.dependencies?.['@playwright/test']).toBeUndefined();
+
+    // ⚠️ THE ASSERTION THAT ACTUALLY CARRIES THE WORD "OPTIONAL", and it was missing
+    // until Codex review raised it as a P2 on this branch. The two lines above prove the
+    // peer is DECLARED and is not a runtime dependency — neither proves it is optional.
+    // `peerDependenciesMeta` is what makes it so: delete this block from package.json and
+    // npm installs the peer automatically for every consumer, silently contradicting the
+    // README's "everything else works without it", while both assertions above still pass.
+    // A test whose name claims a property it does not check is worse than no test.
+    expect(pkg.peerDependenciesMeta?.['@playwright/test']?.optional).toBe(true);
+  });
+});

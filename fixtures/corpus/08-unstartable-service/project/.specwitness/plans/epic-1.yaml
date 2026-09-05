@@ -1,0 +1,53 @@
+# Hand-written Verification Plan for the corpus fixture
+# `08-unstartable-service`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, story 6.1 AC1). The `contract.fingerprint` below must match the frozen
+# contract beside it; the runner does not patch it, so a contract re-freeze
+# means this line is re-copied by hand.
+#
+# ⚠️ THE PLAN IS CORRECT, AND IT NEVER RUNS. The run stops at the services
+# stage, which precedes probes, so this http probe is never executed and the
+# criterion never reaches a status at all. That is not a reason to weaken the
+# plan: it must cover every criterion of the frozen contract or the run is
+# refused outright (`assertPlanCoversContract`), and it is also what gives the
+# project something to adjudicate — without a probe here,
+# `assertSomethingToAdjudicate` would refuse this gate-less project BEFORE the
+# services stage, and the fixture would prove a config refusal rather than an
+# unstartable service.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 8ccc58d6fdc7124a50affe1bb8e1f4eb4e9f4f88781ea14894624765bfaa053b
+  data:
+    seed: corpusseed000008
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: orders-status
+          surface: http
+          mechanics:
+            serviceId: app
+            method: GET
+            path: /orders
+          assertions:
+            - description: the orders endpoint answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+            - description: the order state reads approved
+              target: { source: jsonPath, path: status }
+              comparison: equals
+              expected: approved
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-04T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

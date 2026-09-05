@@ -632,3 +632,256 @@ describe('the report layer may reach the core and nothing else', () => {
     expect(exitCode).toBe(0);
   });
 });
+
+
+/**
+ * Story 6.1, rider e5-C — the `authoring-layer` rule.
+ *
+ * APPENDED, deliberately, following the precedent stories 3.3 and 3.6 set in this file:
+ * this describe shares **zero `expect()`** with any above it, so a rebase against another
+ * story that also appends here is a text merge rather than a negotiation.
+ *
+ * Why the rule was missing until now, stated because it is the whole point of the rider:
+ * `ingest`, `pipeline` and `report` each had a layer rule while `authoring` appeared only
+ * inside their comments. An Epic 5 agent planted `authoring -> infra` and watched depcruise
+ * PASS — a clean cruise proves only that nobody has violated a rule that exists. Story 6.8
+ * lands inside this layer in wave 2, so the fence goes up first.
+ */
+describe('the authoring-layer rule (story 6.1, rider e5-C)', () => {
+  it('blocks src/authoring from importing an adapter that is not providers', async () => {
+    // THE EXACT IMPORT THAT PASSED. `src/infra/run-store.ts` is run evidence, and the
+    // spine puts it behind the pipeline: the CLI edge orchestrates authoring before and
+    // outside the pipeline, and the pipeline never authors. An authoring service that can
+    // open the run store is one that can write into a run it is not part of.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'authoring/__probe-run-store.ts',
+      "import { createRunStore } from '../infra/run-store.js';\nexport const p = createRunStore;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('authoring-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks src/authoring from importing another application layer', async () => {
+    // `pipeline` and `authoring` are siblings in the application layer, and the spine
+    // draws no edge between them in either direction. `pipeline-layer` already forbids the
+    // reverse; without this rule the direction that was open is the one where a plan
+    // compiler could reach into a running verification.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'authoring/__probe-pipeline.ts',
+      "import { runPipeline } from '../pipeline/run-pipeline.js';\nexport const p = runPipeline;\n",
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('authoring-layer');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('lets src/authoring import the core, providers, ingest, its own siblings and node:fs', async () => {
+    // The permit half, and none of it is decoration. `providers/invoke.ts` is AD-2's ONE
+    // shared invoke gate and authoring is its principal caller (`src/authoring/plan.ts`
+    // imports it today). `node:fs` is how contract and plan FILES are read and written
+    // (`contract-file.ts`, `plan-file.ts`) — a built-in is not a layer. `ingest` is drawn
+    // by the spine (AUTH -> ING) and is unused under src/authoring today; it is permitted
+    // anyway, because narrowing a rule below the binding graph would be a redesign made
+    // by a lint file rather than by an ADR.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'authoring/__probe-sibling.ts', 'export const sibling = 1;\n');
+    await writeModule(
+      tree,
+      'authoring/__probe-service.ts',
+      "import { readFile } from 'node:fs/promises';\n" +
+        "import { InfraError } from '../domain/errors.js';\n" +
+        "import { SCHEMA_VERSIONS } from '../schemas/versions.js';\n" +
+        "import { ingestEpic } from '../ingest/index.js';\n" +
+        "import { sibling } from './__probe-sibling.js';\n" +
+        'export const p = { readFile, InfraError, SCHEMA_VERSIONS, ingestEpic, sibling };\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('authoring-layer');
+    expect(exitCode).toBe(0);
+  });
+});
+
+describe('the scorecard is local-only, structurally (story 6.5)', () => {
+  /**
+   * ⚠️ THESE PLANT INTO THE REAL MODULE'S PATH, not into a scratch probe, and they have to.
+   *
+   * `scorecard-is-local-only` is scoped to exactly two file paths, because those two
+   * files are the entire scorecard write path and a rule over `src/infra/**` would forbid
+   * `node:https` to every adapter that legitimately needs it. A probe module at some other
+   * path therefore cannot trigger it. So the copy's own `infra/scorecard-store.ts` is
+   * OVERWRITTEN inside the temp tree — the real `src/` is never touched, exactly as every
+   * other case in this file guarantees.
+   */
+  const OFFENDING = (specifier: string): string =>
+    `import { request } from '${specifier}';\nexport const p = request;\n`;
+
+  it('blocks a networking built-in in the scorecard store', async () => {
+    // The import that would pass every other rule in this file. `src/infra/**` may use any
+    // Node built-in — that is what makes `RunStore` possible — so without this rule a
+    // single `node:https` beside the `node:fs` one is invisible to the architecture check.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/scorecard-store.ts', OFFENDING('node:https'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks a raw socket too, not only HTTP', async () => {
+    // `node:net` opens a connection without ever spelling "http". A rule that named only
+    // the HTTP modules would be a rule anybody could walk around by accident.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/scorecard-store.ts', OFFENDING('node:net'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks a networking built-in SUBPATH, which an anchored pattern would let through', async () => {
+    // `node:dns/promises` is a real module, and it has exactly the shape of
+    // `node:fs/promises` — which this codebase uses everywhere, so it is the natural thing
+    // for someone to reach for. The rule's first version anchored on `$` and would have
+    // passed it. Raised as a P2 by the codex review of this branch.
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/scorecard-store.ts', OFFENDING('node:dns/promises'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('still permits the filesystem, which is the whole point of the module', async () => {
+    // The permit half. A ban that also broke `node:fs` would be a ban somebody deletes.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'infra/scorecard-store.ts',
+      "import { appendFile } from 'node:fs/promises';\nimport { join } from 'node:path';\n" +
+        'export const p = { appendFile, join };\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('scorecard-is-local-only');
+    expect(exitCode).toBe(0);
+  });
+
+  it('has no global-fetch escape hatch in either real module', async () => {
+    // THE HONEST GAP THE DEPCRUISE RULE CANNOT CLOSE. Node's `fetch`, `WebSocket` and
+    // `XMLHttpRequest` are GLOBALS: they need no import, so dependency-cruiser cannot see
+    // them. This reads the two real modules and says so. Cheap, and it is the only guard
+    // that would catch the one-line change a well-meaning contributor is most likely to
+    // make.
+    for (const relative of ['schemas/scorecard.ts', 'infra/scorecard-store.ts']) {
+      const source = await readFile(join(SRC, relative), 'utf8');
+      // Both modules discuss the ban at length in prose, so the search is for a CALL or a
+      // construction rather than for the word.
+      expect(source).not.toMatch(/\bfetch\s*\(/);
+      expect(source).not.toMatch(/\bnew\s+(WebSocket|XMLHttpRequest)\b/);
+    }
+  });
+});
+
+describe('the attribution log is local-only too, structurally (story 6.6)', () => {
+  /**
+   * Story 6.6 extends `scorecard-is-local-only` to its own persisted-log modules, by
+   * exactly the argument story 6.5 made for its own: the attribution log is the same kind
+   * of file — local usage measurement — and `src/infra/**` may otherwise import any Node
+   * built-in, so a single `node:https` beside the `node:fs` one would pass every other
+   * rule in the config.
+   *
+   * These plant into the REAL module's path inside the temp tree, for the reason story
+   * 6.5's cases do: the rule is scoped to specific paths, so a probe at another path
+   * cannot trigger it. The real `src/` is never touched.
+   */
+  const OFFENDING_6_6 = (specifier: string): string =>
+    `import { request } from '${specifier}';\nexport const p = request;\n`;
+
+  it('blocks a networking built-in in the attribution store', async () => {
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/attribution-store.ts', OFFENDING_6_6('node:https'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('blocks a networking built-in SUBPATH in the attribution store', async () => {
+    const tree = await makeTempTree();
+    await writeModule(tree, 'infra/attribution-store.ts', OFFENDING_6_6('node:dns/promises'));
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('scorecard-is-local-only');
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('still permits the filesystem in the attribution store', async () => {
+    // The permit half. A ban that also broke `node:fs` would be a ban somebody deletes.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'infra/attribution-store.ts',
+      "import { appendFile } from 'node:fs/promises';\nimport { join } from 'node:path';\n" +
+        'export const p = { appendFile, join };\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).not.toContain('scorecard-is-local-only');
+    expect(exitCode).toBe(0);
+  });
+
+  it('has no global-fetch escape hatch in ANY of the five scorecard modules', async () => {
+    // THE HONEST GAP THE DEPCRUISE RULE CANNOT CLOSE, extended to story 6.6's modules.
+    // Node's `fetch`, `WebSocket` and `XMLHttpRequest` are GLOBALS: they need no import,
+    // so dependency-cruiser cannot see them. Every one of these modules discusses the ban
+    // in prose, so the search is for a CALL or a construction rather than for the word.
+    for (const relative of [
+      'schemas/scorecard.ts',
+      'schemas/scorecard-attribution.ts',
+      'infra/scorecard-store.ts',
+      'infra/attribution-store.ts',
+      'report/scorecard-summary.ts',
+    ]) {
+      const source = await readFile(join(SRC, relative), 'utf8');
+      expect(source).not.toMatch(/\bfetch\s*\(/);
+      expect(source).not.toMatch(/\bnew\s+(WebSocket|XMLHttpRequest)\b/);
+    }
+  });
+
+  it('keeps the summariser out of src/infra/** entirely (report-layer)', async () => {
+    // AD-11 expressed structurally: a summariser that could open a file could look up a
+    // fact the model does not carry, and the terminal view and the --json document would
+    // begin to disagree. It is also what makes AC2's "local records only" checkable
+    // rather than promised.
+    const tree = await makeTempTree();
+    await writeModule(
+      tree,
+      'report/scorecard-summary.ts',
+      "import { AttributionStore } from '../infra/attribution-store.js';\n" +
+        'export const p = AttributionStore;\n',
+    );
+
+    const { exitCode, output } = await depcruise(tree);
+
+    expect(output).toContain('report-layer');
+    expect(exitCode).not.toBe(0);
+  });
+});

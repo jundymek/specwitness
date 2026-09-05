@@ -1,0 +1,34 @@
+# Hand-written Verification Contract for the corpus fixture
+# `11-plan-exists-no-ai`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-1 --freeze` — see `fixtures/corpus/README.md`
+# section "Adding a fixture". A contract is an INPUT to the run and its
+# fingerprint is a hash the product must recompute from these bytes or refuse;
+# `expected.json` — the OUTCOME — is hand-written and never generated.
+#
+# One criterion, `automated`, and satisfied. This fixture is about HOW the run
+# reached its answer — with no provider in scope at any point — rather than
+# about the answer being interesting, so the criterion is deliberately dull.
+spec:
+  epic: epic-1
+  version: 1
+  criteria:
+    - id: E1-01
+      statement: The packaged command reports its own name and version.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: d7a93d0877247df5e232d8c841cbdf9189623f6de5e4fd7e4c8c62efd36e58df
+  createdAt: 2026-09-04T09:00:00.000Z
+  frozenAt: 2026-09-04T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-04T09:00:00.000Z
+  history: []

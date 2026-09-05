@@ -1,0 +1,43 @@
+# Hand-written Verification Contract for the corpus fixture
+# `02-api-contract-mismatch`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-2 --freeze`; see `fixtures/corpus/README.md`.
+#
+# E2-01 IS THE CRITERION THE APPLICATION BREAKS. It requires the currency in the
+# response, and `app/order-response.cjs` does not emit it. E2-02 and E2-03 exist
+# so the fixture cannot pass by accident and cannot fail for an incidental
+# reason: the service is up and healthy, and the project's own module suite is
+# green, in the very same run.
+spec:
+  epic: epic-2
+  version: 1
+  criteria:
+    - id: E2-01
+      statement: Creating an order answers 201 and the response carries the approved status and the EUR currency.
+      kind: behavioral
+      severity: critical
+      verifiability: automated
+    - id: E2-02
+      statement: The service reports its health endpoint as ok.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E2-03
+      statement: The order module test suite passes.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 761dcf5451e18dbfe2b7cd6b1df8d93b4f9611c0b3b3ef49cbf8aec12c7e4d0f
+  createdAt: 2026-09-04T09:00:00.000Z
+  frozenAt: 2026-09-04T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-04T09:00:00.000Z
+  history: []

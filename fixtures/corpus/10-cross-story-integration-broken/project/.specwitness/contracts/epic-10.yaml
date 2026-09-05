@@ -1,0 +1,44 @@
+# Hand-written Verification Contract for the corpus fixture
+# `10-cross-story-integration-broken` — the flagship of story 6.2.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-10 --freeze`; see `fixtures/corpus/README.md`.
+#
+# THIS CONTRACT IS WHAT NEITHER STORY AUTHOR HAD. Story A's author wrote a
+# correct checkout module and a passing suite for it. Story B's author wrote a
+# correct fulfilment module and a passing suite for it. Both PRs are individually
+# correct; both reviewers were right to approve them. E10-03 is the sentence
+# nobody owned — what must be true of the ASSEMBLED system — and it is the one
+# the epic fails. That is brief section 7 in three criteria.
+spec:
+  epic: epic-10
+  version: 1
+  criteria:
+    - id: E10-01
+      statement: Each story module test suite passes.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E10-02
+      statement: Checking out answers 200 and reports the approved decision.
+      kind: behavioral
+      severity: normal
+      verifiability: automated
+    - id: E10-03
+      statement: A completed checkout leaves the order fulfilled in the persisted store.
+      kind: integration
+      severity: critical
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 72421ae98ff23ae555fdcfc531579bb4e445eb849ca416604097d30ae32714c1
+  createdAt: 2026-09-04T09:00:00.000Z
+  frozenAt: 2026-09-04T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-04T09:00:00.000Z
+  history: []
