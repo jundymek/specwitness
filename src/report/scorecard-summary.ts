@@ -106,6 +106,31 @@ export interface ScorecardSummaryInput {
     readonly records: readonly AttributionRecord[];
     readonly skipped: readonly SkippedLine[];
   };
+  /**
+   * The UNCAPPED finding ids for runs whose scorecard record truncated its own list,
+   * keyed by run id. Supplied by the CLI edge from `.specwitness/runs/<runId>/result.json`.
+   *
+   * ⚠️ THIS EXISTS SO THAT `add` AND `summary` SHARE ONE SOURCE OF TRUTH, and four rounds
+   * of codex review on this branch are the reason it does. Story 6.5 caps a record's
+   * finding-id list at 200 ids, and every attempt to treat that CAPPED list as the set
+   * broke something:
+   *
+   *  - counting an unlisted criterion anyway let any id inflate the north star past the
+   *    findings that exist;
+   *  - refusing it outright meant a run with more than 200 findings could never have
+   *    findings 201+ attributed at all;
+   *  - validating it at the WRITE end only (against the run's stored result) made `add`
+   *    accept a judgement this summary then reported as an orphan and never counted —
+   *    the same accept-then-discard contradiction, one layer along.
+   *
+   * So the authoritative list is read ONCE, at the edge, and handed to both. This module
+   * stays pure and file-free (`report-layer`); it is told the facts rather than fetching
+   * them, which is the same discipline AD-11 applies to everything else here.
+   *
+   * OPTIONAL, and absence is not an error: an untruncated record needs nothing, and a run
+   * whose result cannot be read falls back to its capped list — narrower, never wider.
+   */
+  readonly authoritativeFindingIds?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 /* ── the model ────────────────────────────────────────────────────────────────────── */
@@ -342,14 +367,20 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
       truncatedRuns += 1;
     }
 
-    for (const criterionId of [
+    // The record's own ids, WIDENED by the authoritative list when the record truncated
+    // its own. A run with no authoritative list contributes exactly what it names, so the
+    // widening can only ever add ids that a stored result actually recorded as findings.
+    const named = new Set<string>([
       ...record.findingCriterionIds.fail,
       ...record.findingCriterionIds.needs_human,
       ...record.findingCriterionIds.error,
-    ]) {
+      ...(input.authoritativeFindingIds?.get(record.runId) ?? []),
+    ]);
+
+    for (const criterionId of named) {
       enumeratedFindings.add(key(record.runId, criterionId));
-      findingsEnumerated += 1;
     }
+    findingsEnumerated += named.size;
   }
 
   // ── the human judgements ──────────────────────────────────────────────────────────

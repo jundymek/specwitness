@@ -482,6 +482,99 @@ describe('a truncated run grants NO amnesty — the round-2 P1', () => {
   });
 });
 
+describe('authoritative finding ids close the add/summary gap', () => {
+  /**
+   * A P1 from round 8 of the codex review, and the fourth round to visit this one point.
+   * `scorecard add` learned to confirm an unlisted criterion against the run's stored
+   * result; this summary had not, so the judgement it accepted was reported as an ORPHAN
+   * and never counted. The same accept-then-discard contradiction as round 1, one layer
+   * along.
+   *
+   * Fixed by reading the authoritative list ONCE at the CLI edge and handing it to both.
+   * This module stays pure: it is told the facts rather than fetching them.
+   */
+  const truncated = (): ScorecardRecord => {
+    const base = run({
+      id: 'run-20260904T120009Z-r009',
+      outcome: { verdict: 'FAIL' },
+      durationMs: 1000,
+      providerInvocations: 0,
+      fail: ['E6-01'],
+      truncated: true,
+    });
+    return { ...base, criteria: { ...base.criteria, total: 300, fail: 300 } };
+  };
+
+  it('counts an attribution the authoritative list confirms', () => {
+    const summary = summarizeScorecard({
+      scorecard: { records: [truncated()], skipped: [] },
+      attributions: {
+        records: [attribution('run-20260904T120009Z-r009', 'E6-250', 'unique')],
+        skipped: [],
+      },
+      authoritativeFindingIds: new Map([
+        ['run-20260904T120009Z-r009', new Set(['E6-01', 'E6-250'])],
+      ]),
+    });
+
+    expect(summary.metrics.uniqueDefects.count).toBe(1);
+    expect(summary.findings.attributed).toBe(1);
+    expect(summary.findings.orphanedAttributions).toBe(0);
+    // The enumerated count now reflects what the run really named, not the capped list.
+    expect(summary.findings.enumerated).toBe(2);
+  });
+
+  it('still orphans an id the authoritative list does NOT contain', () => {
+    // Widening must not become an amnesty.
+    const summary = summarizeScorecard({
+      scorecard: { records: [truncated()], skipped: [] },
+      attributions: {
+        records: [attribution('run-20260904T120009Z-r009', 'E6-777', 'unique')],
+        skipped: [],
+      },
+      authoritativeFindingIds: new Map([
+        ['run-20260904T120009Z-r009', new Set(['E6-01', 'E6-250'])],
+      ]),
+    });
+
+    expect(summary.findings.orphanedAttributions).toBe(1);
+    expect(summary.metrics.uniqueDefects.count).toBe(0);
+  });
+
+  it('falls back to the capped list when no authoritative list is supplied', () => {
+    // Narrower, never wider: an unreadable stored result must not widen anything.
+    const summary = summarizeScorecard({
+      scorecard: { records: [truncated()], skipped: [] },
+      attributions: {
+        records: [attribution('run-20260904T120009Z-r009', 'E6-250', 'unique')],
+        skipped: [],
+      },
+    });
+
+    expect(summary.findings.orphanedAttributions).toBe(1);
+    expect(summary.metrics.uniqueDefects.count).toBe(0);
+  });
+
+  it('never lets attributed exceed total, even with an authoritative list', () => {
+    const summary = summarizeScorecard({
+      scorecard: { records: [truncated()], skipped: [] },
+      attributions: {
+        records: Array.from({ length: 50 }, (_unused, index) =>
+          attribution('run-20260904T120009Z-r009', `E6-${index + 100}`, 'unique'),
+        ),
+        skipped: [],
+      },
+      authoritativeFindingIds: new Map([
+        ['run-20260904T120009Z-r009', new Set(['E6-01', 'E6-100'])],
+      ]),
+    });
+
+    expect(summary.findings.attributed).toBeLessThanOrEqual(summary.findings.total);
+    expect(summary.findings.attributed).toBe(1);
+    expect(summary.findings.orphanedAttributions).toBe(49);
+  });
+});
+
 describe('an attribution that joins to no finding is reported, never counted', () => {
   it('excludes an orphan from the metrics and surfaces it as its own number', () => {
     // An attribution whose run is missing from the scorecard (its line was skipped, or

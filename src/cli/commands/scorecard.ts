@@ -468,7 +468,26 @@ export async function runScorecardSummary(
   const scorecard = await readScorecard(projectRoot);
   const attributions = await new AttributionStore(projectRoot).read();
 
-  const summary = summarizeScorecard({ scorecard, attributions });
+  // ⚠️ THE SAME AUTHORITATIVE LIST `add` VALIDATES AGAINST, handed to the summariser so
+  // the two ends cannot disagree. A P1 from round 8 of the codex review: `add` had learned
+  // to confirm an unlisted criterion against the run's stored result, and this summary had
+  // not, so a judgement the command accepted was reported as an orphan and never counted.
+  //
+  // Read ONLY for runs whose record truncated its own list — rare — and the summariser
+  // stays pure and file-free, which is what `report-layer` requires and what keeps the
+  // terminal and `--json` views derived from one model.
+  const authoritativeFindingIds = new Map<string, ReadonlySet<string>>();
+  for (const record of scorecard.records) {
+    if (!record.findingCriterionIdsTruncated) {
+      continue;
+    }
+    const ids = await storedFindingIds(projectRoot, record.runId, new SystemClock());
+    if (ids !== undefined) {
+      authoritativeFindingIds.set(record.runId, ids);
+    }
+  }
+
+  const summary = summarizeScorecard({ scorecard, attributions, authoritativeFindingIds });
 
   if (options.json === true) {
     return {

@@ -385,6 +385,32 @@ describe('a truncated finding list falls back to the run\'s stored result', () =
     expect(output.stderr).toMatch(/stored result/i);
   });
 
+  it('and the SUMMARY counts it — add and summary agree', async () => {
+    // ⚠️ A P1 from round 8: `add` accepted via the stored result while `summary` still
+    // read only the capped scorecard arrays, so the judgement was recorded and then
+    // reported as an orphan. The two ends must not disagree about what was recorded.
+    const root = await project([
+      scorecardRecord({
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+      }),
+    ]);
+    await seedStoredResult(root, 'E6-250');
+
+    await runScorecardAdd(root, RUN_ID, { criterion: 'E6-250', attribution: 'unique' }, clock);
+
+    const output = await runScorecardSummary(root, { json: true });
+    const parsed = JSON.parse(output.stdout) as {
+      metrics: { uniqueDefects: { count: number } };
+      findings: { attributed: number; orphanedAttributions: number };
+    };
+
+    expect(parsed.metrics.uniqueDefects.count).toBe(1);
+    expect(parsed.findings.attributed).toBe(1);
+    expect(parsed.findings.orphanedAttributions).toBe(0);
+  });
+
   it('still REFUSES a criterion the stored result does not list', async () => {
     // Widening the check must not become a way around it.
     const root = await project([
