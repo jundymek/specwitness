@@ -13,7 +13,7 @@ What SpecWitness's version number means, and how releases reach npm.
 | --- | --- |
 | **Version** | `0.1.0` |
 | **Published** | no — the name is unclaimed on npm |
-| **Package contents** | `dist/cli.js`, `dist/cli.js.map`, `package.json`, `README.md`, `templates/config.yaml`, `templates/.gitkeep` — **6 files, 853.7 kB packed, 2.9 MB unpacked** |
+| **Package contents** | `dist/cli.js`, `dist/cli.js.map`, `package.json`, `README.md`, `templates/config.yaml`, `templates/.gitkeep` — **6 files, ~855 kB packed, 2.9 MB unpacked** |
 | **Node floor** | `>=22.13` (ADR-007) |
 
 Verified with `npm publish --dry-run`, which is run on every CI build by
@@ -23,6 +23,11 @@ Verified with `npm publish --dry-run`, which is run on every CI build by
 always includes the readme, the licence, the changelog and `package.json` regardless of
 the allow-list. That is npm's rule rather than a setting of ours, and it is why the
 packaging check allows those four by name.
+
+The **file count** is the number worth checking; the packed size is approximate on purpose,
+because it moves by a kilobyte every time this repository's README is edited. If the count
+changes, something changed about what ships — run `./scripts/pack-smoke.sh`, which asserts
+it rather than reporting it.
 
 ---
 
