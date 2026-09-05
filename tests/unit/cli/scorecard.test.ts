@@ -427,6 +427,55 @@ describe('a truncated finding list falls back to the run\'s stored result', () =
     ).rejects.toThrow(UsageError);
   });
 
+  it('reports an UNREADABLE stored result as infrastructure, not as a usage error', async () => {
+    // A finding of the review over the rebased head, and the same misclassification this
+    // story fixed four times for raw Node errors - inverted. A blanket catch turned every
+    // `RunStore` failure into "absent", so the caller refused with exit 64 saying the
+    // criterion could not be confirmed. The invocation was FINE and the environment was
+    // broken: wrong exit code, and a remediation pointing at the wrong thing.
+    const root = await project([
+      scorecardRecord({
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+      }),
+    ]);
+    await seedStoredResult(root, 'E6-250');
+    await chmod(join(root, '.specwitness', 'runs', RUN_ID, 'result.json'), 0o000);
+
+    try {
+      await expect(
+        runScorecardAdd(root, RUN_ID, { criterion: 'E6-250', attribution: 'unique' }, clock),
+      ).rejects.toThrow(InfraError);
+    } finally {
+      await chmod(join(root, '.specwitness', 'runs', RUN_ID, 'result.json'), 0o600);
+    }
+  });
+
+  it('SUMMARY tolerates the same unreadable result and reports it instead', async () => {
+    // The deliberate asymmetry: one unreadable result must not fail a summary over many
+    // runs. It is counted rather than silently dropped.
+    const root = await project([
+      scorecardRecord({
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+      }),
+    ]);
+    await seedStoredResult(root, 'E6-250');
+    await chmod(join(root, '.specwitness', 'runs', RUN_ID, 'result.json'), 0o000);
+
+    try {
+      const output = await runScorecardSummary(root, { json: true });
+      const parsed = JSON.parse(output.stdout) as {
+        findings: { runsWithUnreadableStoredResult: number };
+      };
+      expect(parsed.findings.runsWithUnreadableStoredResult).toBe(1);
+    } finally {
+      await chmod(join(root, '.specwitness', 'runs', RUN_ID, 'result.json'), 0o600);
+    }
+  });
+
   it('FAILS CLOSED when no result is stored — refuses rather than trusting the caller', async () => {
     const root = await project([
       scorecardRecord({

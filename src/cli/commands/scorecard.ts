@@ -431,9 +431,31 @@ function assertCriterionIsAFinding(record: ScorecardRecord, criterionId: string)
  * the full evidence for a run — story 6.5's record header calls it exactly that — and it
  * is uncapped. `report` already reads it the same way, at this same CLI edge.
  *
- * FAIL CLOSED: `undefined` on any failure — no result stored, unreadable, unparseable.
- * The caller then refuses, because an attribution SpecWitness cannot verify must never
- * reach the metric. Widening the check must not become a way around it.
+ * ABSENCE AND FAILURE ARE DIFFERENT ANSWERS, and conflating them was a finding of the
+ * review over the rebased head. A blanket catch turned every `RunStore` failure - `EACCES`,
+ * `EIO`, a malformed stored result - into `undefined`, and the caller then refused with a
+ * USAGE error (exit 64) saying the criterion could not be confirmed. The invocation was
+ * fine and the environment was broken, so that is both the wrong exit code and a
+ * remediation pointing at the wrong thing. It is the same misclassification this story
+ * fixed four times over for raw Node errors, inverted: not an infra failure dressed as a
+ * bug report, but an infra failure dressed as the operator's mistake.
+ *
+ * So:
+ *
+ *  - NO STORED RESULT -> `undefined`. A genuine absence, and the narrower fallback: the
+ *    caller refuses, because an attribution SpecWitness cannot verify must never reach the
+ *    metric. Fail closed - widening the check must not become a way around it.
+ *  - ANYTHING ELSE -> `InfraError` (exit 3), naming the path and a remedy.
+ *
+ * The two CALLERS then differ deliberately, and the asymmetry is one this product already
+ * draws between a targeted operation and an aggregate:
+ *
+ *  - `scorecard add` lets it propagate. The operator asked about ONE run; if that run's
+ *    evidence cannot be read, the honest answer is to say so, not to guess.
+ *  - `scorecard summary` catches it and counts the run in
+ *    `findings.runsWithUnreadableStoredResult`. Failing a whole summary because one run of
+ *    forty has an unreadable result would destroy the measurement over a local fault - the
+ *    same reasoning ADR-008 section 5 applies to a single damaged line.
  *
  * The run id was validated as canonical before this is reached, and `RunStore` builds the
  * path; no operator string is concatenated into one here.
@@ -443,11 +465,19 @@ async function storedFindingIds(
   runId: string,
   clock: Clock,
 ): Promise<ReadonlySet<string> | undefined> {
+  const store = new RunStore(projectRoot, clock, new RandomIds());
+
   try {
-    const store = new RunStore(projectRoot, clock, new RandomIds());
     if (!(await store.hasResult(runId))) {
       return undefined;
     }
+  } catch {
+    // An existence probe. If even that cannot be answered, treat the result as absent
+    // rather than inventing an infrastructure failure out of a stat.
+    return undefined;
+  }
+
+  try {
     const stored = await store.readResult(runId);
     const result = toRunResult(stored.document);
     return new Set(
@@ -455,8 +485,16 @@ async function storedFindingIds(
         .filter((criterion) => criterion.status !== 'pass' && criterion.status !== 'skipped')
         .map((criterion) => criterion.criterionId),
     );
-  } catch {
-    return undefined;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw new InfraError(
+      `run ${runId} has a stored result that could not be read, so SpecWitness cannot ` +
+        `confirm this criterion: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `check that .specwitness/runs/${runId}/result.json is readable and well-formed, ` +
+        `then run the command again`,
+    );
   }
 }
 
@@ -498,7 +536,12 @@ export async function runScorecardSummary(
     if (!record.findingCriterionIdsTruncated) {
       continue;
     }
-    const ids = await storedFindingIds(projectRoot, record.runId, new SystemClock());
+    // TOLERATED HERE, unlike in `add`. One unreadable result must not fail a summary over
+    // forty runs; the run is counted in `findings.runsWithUnreadableStoredResult` instead,
+    // so the fallback is reported rather than silent.
+    const ids = await storedFindingIds(projectRoot, record.runId, new SystemClock()).catch(
+      () => undefined,
+    );
     if (ids !== undefined) {
       authoritativeFindingIds.set(record.runId, ids);
     }
