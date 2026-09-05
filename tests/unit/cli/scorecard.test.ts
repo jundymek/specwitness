@@ -46,6 +46,7 @@ afterEach(async () => {
     roots.splice(0).map(async (root) => {
       // Restore any permission a case removed, or the removal fails too.
       await chmod(join(root, '.specwitness', SCORECARD_FILENAME), 0o600).catch(() => undefined);
+      await chmod(join(root, '.specwitness', 'runs', RUN_ID), 0o700).catch(() => undefined);
       await rm(root, { recursive: true, force: true });
     }),
   );
@@ -449,6 +450,32 @@ describe('a truncated finding list falls back to the run\'s stored result', () =
       ).rejects.toThrow(InfraError);
     } finally {
       await chmod(join(root, '.specwitness', 'runs', RUN_ID, 'result.json'), 0o600);
+    }
+  });
+
+  it('reports an unreadable RUN DIRECTORY as infrastructure too, not as a usage error', async () => {
+    // The existence probe, not the read. `RunStore.hasResult` already distinguishes ENOENT
+    // (absent -> false) from EACCES/EIO/ENOTDIR (InfraError), with a comment in merged code
+    // saying that swallowing them would make a command "exit 0 claiming the run has no
+    // result". An earlier version of `storedFindingIds` wrapped it in a blanket catch and
+    // undid exactly that - the same misclassification twice in one function, caught by the
+    // review of the head that fixed the first half.
+    const root = await project([
+      scorecardRecord({
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+      }),
+    ]);
+    await seedStoredResult(root, 'E6-250');
+    await chmod(join(root, '.specwitness', 'runs', RUN_ID), 0o000);
+
+    try {
+      await expect(
+        runScorecardAdd(root, RUN_ID, { criterion: 'E6-250', attribution: 'unique' }, clock),
+      ).rejects.toThrow(InfraError);
+    } finally {
+      await chmod(join(root, '.specwitness', 'runs', RUN_ID), 0o700);
     }
   });
 

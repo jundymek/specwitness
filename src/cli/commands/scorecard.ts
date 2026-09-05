@@ -467,13 +467,17 @@ async function storedFindingIds(
 ): Promise<ReadonlySet<string> | undefined> {
   const store = new RunStore(projectRoot, clock, new RandomIds());
 
-  try {
-    if (!(await store.hasResult(runId))) {
-      return undefined;
-    }
-  } catch {
-    // An existence probe. If even that cannot be answered, treat the result as absent
-    // rather than inventing an infrastructure failure out of a stat.
+  // NO CATCH AROUND `hasResult`, deliberately. It already draws exactly this distinction
+  // itself (`src/infra/run-store.ts`): `ENOENT` answers `false`, and `EACCES`/`EIO`/
+  // `ENOTDIR` raise an `InfraError` — with a comment saying that swallowing them would
+  // make a command "exit 0 claiming the run has no result, which is precisely the kind of
+  // infra-failure-as-product-answer this project treats as a first-order defect".
+  //
+  // An earlier version of this function wrapped it in a blanket catch and rationalised the
+  // wrap in a comment. That undid a distinction merged code had already made correctly, and
+  // reintroduced the very defect being fixed one line below. Found by the review of the
+  // head after that fix - the same misclassification twice in one function.
+  if (!(await store.hasResult(runId))) {
     return undefined;
   }
 
