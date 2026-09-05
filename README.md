@@ -232,12 +232,20 @@ directory. Pass a run id for a specific run, or an epic id for that epic's lates
 | `verify <epic>` | Run the verification. **The main event** — flags below. |
 | `report <run-id\|epic>` | Re-render a stored run. Re-executes nothing. |
 | `clean [--all]` | Reap process groups and worktrees left behind by crashed runs. Never deletes results. |
-| `scorecard add\|summary` | Record human attribution of findings, and report the metrics computed from them. **Lands with story 6.6 in this epic — see the note below.** |
+| ~~`scorecard add\|summary`~~ | **⚠️ NOT IN `0.1.0` — does not run yet.** Records human attribution of findings and reports the metrics computed from them. Ships with story 6.6; invoking it on today's binary exits `64`. [Documented below](#scorecard--measuring-whether-the-tool-is-worth-running) so the surface is ready when it lands. |
 
 Run `specwitness <command> --help` for the authoritative flag list — the binary is always
 the truth.
 
 ### `scorecard` — measuring whether the tool is worth running
+
+> ### ⚠️ NOT AVAILABLE IN `0.1.0` — do not copy these commands yet
+>
+> **The `scorecard` command is not registered in today's binary.** `specwitness --help`
+> lists seven commands and this is not one of them, so every invocation below exits `64`
+> with `unknown command 'scorecard'` until story 6.6 merges. **This section documents a
+> surface being built alongside this README, not one you can run.** Everything else in
+> this document describes commands that exist today.
 
 SpecWitness makes a claim: that it finds *real* defects that earlier gates missed. The
 scorecard is how you check that claim on your own data rather than taking it on faith.

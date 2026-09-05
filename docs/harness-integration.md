@@ -216,7 +216,10 @@ A full sequence:
    ```
    This is the step that tells you whether the gate is earning its place. Attribution is a
    human judgement and the CLI will not supply one for you — `--attribution` is required.
-   *(`scorecard` ships with story 6.6 of this epic; see the note in the README.)*
+
+   > **⚠️ `scorecard` is not in `0.1.0`** — it is not registered in today's binary and
+   > these two invocations exit `64` until story 6.6 merges. Do not wire this step into a
+   > harness yet. Every other command in this guide exists today.
 
 **Verify the survey before relying on it.** PRD addendum §A was written on 2026-08-30 and
 describes one specific harness. Its §B has already needed a correction. The invocation

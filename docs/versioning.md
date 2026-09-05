@@ -117,9 +117,11 @@ npm treats a prerelease as older than its release, so `0.2.0-next.1` will never 
 installed by someone asking for `^0.1.0` or `latest`. That is the safety property, and it
 is why the identifier is part of the version rather than only part of the tag.
 
-`tests/unit/packaging.test.ts` asserts the version on the branch is a **plain**
-`MAJOR.MINOR.PATCH`. A prerelease string exists only on a release branch at publish time;
-finding one on `master` means someone left a candidate version behind.
+`tests/unit/packaging.test.ts` asserts the version is one of the **two** shapes this plan
+describes — `MAJOR.MINOR.PATCH`, or that followed by `-next.<n>` — and nothing else. So a
+release branch carrying `0.2.0-next.1` passes the test suite (step 1 of the checklist
+below requires it to), while a version with build metadata or some other prerelease tag,
+which no rule here says how to publish, fails.
 
 ### The first publish
 

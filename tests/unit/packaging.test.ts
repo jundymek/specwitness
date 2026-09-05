@@ -58,12 +58,20 @@ describe('the published package declares the surface story 6.7 documents', () =>
     expect((await manifest()).engines.node).toBe('>=22.13');
   });
 
-  it('carries a plain semver version, which is what the dist-tag plan assumes', async () => {
-    // Deliberately strict: MAJOR.MINOR.PATCH with no prerelease and no build metadata.
-    // The `next` dist-tag plan in docs/versioning.md says a prerelease is published under
-    // `next` and a plain version under `latest`; a version that is prerelease-shaped on
-    // the branch would mean the plan's two cases had silently become one.
-    expect((await manifest()).version).toMatch(/^\d+\.\d+\.\d+$/);
+  it('carries a version the documented release process can actually produce', async () => {
+    // ⚠️ THIS WAS `/^\d+\.\d+\.\d+$/` AND THAT CONTRADICTED docs/versioning.md, which
+    // Codex review caught as a P2 on this branch. The release plan requires a candidate
+    // to carry a prerelease identifier (`0.2.0-next.1`) before it is published under the
+    // `next` dist-tag — and the plan's own step 1 is "pnpm test green". A test that
+    // rejects the exact version the process prescribes makes that process unrunnable the
+    // moment the version is bumped, and CI would go red on every release branch.
+    //
+    // So the shape permitted here is exactly the shape the plan describes and no more:
+    // MAJOR.MINOR.PATCH, optionally followed by `-next.<n>`. Build metadata, arbitrary
+    // prerelease tags and multi-part identifiers are still rejected, because the point of
+    // the assertion is that the version is one of the plan's TWO cases — a release or a
+    // `next` candidate — rather than something nobody has a publishing rule for.
+    expect((await manifest()).version).toMatch(/^\d+\.\d+\.\d+(-next\.\d+)?$/);
   });
 });
 
