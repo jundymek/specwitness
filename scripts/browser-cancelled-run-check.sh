@@ -83,6 +83,53 @@ echo "==> [2/5] starting ${SUITE} and waiting for a real browser"
 pnpm exec vitest run "${SUITE}" >"${work}/run.log" 2>&1 &
 runner_pid=$!
 
+# ⚠️ THE ORPHAN THIS SCRIPT DELIBERATELY CREATES MUST NOT OUTLIVE THE SCRIPT.
+#
+# Raised as a P1 on this branch, and it is the recursive version of the bug this whole check
+# exists to find: the workflow sets `cancel-in-progress: true`, so a superseded push CANCELS THIS
+# STEP - routinely - and if that lands after the detached group has been spared but before the
+# explicit reap at the end, the script leaves behind exactly the browser tree it created on
+# purpose. The same holds for an unexpected shell error or a TERM.
+#
+# So the reap is installed as a trap the moment the runner exists, rather than trusted to
+# straight-line execution reaching the bottom of the file. On a normal run it fires after
+# everything has already been reaped and finds nothing; being idempotent is the point.
+#
+# The exit status is captured first and re-raised last, so the trap cannot turn a failing check
+# into a passing one - a leak that had to be reaped is still a leak, here as everywhere else.
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+
+  if [ -n "${runner_pid:-}" ]; then
+    for pid in $(descendants "${runner_pid}" 2>/dev/null); do
+      kill -KILL "${pid}" 2>/dev/null
+    done
+  fi
+
+  # Anything ProcessRunner detached into its own group is out of reach of the tree kill above,
+  # which is the whole reason it survives a cancellation. Hand those groups to the scanner, whose
+  # ownership guards and refusals apply exactly as they do on the normal path.
+  if [ -n "${spared:-}" ]; then
+    trap_owned=""
+    for entry in ${spared}; do
+      trap_pgid="${entry#*:}"
+      case "${trap_pgid}" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      trap_owned="${trap_owned} --owned-pgid ${trap_pgid}"
+    done
+    if [ -n "${trap_owned}" ]; then
+      node "${leak_check_args[@]}" --reap ${trap_owned} \
+        --label "emergency cleanup as this check exited" >/dev/null 2>&1
+    fi
+  fi
+
+  rm -rf "${work}" 2>/dev/null
+  exit ${status}
+}
+trap cleanup EXIT INT TERM
+
 # Every descendant of the runner, breadth-first, as a space-separated list.
 #
 # `pkill -P` only reaches DIRECT children and vitest runs its tests in a forked worker pool, so
@@ -296,5 +343,5 @@ echo "==> [5/5] re-scanning after the reap"
 node "${leak_check_args[@]}" --baseline "${baseline}" \
   --label "after reaping whatever this check left behind" || true
 
-rm -rf "${work}"
+# `exit` fires the EXIT trap, which performs the teardown and re-raises this status.
 exit ${result}
