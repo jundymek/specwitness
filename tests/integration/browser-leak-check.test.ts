@@ -853,6 +853,39 @@ describe('the browser leak check', () => {
    * process on the machine "owned", which is the destructive direction this whole guard exists
    * to close — so it is refused outright rather than accepted and regretted.
    */
+  /**
+   * ⚠️ **A PREFIX IS NOT A PATH, AND ON THIS MACHINE THAT IS NOT HYPOTHETICAL.** Raised as a P2
+   * by the Codex review of this branch.
+   *
+   * `--owned-under` matched by substring, so `--owned-under /work/specwitness` also claimed
+   * anything under `/work/specwitness-other`. This story was written in
+   * `/Users/jundymek/dev/specwitness-agents/chuck`, one of SIX sibling agent worktrees, beside a
+   * main checkout at `/Users/jundymek/dev/specwitness` — and `specwitness` is a prefix of
+   * `specwitness-agents`. The substring rule would have authorised this script to SIGKILL a peer
+   * agent's Playwright process group.
+   *
+   * Ownership now requires a separator boundary: the directory, then `/`.
+   */
+  it('does not claim a process from a similarly-prefixed directory', async () => {
+    const psFile = await listing(
+      '   6003    6000    6003       00:20 /usr/bin/node /work/specwitness-other/node_modules/@playwright/test/cli.js test',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-under',
+      '/work/specwitness',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('not owned by this run');
+    expect(stdout).not.toContain('would signal process group 6003');
+  });
+
   it('refuses an --owned-under that would claim the whole filesystem', async () => {
     const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
 

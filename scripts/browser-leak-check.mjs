@@ -312,6 +312,21 @@ function isOwned(row) {
   return browsersPaths.some((path) => path !== '' && row.args.includes(path));
 }
 
+/**
+ * Does this argv reference a path INSIDE `dir`?
+ *
+ * ⚠️ **A PREFIX IS NOT A PATH, AND ON THE AUTHOR'S MACHINE THAT WAS NOT HYPOTHETICAL.** The
+ * first version matched by substring, so `--owned-under /work/specwitness` also claimed anything
+ * under `/work/specwitness-other`. This story was written in one of SIX SIBLING AGENT WORKTREES
+ * under `/Users/jundymek/dev/specwitness-agents/`, beside a main checkout at
+ * `/Users/jundymek/dev/specwitness` — and `specwitness` is a prefix of `specwitness-agents`. The
+ * substring rule would have authorised this script to SIGKILL a PEER AGENT's process group.
+ * Reported as a P2 on this branch; the separator is what makes it a path rather than a spelling.
+ */
+function isUnder(args, dir) {
+  return args.includes(`${dir}/`);
+}
+
 function isBrowser(row) {
   if (isSelf(row)) {
     return false;
@@ -583,7 +598,7 @@ function reapSurvivors() {
   // knows exactly which groups it spawned.
   const ownedGroups = new Set(
     survivors
-      .filter((row) => isOwned(row) || ownedUnder.some((dir) => row.args.includes(dir)))
+      .filter((row) => isOwned(row) || ownedUnder.some((dir) => isUnder(row.args, dir)))
       .map((row) => row.pgid),
   );
 
