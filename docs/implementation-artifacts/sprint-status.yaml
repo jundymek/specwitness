@@ -88,7 +88,7 @@ development_status:
   5-6-mechanics-adaptation-boundary: done
   epic-5-retrospective: done
 
-  epic-6: in-progress
+  epic-6: done
   6-1-corpus-infrastructure-hermetic-e2e-runner: done
   6-2-behavioral-corpus-fixtures: done
   6-3-classification-corpus-fixtures: done
@@ -145,6 +145,6 @@ action_items:
   - {id: e6-C, epic: 6, action: 'harness: e3-A is wrong in BOTH directions and on trivially-checkable inputs (findings reported over a one-markdown-file commit) - make the classifier content-based or stop emitting a label', owner: owner-harness, status: open}
   - {id: e6-D, epic: 6, action: 'harness: block-loops.sh has no run OR epic boundary - the first pass inherited four wave-2 incidents and one from a different epic dated 2026-09-03 (widens e5-H)', owner: owner-harness, status: open}
   - {id: e6-E, epic: 6, action: 'harness: a DIRECT push to the epic branch nudges nobody - no epic-updated, no rebase_pending; twice this wave the supervisor was the only detector', owner: owner-harness, status: open}
-  - {id: e6-F, epic: 6, action: 'decide setup.install: schedule story 6.11, or state the key is inert and make doctor say so', owner: owner, status: open}
+  - {id: e6-F, epic: 6, action: 'decide setup.install: schedule story 6.11, or state the key is inert and make doctor say so', owner: owner, status: 'answered 2026-09-05: 6.11 scheduled as a solo follow-up cohort on its own branch, after Epic 6 closed - retro 6 names it the one thing that will bite immediately in Epic 7'}
   - {id: e6-G, epic: 6, action: 'decide the closing-pipe exit-1 fix before 0.1.0 is dogfooded, or accept the documented limitation', owner: owner, status: open}
   - {id: e6-H, epic: 6, action: 'harness: running a peer test suite from the supervisor worktree logs tests-passed under the SUPERVISOR agent id', owner: owner-harness, status: open}
