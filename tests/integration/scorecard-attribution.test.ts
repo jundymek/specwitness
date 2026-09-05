@@ -272,6 +272,8 @@ describe('scorecard summary — through the built binary', () => {
     // Both diagnoses present and distinguishable — never one hiding behind the other.
     expect(result.stdout).toMatch(/version-skew/);
     expect(result.stdout).toMatch(/malformed/);
+    // And the message itself, which is what ADR-008 §5 requires be named.
+    expect(result.stdout).toMatch(/newer SpecWitness/);
   });
 
   it('honours a re-attribution end to end: the later record wins', async () => {
@@ -313,12 +315,15 @@ describe('scorecard summary — through the built binary', () => {
   });
 });
 
-describe('add and summary agree about a truncated run — the P1 regression', () => {
-  it('a judgement accepted by add is counted by summary', async () => {
-    // ⚠️ The end-to-end form of the codex P1. `add` accepts an attribution for a criterion
-    // a truncated record cannot name; before the fix `summary` classified it as an orphan,
-    // so the operator was told "Recorded" while the north-star count could never reach it.
-    // The two halves of one command must not disagree about what was recorded.
+describe('add and summary agree about a truncated run — the P1 regressions', () => {
+  it('refuses an unverifiable criterion rather than recording an uncountable judgement', async () => {
+    // ⚠️ Two rounds of codex review converged here. Round 1: `add` accepted while
+    // `summary` orphaned, so the operator was told "Recorded" for a judgement the metric
+    // could never count. Round 2: closing that by counting them let ANY valid id through,
+    // so the north star could exceed the number of findings that exist.
+    //
+    // Resolved by refusing at the write end. `add` and `summary` now agree because there
+    // is no accepted-but-uncountable state to disagree about.
     await seedScorecard([
       record({
         criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
@@ -337,18 +342,42 @@ describe('add and summary agree about a truncated run — the P1 regression', ()
       'unique',
     ]);
 
-    expect(added.exitCode).toBe(EXIT_OK);
-    expect(added.stderr).toMatch(/truncated/i);
+    expect(added.exitCode).toBe(EXIT_USAGE);
+    expect(added.stderr).toMatch(/cannot confirm it produced one/);
+    expect(added.stderr).toMatch(/specwitness report/);
 
     const summary = await cli(['scorecard', 'summary', '--json']);
     const parsed = JSON.parse(summary.stdout) as {
+      findings: { attributed: number; orphanedAttributions: number; total: number };
       metrics: { uniqueDefects: { count: number } };
-      findings: { orphanedAttributions: number; attributed: number };
     };
 
-    expect(parsed.metrics.uniqueDefects.count).toBe(1);
-    expect(parsed.findings.attributed).toBe(1);
+    // Nothing was recorded, so nothing is orphaned and the north star stays honest.
+    expect(parsed.findings.attributed).toBe(0);
     expect(parsed.findings.orphanedAttributions).toBe(0);
+    expect(parsed.metrics.uniqueDefects.count).toBeLessThanOrEqual(parsed.findings.total);
+  });
+
+  it('still records a criterion the truncated record DOES name', async () => {
+    await seedScorecard([
+      record({
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+      }),
+    ]);
+
+    const added = await cli([
+      'scorecard',
+      'add',
+      RUN_A,
+      '--criterion',
+      'E6-01',
+      '--attribution',
+      'unique',
+    ]);
+
+    expect(added.exitCode).toBe(EXIT_OK);
   });
 });
 

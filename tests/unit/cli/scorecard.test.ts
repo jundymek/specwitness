@@ -256,11 +256,18 @@ describe('scorecard add — refusals are usage errors, and each names its remedy
   });
 });
 
-describe('scorecard add — a truncated finding list is accepted with a warning, not refused', () => {
-  it('accepts a criterion the record could not enumerate, and says why', async () => {
-    // Story 6.5 caps the id arrays at 200 across a record. When the cap bit, membership
-    // cannot be confirmed OR denied — and refusing would discard a real north-star data
-    // point over a display limit.
+describe('scorecard add — a truncated finding list is REFUSED, not accepted', () => {
+  it('refuses a criterion the truncated record does not name, and points at report', async () => {
+    // ⚠️ THIS REVERSES AN EARLIER VERSION OF THIS STORY, and the reason is worth keeping.
+    // Story 6.5 caps the id arrays at 200 across a record, so when the cap bit an id's
+    // absence proves nothing. I first ACCEPTED such an attribution with a warning, to
+    // avoid discarding a real north-star data point over a display limit.
+    //
+    // Round 2 of the codex review showed that let ANY syntactically valid id through, so
+    // `attributed` and `uniqueDefects.count` could exceed `findings.total` — a north-star
+    // count larger than the number of findings that exist. The trade is asymmetric:
+    // refusing costs a narrow, rare case; accepting makes the one number this product
+    // exists to produce corruptible by a typo.
     const root = await project([
       scorecardRecord({
         findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
@@ -269,15 +276,28 @@ describe('scorecard add — a truncated finding list is accepted with a warning,
       }),
     ]);
 
-    const output = await runScorecardAdd(
-      root,
-      RUN_ID,
-      { criterion: 'E6-250', attribution: 'unique' },
-      clock,
-    );
+    await expect(
+      runScorecardAdd(root, RUN_ID, { criterion: 'E6-250', attribution: 'unique' }, clock),
+    ).rejects.toThrow(UsageError);
 
+    // And nothing was written.
+    await expect(
+      readFile(join(root, '.specwitness', ATTRIBUTIONS_FILENAME), 'utf8'),
+    ).rejects.toThrow();
+  });
+
+  it('still accepts a criterion the truncated record DOES name', async () => {
+    // The permit half: truncation does not disqualify the ids that are listed.
+    const root = await project([
+      scorecardRecord({
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+      }),
+    ]);
+
+    await runScorecardAdd(root, RUN_ID, { criterion: 'E6-01', attribution: 'unique' }, clock);
     expect(await attributionsOf(root)).toHaveLength(1);
-    expect(output.stderr).toMatch(/truncat/i);
   });
 });
 

@@ -245,7 +245,7 @@ export async function runScorecardAdd(
     );
   }
 
-  const warning = warnUnlessCriterionIsAFinding(record, criterionId);
+  const warning = assertCriterionIsAFinding(record, criterionId);
 
   const built = makeAttributionRecord({
     runId,
@@ -266,26 +266,46 @@ export async function runScorecardAdd(
 }
 
 /**
- * Refuses an attribution for a criterion that produced no finding — with one exception.
+ * Refuses an attribution for a criterion the run's record does not name as a finding.
  *
- * **Why refuse at all.** Attributing a defect to a criterion that PASSED would put a
+ * **Why refuse.** Attributing a defect to a criterion that produced no finding would put a
  * number into the north-star metric that no verification ever produced. The scorecard
  * record names exactly the criteria a finding could be about (`findingCriterionIds`,
- * which is what story 6.5 built that field for), so this is checkable rather than
- * assumed.
+ * which is what story 6.5 built that field for), so this is checkable rather than assumed.
  *
- * **The exception, and why it is an acceptance rather than a refusal.** Story 6.5 caps
- * those arrays at 200 ids ACROSS the record and sets `findingCriterionIdsTruncated`. When
- * the cap bit, an id's absence from the list means nothing — the list is not the set. The
- * choice is then between refusing a judgement that may well be legitimate, and accepting
- * it with a warning that says membership could not be confirmed. **Refusing would discard
- * a real north-star data point over a display limit**, and the per-status COUNTS in the
- * same record already prove findings exist beyond the ones named. So: accept, and warn.
+ * ============================================================================
+ * ⚠️ NO EXCEPTION FOR A TRUNCATED FINDING LIST — AND THIS REVERSES AN EARLIER DECISION
+ * ============================================================================
  *
- * Returns the warning text (empty when there is none) rather than printing it, so the
- * caller owns stream discipline. Throws `UsageError` when the refusal stands.
+ * Story 6.5 caps those arrays at 200 ids ACROSS the record and sets
+ * `findingCriterionIdsTruncated`. When the cap bit, an id's absence proves nothing: the
+ * list is not the set. **An earlier version of this story ACCEPTED an unlisted criterion
+ * on a truncated record, with a warning**, reasoning that refusing would discard a real
+ * north-star data point over a display limit.
+ *
+ * **That was wrong, and the codex review of this branch found why.** With the check
+ * relaxed, *any* syntactically valid criterion id was accepted for a truncated run —
+ * including ids that never existed. The summary then counted each one as a genuine
+ * judgement, so `findings.attributed` and `uniqueDefects.count` could **exceed
+ * `findings.total`**: a north-star count larger than the number of findings that exist.
+ * The clamp on `unattributed` hid the overflow rather than preventing it.
+ *
+ * The trade is starkly asymmetric, which is what settles it:
+ *
+ *  - **refusing** costs the ability to attribute findings beyond the 200 a record names,
+ *    in a run with more than 200 findings — narrow, rare, and already degenerate;
+ *  - **accepting** makes the one number this product exists to produce corruptible by a
+ *    typo, in a way nothing downstream would catch.
+ *
+ * Fail closed, then explain. The hint points at `specwitness report`, which renders the
+ * run's full criteria list from `result.json` — so the information the truncated record
+ * lacks is still one command away, and the operator is told where it is.
+ *
+ * Returns `''` when the criterion is a finding; throws `UsageError` (exit 64) otherwise.
+ * A string return is kept rather than `void` so a future advisory has somewhere to go
+ * without changing every call site.
  */
-function warnUnlessCriterionIsAFinding(record: ScorecardRecord, criterionId: string): string {
+function assertCriterionIsAFinding(record: ScorecardRecord, criterionId: string): string {
   const findings = [
     ...record.findingCriterionIds.fail,
     ...record.findingCriterionIds.needs_human,
@@ -297,10 +317,13 @@ function warnUnlessCriterionIsAFinding(record: ScorecardRecord, criterionId: str
   }
 
   if (record.findingCriterionIdsTruncated) {
-    return (
-      `WARNING: run ${record.runId} has a truncated finding list — it had more findings ` +
-      `than its record names individually, so SpecWitness could not confirm that ` +
-      `${criterionId} was one of them. The attribution was recorded.\n`
+    const total = record.criteria.fail + record.criteria.needs_human + record.criteria.error;
+    throw new UsageError(
+      `run ${record.runId} names only ${findings.length} of its ${total} findings individually, ` +
+        `and ${criterionId} is not among them, so SpecWitness cannot confirm it produced one`,
+      `check the criterion id against 'specwitness report ${record.runId}', which renders the ` +
+        `run's full criteria list. An unverifiable attribution is refused rather than recorded, ` +
+        `because a wrong id would count toward the defect metric as if it were real`,
     );
   }
 

@@ -296,18 +296,24 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
   const durations: number[] = [];
 
   /**
-   * Per run: the finding ids it names, and whether that list was cut.
+   * Every `(runId, criterionId)` a finding could be about, across every record.
    *
-   * ⚠️ THE TRUNCATION FLAG IS CARRIED HERE FOR A REASON, and it was a P1 from the codex
-   * review of this branch. `scorecard add` deliberately ACCEPTS an attribution for a
-   * criterion a truncated record does not list (see `warnUnlessCriterionIsAFinding`) —
-   * so if this summary decided membership from the id list alone, that same attribution
-   * would be classified as an orphan and excluded from every metric. The command would
-   * tell an operator the judgement was recorded while the north-star count could never
-   * reach it. Accepting at write time and discarding at read time is precisely the
-   * "confidently wrong metric" this story exists to prevent.
+   * ⚠️ MEMBERSHIP IS DECIDED BY THIS SET AND NOTHING ELSE, and two rounds of codex review
+   * on this branch are the reason. An intermediate version granted an amnesty for runs
+   * whose finding list was TRUNCATED, so that a judgement `scorecard add` had accepted
+   * would still be counted. That amnesty let *any* syntactically valid criterion id count
+   * for such a run — so `attributed` and `uniqueDefects.count` could exceed
+   * `findings.total`: a north-star count larger than the number of findings that exist.
+   *
+   * The resolution was to close it at the WRITE end instead: `scorecard add` now refuses
+   * an unlisted criterion even on a truncated record (`assertCriterionIsAFinding`). With
+   * that refusal in place this set is the whole membership test, and
+   * `attributed <= enumerated <= total` holds structurally rather than by clamping.
+   *
+   * An attribution outside it — hand-written, or predating that refusal — is an ORPHAN:
+   * reported, never counted.
    */
-  const runFindings = new Map<string, { enumerated: Set<string>; truncated: boolean }>();
+  const enumeratedFindings = new Set<string>();
 
   for (const record of records) {
     durations.push(record.durationMs);
@@ -336,24 +342,14 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
       truncatedRuns += 1;
     }
 
-    // Two records could in principle share a run id (a hand-edited log); merging rather
-    // than replacing means neither one's findings are lost.
-    const entry = runFindings.get(record.runId) ?? {
-      enumerated: new Set<string>(),
-      truncated: false,
-    };
-    entry.truncated ||= record.findingCriterionIdsTruncated;
-
     for (const criterionId of [
       ...record.findingCriterionIds.fail,
       ...record.findingCriterionIds.needs_human,
       ...record.findingCriterionIds.error,
     ]) {
-      entry.enumerated.add(criterionId);
+      enumeratedFindings.add(key(record.runId, criterionId));
       findingsEnumerated += 1;
     }
-
-    runFindings.set(record.runId, entry);
   }
 
   // ── the human judgements ──────────────────────────────────────────────────────────
@@ -367,15 +363,10 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
   let orphanedAttributions = 0;
 
   for (const { runId, criterionId, attribution: value } of winning) {
-    const entry = runFindings.get(runId);
-
-    // An attribution counts when the run is known AND either the record names that
-    // criterion, or the record's finding list was TRUNCATED — in which case the id's
-    // absence proves nothing, the record's exact counts already say more findings exist,
-    // and `scorecard add` accepted the judgement on exactly that basis. Anything else is
-    // an orphan: reported, never counted, because adding it to a numerator whose
-    // denominator it is not part of is the shape of a quietly wrong rate.
-    if (entry !== undefined && (entry.enumerated.has(criterionId) || entry.truncated)) {
+    // An attribution counts only when some record names that exact `(run, criterion)` as a
+    // finding. Anything else is an orphan: reported, never counted, because adding it to a
+    // numerator whose denominator it is not part of is the shape of a quietly wrong rate.
+    if (enumeratedFindings.has(key(runId, criterionId))) {
       attributionCounts[value] += 1;
     } else {
       orphanedAttributions += 1;
@@ -491,17 +482,23 @@ export function renderScorecardSummaryTerminal(summary: ScorecardSummary): strin
   lines.push('SpecWitness dogfooding scorecard');
   lines.push('');
 
+  // ⚠️ NO EARLY RETURN ON AN EMPTY SCORECARD, and that was a P2 from the codex review of
+  // this branch. An earlier version printed a short "no runs recorded" block and returned
+  // — so the terminal view omitted all seven metrics, the skip detail and the orphan
+  // count while `--json` still carried them. That is precisely the AD-11 drift this module
+  // is built to prevent: a fact in one view and not the other. The two edge cases it hit
+  // are the two most likely to be seen by a person deciding whether to keep the gate — a
+  // freshly initialised project, and a scorecard whose every line was skipped.
+  //
+  // The note is now a HEADER above the full structure rather than a substitute for it.
   if (summary.records.read === 0) {
-    // Said plainly rather than rendered as a table of dashes. "No runs recorded" is an
-    // answer; a grid of `—` looks like a failure.
-    lines.push('  No runs recorded yet — this project has no completed verifications.');
+    lines.push(
+      skippedRecords.scorecard > 0
+        ? `  ⚠ No READABLE runs — ${skippedRecords.scorecard} scorecard record(s) were skipped ` +
+            `(see COVERAGE below). Every rate is therefore over zero records.`
+        : "  No runs recorded yet — this project has no completed verifications. Run 'specwitness verify <epic>' to record one.",
+    );
     lines.push('');
-    lines.push(`  Records read:        0`);
-    lines.push(`  Attributions read:   ${summary.attributionsRead}`);
-    lines.push(`  Records skipped:     ${skippedRecords.total}`);
-    lines.push('');
-    lines.push("  Run 'specwitness verify <epic>' to record one.");
-    return `${lines.join('\n')}\n`;
   }
 
   lines.push('  THE NORTH STAR (SM-1) — real defects SpecWitness found that earlier gates missed');
@@ -558,8 +555,14 @@ export function renderScorecardSummaryTerminal(summary: ScorecardSummary): strin
         `${skippedRecords.attributions} from the attribution log — ` +
         `every number above is computed WITHOUT them)`,
     );
+    // ⚠️ THE FULL MESSAGE, not just the reason — a P2 from the codex review of this
+    // branch. ADR-008 §5 requires a skipped record to be reported with *"the line number
+    // and the unknown fields"*; printing only `version-skew` discarded the field names the
+    // parser had carefully preserved, so an operator could not tell WHICH unsupported
+    // field caused the record to be dropped. The message is already bounded and redacted
+    // and carries no value from the file (see `parseAttributionLine`).
     for (const entry of skippedRecords.detail) {
-      lines.push(`      - ${entry.source} line ${entry.line}: ${entry.reason}`);
+      lines.push(`      - [${entry.source}/${entry.reason}] ${entry.message}`);
     }
   }
 

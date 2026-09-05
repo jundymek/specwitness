@@ -384,18 +384,17 @@ describe('findings are counted from the EXACT counts, not from the capped id arr
   });
 });
 
-describe('an attribution accepted for a TRUNCATED run actually reaches the metrics', () => {
-  it('counts a judgement whose criterion the truncated record could not name', async () => {
-    // ⚠️ THE P1 FROM THE CODEX REVIEW OF THIS BRANCH, as a test.
+describe('a truncated run grants NO amnesty — the round-2 P1', () => {
+  it('orphans an attribution the truncated record does not name, and never counts it', () => {
+    // ⚠️ THIS REVERSES AN EARLIER VERSION OF THIS STORY. Round 1 of the codex review
+    // pointed out that `add` accepted such an attribution while the summary orphaned it;
+    // I first resolved that by granting truncated runs an amnesty here. Round 2 showed
+    // the amnesty let ANY syntactically valid id count, so `attributed` and
+    // `uniqueDefects.count` could exceed `findings.total` — a north-star count larger
+    // than the number of findings that exist.
     //
-    // `scorecard add` deliberately ACCEPTS an attribution for a criterion a truncated
-    // record does not list — the id list is capped at 200 by story 6.5, so absence proves
-    // nothing. Before the fix, this summary decided membership from the id list alone, so
-    // that same attribution was classified as an ORPHAN and excluded from every metric:
-    // the command said "Recorded", and the north-star count could never reach it.
-    //
-    // BY HAND: the record claims 300 failures and names one. E6-250 is not named, but the
-    // record is truncated, so the judgement counts. uniqueDefects = 1, orphans = 0.
+    // Resolved at the WRITE end instead: `scorecard add` refuses an unlisted criterion
+    // even on a truncated record. Here, the id list is the whole membership test.
     const truncated = run({
       id: 'run-20260904T120009Z-r009',
       outcome: { verdict: 'FAIL' },
@@ -419,45 +418,67 @@ describe('an attribution accepted for a TRUNCATED run actually reaches the metri
       }),
     );
 
+    expect(summary.metrics.uniqueDefects.count).toBe(0);
+    expect(summary.findings.attributed).toBe(0);
+    expect(summary.findings.orphanedAttributions).toBe(1);
+    expect(summary.findings.runsWithTruncatedFindingIds).toBe(1);
+  });
+
+  it('holds the invariant attributed <= total, whatever the log contains', () => {
+    // The property the amnesty broke, asserted directly: a log full of invented ids for a
+    // truncated run must not inflate the north star past the findings that exist.
+    const truncated = run({
+      id: 'run-20260904T120009Z-r009',
+      outcome: { verdict: 'FAIL' },
+      durationMs: 1000,
+      providerInvocations: 0,
+      fail: ['E6-01'],
+      truncated: true,
+    });
+    const withMore: ScorecardRecord = {
+      ...truncated,
+      criteria: { ...truncated.criteria, total: 2, fail: 2 },
+    };
+
+    const invented = Array.from({ length: 50 }, (_unused, index) =>
+      attribution('run-20260904T120009Z-r009', `E6-${index + 100}`, 'unique'),
+    );
+
+    const summary = summarizeScorecard(
+      input({
+        scorecard: { records: [withMore], skipped: [] },
+        attributions: { records: invented, skipped: [] },
+      }),
+    );
+
+    expect(summary.findings.attributed).toBeLessThanOrEqual(summary.findings.total);
+    expect(summary.metrics.uniqueDefects.count).toBeLessThanOrEqual(summary.findings.total);
+    expect(summary.findings.orphanedAttributions).toBe(50);
+  });
+
+  it('still counts a judgement the truncated record DOES name', () => {
+    // The permit half: truncation does not disqualify the ids that ARE listed.
+    const truncated = run({
+      id: 'run-20260904T120009Z-r009',
+      outcome: { verdict: 'FAIL' },
+      durationMs: 1000,
+      providerInvocations: 0,
+      fail: ['E6-01'],
+      truncated: true,
+    });
+
+    const summary = summarizeScorecard(
+      input({
+        scorecard: { records: [truncated], skipped: [] },
+        attributions: {
+          records: [attribution('run-20260904T120009Z-r009', 'E6-01', 'unique')],
+          skipped: [],
+        },
+      }),
+    );
+
     expect(summary.metrics.uniqueDefects.count).toBe(1);
-    expect(summary.findings.attributed).toBe(1);
     expect(summary.findings.orphanedAttributions).toBe(0);
-    // 300 findings exist, one is judged, so 299 remain unjudged.
-    expect(summary.findings.unattributed).toBe(299);
-  });
-
-  it('still orphans an attribution whose RUN is unknown, truncated or not', () => {
-    // The fix must not become a blanket amnesty: a run that is not in the scorecard at all
-    // has no truncation flag to appeal to.
-    const summary = summarizeScorecard(
-      input({
-        scorecard: { records: RECORDS, skipped: [] },
-        attributions: {
-          records: [attribution('run-20260904T129999Z-zzzz', 'E6-77', 'unique')],
-          skipped: [],
-        },
-      }),
-    );
-
-    expect(summary.findings.orphanedAttributions).toBe(1);
-    expect(summary.metrics.uniqueDefects.count).toBe(0);
-  });
-
-  it('still orphans an unnamed criterion when the run was NOT truncated', () => {
-    // The other half of the boundary: an untruncated record's id list IS the set, so an
-    // id outside it is a genuine mismatch and must not be counted.
-    const summary = summarizeScorecard(
-      input({
-        scorecard: { records: RECORDS, skipped: [] },
-        attributions: {
-          records: [attribution('run-20260904T120002Z-r002', 'E6-88', 'unique')],
-          skipped: [],
-        },
-      }),
-    );
-
-    expect(summary.findings.orphanedAttributions).toBe(1);
-    expect(summary.metrics.uniqueDefects.count).toBe(0);
   });
 });
 
@@ -536,6 +557,8 @@ describe('--json and the terminal view carry the same facts (AD-11)', () => {
     // not blow up.
     const text = renderScorecardSummaryTerminal(summarizeScorecard(input()));
     expect(text).toMatch(/no runs|0 runs|nothing recorded|no records/i);
+    // ...and the full structure is still rendered beneath that note (AD-11 parity).
+    expect(text).toMatch(/median/i);
     expect(text).not.toContain('NaN');
     expect(text).not.toContain('undefined');
   });
@@ -550,6 +573,66 @@ describe('--json and the terminal view carry the same facts (AD-11)', () => {
       scorecard: { records: RECORDS, skipped: [{ line: 3, reason: 'malformed', message: 'x' }] },
     });
     expect(renderScorecardSummaryTerminal(summarizeScorecard(withSkips))).toMatch(/skipped/i);
+  });
+
+  it('NAMES the unknown fields in the terminal view, as ADR-008 §5 requires', () => {
+    // ⚠️ A P2 from round 2 of the codex review. ADR-008 §5 requires a skipped record to be
+    // reported with "the line number and the unknown fields"; the terminal renderer
+    // printed only the reason word, discarding the field names the parser had carefully
+    // preserved — so an operator could not tell WHICH unsupported field dropped the
+    // record. The `--json` view carried them all along, which made it an AD-11 gap too.
+    const withSkips = input({
+      scorecard: {
+        records: RECORDS,
+        skipped: [
+          {
+            line: 12,
+            reason: 'version-skew',
+            message: 'scorecard.jsonl line 12 was written by a newer SpecWitness — record skipped. Unknown field(s): telemetryId.',
+          },
+        ],
+      },
+    });
+
+    const text = renderScorecardSummaryTerminal(summarizeScorecard(withSkips));
+    expect(text).toContain('telemetryId');
+    expect(text).toContain('line 12');
+    expect(text).toMatch(/version-skew/);
+  });
+
+  it('renders every metric even when NO record is readable (AD-11 parity)', () => {
+    // ⚠️ A P2 from round 2. An earlier version returned early on an empty scorecard and
+    // printed a short note, so the terminal omitted all seven metrics, the orphan count
+    // and the skip detail while `--json` still carried them. Both edge cases that reach it
+    // — a fresh project, and a scorecard whose every line was skipped — are exactly when
+    // somebody is deciding whether this gate is worth keeping.
+    const allSkipped = input({
+      scorecard: {
+        records: [],
+        skipped: [
+          { line: 1, reason: 'malformed', message: 'a' },
+          { line: 2, reason: 'malformed', message: 'b' },
+        ],
+      },
+    });
+
+    const text = renderScorecardSummaryTerminal(summarizeScorecard(allSkipped));
+
+    for (const label of [
+      /unique real defects/i,
+      /false.positive rate/i,
+      /needs.human rate/i,
+      /infra-error rate/i,
+      /ai-free run share/i,
+      /flak/i,
+      /median/i,
+      /unattributed/i,
+      /records skipped/i,
+    ]) {
+      expect(text).toMatch(label);
+    }
+
+    expect(text).not.toMatch(/NaN|undefined|Infinity/);
   });
 });
 
