@@ -99,8 +99,10 @@ development_status:
   6-8-shared-prompt-assembly-helper: done
   6-9-browser-verification-in-ci: done
   # Follow-up story written by the epic-6 supervisor during wave 2 (2026-09-04) with the
-  # owner's agreement; not in epics.md. UNASSIGNED and unscheduled - the row exists so that
-  # sprint-status.sh can see its key if the story is ever picked up and merged.
+  # owner's agreement; not in epics.md. SCHEDULED into wave 3 by owner decision 2026-09-05,
+  # with its Task 5 (retro-fitting evidence expectations onto story 6.2's merged fixtures)
+  # removed from scope - fixtures/corpus/ is not in REVIEW_IGNORE_PATHS, and the closing
+  # wave should not re-stale sign-offs for work that can be done at any time afterwards.
   6-10-corpus-evidence-kind-expectations: ready-for-dev
   epic-6-retrospective: optional
 
