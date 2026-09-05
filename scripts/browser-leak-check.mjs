@@ -100,7 +100,7 @@ function usage(message) {
       'usage: node scripts/browser-leak-check.mjs [--browsers-path <dir>]... ' +
       '[--ps-file <path>] [--baseline <path> | --write-baseline <path>] ' +
       '[--write-survivors <path>] [--reap] [--browsers-only] [--owned-pgid <n>]... ' +
-      '[--owned-under <dir>]... [--wait-seconds <n>] [--label <text>]\n',
+      '[--wait-seconds <n>] [--label <text>]\n',
   );
   process.exit(64);
 }
@@ -115,7 +115,6 @@ let writeSurvivorsFile;
 let reap = false;
 let browsersOnly = false;
 const ownedPgids = [];
-const ownedUnder = [];
 let waitSeconds = 0;
 let label = 'after the run';
 
@@ -158,25 +157,6 @@ for (let index = 0; index < argv.length; index += 1) {
     case '--browsers-only':
       browsersOnly = true;
       break;
-    // ⚠️ THE THIRD OWNERSHIP SIGNAL, for the case the other two cannot reach: a detached
-    // Playwright runner whose browser has already exited. Its argv names no browsers registry,
-    // and the normal-exit caller does not know its pgid — so it was reported and left running,
-    // and the NEXT check's fresh baseline then swallowed it. Reported-then-hidden is worse than
-    // reported. Its argv does carry its `cliPath`, which lives under the workspace this job
-    // checked out; an operator's own Playwright, in another project, does not. Raised as a P1
-    // on this branch.
-    case '--owned-under': {
-      if (value === undefined) usage(`ERROR: ${flag} needs a value`);
-      // A directory that claims everything is not an ownership signal.
-      if (!value.startsWith('/') || value === '/' || value.length < 2) {
-        usage(
-          `ERROR: ${flag} needs an absolute directory that is not the filesystem root, got '${value}'`,
-        );
-      }
-      ownedUnder.push(value.replace(/\/+$/, ''));
-      index += 1;
-      break;
-    }
     // The tighter ownership bound, for a caller that KNOWS which groups it spawned.
     //
     // ⚠️ VALIDATED, because an unvalidated value flag swallows the next FLAG. A caller emitted
@@ -319,37 +299,7 @@ function matchesRegistry(row) {
   return browsersPaths.some((path) => path !== '' && row.args.includes(path));
 }
 
-/**
- * OWNERSHIP: may we send a SIGNAL to this process's group?
- *
- * ⚠️ A MUCH STRONGER CLAIM THAN DETECTION, AND IT NEEDS THE SEPARATOR. `--owned-under` was made
- * separator-aware one review round earlier; this function was not, so
- * `--browsers-path /cache/ms-playwright` still claimed anything under
- * `/cache/ms-playwright-other` and authorised SIGKILLing its whole group — an unrelated browser,
- * or somebody's concurrent Playwright run.
- *
- * Reported as a P1 on this branch, and it is the same prefix bug as the `--owned-under` one, in
- * the sibling function, four lines away. The lesson about repairing only the site that was
- * reported was already written into this story's PR body when I repeated it here.
- */
-function isOwned(row) {
-  return browsersPaths.some((path) => path !== '' && isUnder(row.args, path));
-}
 
-/**
- * Does this argv reference a path INSIDE `dir`?
- *
- * ⚠️ **A PREFIX IS NOT A PATH, AND ON THE AUTHOR'S MACHINE THAT WAS NOT HYPOTHETICAL.** The
- * first version matched by substring, so `--owned-under /work/specwitness` also claimed anything
- * under `/work/specwitness-other`. This story was written in one of SIX SIBLING AGENT WORKTREES
- * under `/Users/jundymek/dev/specwitness-agents/`, beside a main checkout at
- * `/Users/jundymek/dev/specwitness` — and `specwitness` is a prefix of `specwitness-agents`. The
- * substring rule would have authorised this script to SIGKILL a PEER AGENT's process group.
- * Reported as a P2 on this branch; the separator is what makes it a path rather than a spelling.
- */
-function isUnder(args, dir) {
-  return args.includes(`${dir}/`);
-}
 
 function isBrowser(row) {
   if (isSelf(row)) {
@@ -619,11 +569,20 @@ function reapSurvivors() {
   // this job was given — the whole group then goes, because a browser is a tree and its helpers
   // do not all name the registry themselves. `--owned-pgid` narrows it further for a caller that
   // knows exactly which groups it spawned.
-  const ownedGroups = new Set(
-    survivors
-      .filter((row) => isOwned(row) || ownedUnder.some((dir) => isUnder(row.args, dir)))
-      .map((row) => row.pgid),
-  );
+  // ⚠️ OWNERSHIP FOR DESTRUCTION IS THE CALLER'S PGID LIST, AND NOTHING ELSE.
+  //
+  // Raised as a P1 on this branch and it goes deeper than the three prefix fixes before it: the
+  // whole ownership model rested on SHARED PATHS. `~/.cache/ms-playwright` is the registry every
+  // Playwright on the machine uses, and any Chrome may reference a file under the workspace - so
+  // a concurrently running Playwright, or the operator's browser with a download from this
+  // directory, satisfied "owned" and had its entire group signalled. Separator boundaries fixed
+  // the spelling of those paths; they never made the paths run-specific, because they are not.
+  //
+  // Only a caller that SPAWNED a group can vouch for it. `--owned-pgid` is that statement, and it
+  // is now the sole authority to signal. The path heuristics remain, but only for DETECTION -
+  // which is the split this script has been converging on all along, applied to the last place
+  // that had it wrong.
+  const ownedGroups = new Set(ownedPgids);
 
   const signallable = [];
   for (const pgid of groups) {
@@ -642,11 +601,11 @@ function reapSurvivors() {
     // runner has not, the runner is a survivor whose argv names no registry path — so registry
     // ownership is empty, reaping was refused, and the check left behind exactly the process it
     // was cleaning up. The caller knows more than the heuristic.
-    if (!ownedGroups.has(pgid) && !ownedPgids.includes(pgid)) {
+    if (!ownedGroups.has(pgid)) {
       lines.push(
-        `    NOT reaped, reported only: process group ${pgid} is not owned by this run ` +
-          '(no member came from the browsers registry or an owned directory, and no caller ' +
-          'claimed it)',
+        `    NOT reaped, reported only: process group ${pgid} was not claimed by the caller ` +
+          '(--owned-pgid). A shared browsers registry or workspace path is not proof of ' +
+          'ownership and no longer authorises a signal.',
       );
       continue;
     }

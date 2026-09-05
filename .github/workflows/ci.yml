@@ -350,19 +350,25 @@ jobs:
         # had to be reaped still fails this step.
         if: always()
         #
-        # `--owned-under` names this workspace, and it is not decoration: when chromium has
-        # exited but its detached `@playwright/test/cli.js` runner has not, that runner's argv
-        # carries no browsers-registry path and this step does not know its pgid — so without a
-        # third ownership signal it was reported and left running, and the cancelled-run check's
-        # fresh baseline then swallowed it. Reported-then-hidden is worse than reported. The
-        # runner's argv does carry its `cliPath`, which lives under the checkout.
+        # ⚠️ THIS STEP REPORTS AND DOES NOT REAP, AND THAT IS THE CORRECTED POSITION.
+        #
+        # It briefly did reap, authorised by "the argv names this workspace or the shared browsers
+        # registry". A P1 on this branch established that neither is RUN-SPECIFIC:
+        # `~/.cache/ms-playwright` is the registry every Playwright on the machine shares, and any
+        # Chrome may reference a file under the checkout — so on a shared or self-hosted runner
+        # that rule could SIGKILL a neighbour's process group. Only a caller that spawned a group
+        # can vouch for it, and this step does not know the pgids the suites created.
+        #
+        # So it reports, names every survivor with its full argv, and FAILS the step. On a
+        # GitHub-hosted runner the VM is discarded immediately afterwards; on any other runner a
+        # visible report the operator can act on is strictly better than this job killing
+        # something it cannot prove is its own. The cancelled-run check below DOES reap, because
+        # it spawns the groups itself and passes their pgids explicitly.
         run: |
           node scripts/browser-leak-check.mjs \
             --browsers-path "$HOME/.cache/ms-playwright" \
-            --owned-under "$GITHUB_WORKSPACE" \
             --baseline "$RUNNER_TEMP/browser-baseline.txt" \
             --wait-seconds 30 \
-            --reap \
             --label "after the suites finished normally"
 
       - name: No browser process survived a CANCELLED run (AC4, SIGKILL)

@@ -610,20 +610,22 @@ describe('the browser leak check', () => {
   /* ── reaping ──────────────────────────────────────────────────────────────────────── */
 
   /**
-   * ⚠️ **A DRY RUN WHENEVER THE LISTING IS A FIXTURE, AND THAT IS A SAFETY PROPERTY, NOT A
-   * TEST CONVENIENCE.** `--ps-file` rows carry INVENTED pids. On a real machine `4210` may
-   * well be a live process group belonging to somebody else, and `kill(-4210)` would signal
-   * it. So `--reap` signals only when the listing came from a real `ps`; with `--ps-file` it
-   * reports what it would have signalled and touches nothing.
+   * ⚠️ **OWNERSHIP FOR DESTRUCTION IS THE CALLER'S PGID LIST, AND NOTHING ELSE.**
    *
-   * That is also what makes the security-critical half testable: the refusals below are
-   * exercised, while the signalling itself is exercised for real by the cancelled-run check
-   * in CI.
+   * Raised as a P1 by the Codex review of this branch, and it went deeper than the three prefix
+   * fixes before it. The ownership model rested on SHARED PATHS: `~/.cache/ms-playwright` is the
+   * registry every Playwright on the machine uses, and any Chrome may reference a file under the
+   * workspace. So a concurrently running Playwright — or the operator's browser holding a
+   * download from this directory — satisfied "owned" and had its whole group signalled. Adding
+   * separator boundaries fixed the SPELLING of those paths; it never made them run-specific,
+   * because they are not.
+   *
+   * Only a caller that SPAWNED a group can vouch for it. The path heuristics still decide what is
+   * REPORTED; only `--owned-pgid` decides what may be SIGNALLED.
    */
-  it('reaps by process GROUP, and never signals when the listing is a fixture', async () => {
+  it('reports a registry browser but refuses to reap it when nobody claimed it', async () => {
     const psFile = await listing(
-      `   4210    4200    4198       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
-      `   4211    4210    4198       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome --type=zygote`,
+      `   8200    8000    8200       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
     );
 
     const { exitCode, stdout } = await run([
@@ -634,23 +636,118 @@ describe('the browser leak check', () => {
       '--reap',
     ]);
 
-    // The exit code still reports the leak: a leak that had to be reaped is still a leak.
+    // Detected and reported — the registry match is still how it is FOUND.
     expect(exitCode).toBe(1);
-    expect(stdout).toContain('would signal process group 4198');
-    // One group, not two processes — a browser is a tree and the group is the unit.
+    expect(stdout).toContain('8200');
+    // But never signalled: a shared registry path is not proof of ownership.
+    expect(stdout).toContain('not claimed by the caller');
+    expect(stdout).not.toContain('would signal process group 8200');
+  });
+
+  it('reaps only the groups the caller claimed', async () => {
+    const psFile = await listing(
+      `   8400    8000    8400       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+      `   8500    8000    8500       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-pgid',
+      '8400',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('would signal process group 8400');
+    expect(stdout).not.toContain('would signal process group 8500');
+    expect(stdout).toContain('not claimed by the caller');
+  });
+
+  /**
+   * A claimed group goes whole, helpers included — a browser is a tree, and
+   * `src/infra/process-runner.ts` reaps one with `kill(-pgid, ...)` for that reason.
+   */
+  it('reaps a claimed group whole, including members that match nothing', async () => {
+    const psFile = await listing(
+      `   8300    8000    8300       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+      '   8301    8300    8300       00:05 /opt/hostedtoolcache/chrome_crashpad_handler --monitor-self',
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-pgid',
+      '8300',
+    ]);
+
+    expect(exitCode).toBe(1);
     expect(stdout.match(/would signal process group/g)).toHaveLength(1);
+    expect(stdout).toContain('would signal process group 8300');
+  });
+
+  /**
+   * ⚠️ **A DRY RUN WHENEVER THE LISTING IS A FIXTURE, AND THAT IS A SAFETY PROPERTY.**
+   * `--ps-file` rows carry INVENTED pids; on a real machine `8400` may be somebody's live process
+   * group. A test fixture must not be able to signal anything, so it cannot.
+   */
+  it('never signals when the listing is a fixture', async () => {
+    const psFile = await listing(
+      `   8400    8000    8400       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-pgid',
+      '8400',
+    ]);
+
     expect(stdout).toContain('dry run');
   });
 
   /**
-   * ⚠️ THE REFUSALS `assertSignallableProcessGroup` MAKES, in the one place that signals
-   * groups from a shell-facing script. `src/infra/process-runner.ts:364-376`: a pgid must be
-   * an integer greater than 1, because `-1` signals every process on the machine and `0` the
-   * caller's own group.
+   * ⚠️ THE REFUSALS `assertSignallableProcessGroup` MAKES
+   * (`src/infra/process-runner.ts:364-376`): a pgid must be an integer greater than 1, because
+   * `-1` signals every process on the machine and `0` the caller's own group.
    */
-  it('refuses to signal process group 0, 1, or a non-integer', async () => {
+  /**
+   * TWO LAYERS, and the outer one is now strictly stronger — which is worth pinning rather than
+   * assuming. `--owned-pgid 1` never reaches the reap loop at all: the parser rejects it with a
+   * usage error, so the loop's own `pgid <= 1` refusal has become unreachable defence in depth.
+   * Both are kept: the parser guards the caller's input, the loop guards a pgid that arrived from
+   * `ps`.
+   */
+  it('rejects a claim on process group 1 at parse time, before any reaping', async () => {
     const psFile = await listing(
       `   4210    4200       1       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stderr } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+      '--owned-pgid',
+      '1',
+    ]);
+
+    expect(exitCode).toBe(64);
+    expect(stderr).toContain('--owned-pgid');
+  });
+
+  /** And an unclaimed group in pgid 0 or 1 is simply never signalled, being unclaimed. */
+  it('never signals an unclaimed group, whatever its pgid', async () => {
+    const psFile = await listing(
       `   4310    4300       0       00:42 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
     );
 
@@ -663,13 +760,10 @@ describe('the browser leak check', () => {
     ]);
 
     expect(exitCode).toBe(1);
-    expect(stdout).toContain('refusing to signal process group 1');
-    expect(stdout).toContain('refusing to signal process group 0');
-    expect(stdout).not.toContain('would signal process group 1');
-    expect(stdout).not.toContain('would signal process group 0');
+    expect(stdout).not.toContain('would signal');
   });
 
-  it('refuses to signal its own process group', async () => {
+  it('refuses to signal its own process group even when claimed', async () => {
     const ownPgid = execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], {
       encoding: 'utf8',
     }).trim();
@@ -683,6 +777,8 @@ describe('the browser leak check', () => {
       '--browsers-path',
       BROWSERS_PATH,
       '--reap',
+      '--owned-pgid',
+      ownPgid,
     ]);
 
     expect(exitCode).toBe(1);
@@ -691,14 +787,8 @@ describe('the browser leak check', () => {
   });
 
   /**
-   * ⚠️ **A SAFETY GUARD THAT SWITCHES ITSELF OFF WHEN IT CANNOT ANSWER IS NOT A GUARD.**
-   * Raised as a P1 by the Codex review of this branch. `ownProcessGroup()` returns `null` when
-   * `ps` fails, and the own-group refusal was written as `own !== null && pgid === own` — so a
-   * failed `ps` disabled precisely the check that stops `kill(-pgid)` killing the checker and
-   * everything else in its group. Unknown must mean REFUSE, not proceed.
-   *
-   * Driven with a `PATH` that contains no `ps`, so the failure is real rather than simulated —
-   * no test seam in the script, and the listing still arrives through `--ps-file`.
+   * ⚠️ A safety guard that switches itself off when it cannot answer is not a guard. If `ps`
+   * cannot be run, the own-group refusal cannot be evaluated, so nothing is signalled at all.
    */
   it('refuses to reap at all when it cannot determine its own process group', async () => {
     const psFile = await listing(
@@ -706,7 +796,7 @@ describe('the browser leak check', () => {
     );
 
     const { exitCode, stdout, stderr } = await run(
-      ['--ps-file', psFile, '--browsers-path', BROWSERS_PATH, '--reap'],
+      ['--ps-file', psFile, '--browsers-path', BROWSERS_PATH, '--reap', '--owned-pgid', '4198'],
       { PATH: '/nonexistent-so-ps-cannot-be-found', HOME: process.env['HOME'] ?? '/tmp' } as Record<
         string,
         string
@@ -716,354 +806,6 @@ describe('the browser leak check', () => {
     expect(exitCode).toBe(1);
     expect(`${stdout}${stderr}`).toContain('cannot determine its own process group');
     expect(stdout).not.toContain('would signal process group');
-  });
-
-  /**
-   * ⚠️ **DETECTION IS BROAD; REAPING IS NARROW. THEY ARE NOT THE SAME QUESTION, AND CONFLATING
-   * THEM MADE THIS SCRIPT DESTRUCTIVE.** Raised as a P1 by the Codex review of this branch.
-   *
-   * The patterns match any Chrome or Electron process on purpose, because a browser helper that
-   * outlives its parent is the thing being hunted. But "suspicious enough to REPORT" is a much
-   * weaker claim than "mine, so safe to SIGKILL its whole process group". Run locally, a browser
-   * window the operator opened during the wait matches the patterns, is absent from the
-   * baseline, and would have had its entire group signalled.
-   *
-   * That is not hypothetical: an early local run of the cancelled-run check reported a Vivaldi
-   * renderer that appeared during its 120-second wait. With `--reap` armed, this script would
-   * have killed the author's browser.
-   *
-   * Ownership is the REGISTRY: a process running a binary out of the browsers path this job was
-   * given is this job's. Everything else is reported and left alone.
-   */
-  it('reports a browser it does not own, and refuses to reap it', async () => {
-    const psFile = await listing(
-      '   8100    8000    8100       00:05 /Applications/Vivaldi.app/Contents/MacOS/Vivaldi Helper --type=renderer',
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-    ]);
-
-    // Still a finding: the report is unchanged and the exit code still says survivors exist.
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('8100');
-    // But never signalled.
-    expect(stdout).not.toContain('would signal process group 8100');
-    expect(stdout).toContain('not owned by this run');
-  });
-
-  it('reaps a browser that came out of the registry it was given', async () => {
-    const psFile = await listing(
-      `   8200    8000    8200       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome --type=renderer`,
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('would signal process group 8200');
-  });
-
-  /**
-   * A group containing at least one registry-owned process is this run's tree, so the whole
-   * group goes — helpers whose own argv does not name the registry included. That is why the
-   * unit is the group and not the pid.
-   */
-  it('reaps the whole group when any member came from the registry', async () => {
-    const psFile = await listing(
-      `   8300    8000    8300       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
-      '   8301    8300    8300       00:05 /opt/hostedtoolcache/chrome_crashpad_handler --monitor-self',
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('would signal process group 8300');
-    expect(stdout.match(/would signal process group/g)).toHaveLength(1);
-  });
-
-  /**
-   * ⚠️ **THE TWO OWNERSHIP SIGNALS ARE A UNION, NOT AN INTERSECTION** — and this assertion used
-   * to say the opposite, which was MY error rather than the code's.
-   *
-   * I first wrote `--owned-pgid` as a NARROWING filter: the caller's list restricts what the
-   * registry heuristic already allowed. That is wrong in the direction this whole story is about.
-   * A registry-owned group the caller did not happen to name is still this run's browser — it was
-   * launched out of the registry this job was given — so refusing to reap it is "detect the leak
-   * and walk away" a fourth time.
-   *
-   * Each signal answers "is this mine?" independently, and either one is enough. The list adds
-   * groups the heuristic cannot see (a Playwright runner with no registry path in its argv); it
-   * never subtracts ones it can.
-   */
-  it('treats registry ownership and the caller list as a union, not an intersection', async () => {
-    const psFile = await listing(
-      `   8400    8000    8400       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
-      `   8500    8000    8500       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
-      '   8600    8000    8600       00:05 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/pw.mjs',
-      '   8700    8000    8700       00:05 /Applications/Vivaldi.app/Contents/MacOS/Vivaldi Helper --type=renderer',
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-      '--owned-pgid',
-      '8600',
-    ]);
-
-    expect(exitCode).toBe(1);
-    // Registry-owned, and not in the caller's list: still ours, still reaped.
-    expect(stdout).toContain('would signal process group 8400');
-    expect(stdout).toContain('would signal process group 8500');
-    // Claimed by the caller, invisible to the registry heuristic: reaped because it was claimed.
-    expect(stdout).toContain('would signal process group 8600');
-    // Neither signal: the operator's own browser, reported and left alone.
-    expect(stdout).not.toContain('would signal process group 8700');
-    expect(stdout).toContain('not owned by this run');
-  });
-
-  /**
-   * ⚠️ **AN EXPLICIT OWNED PGID IS SUFFICIENT OWNERSHIP ON ITS OWN.** Raised as a P1 by the
-   * Codex review of this branch, and it was a regression introduced by the PREVIOUS fix: the two
-   * ownership bounds were composed as AND, so a caller that KNEW a group was its own still had
-   * the registry heuristic veto it.
-   *
-   * The case that exposes it is the one the cancelled-run check exists for. When chromium has
-   * exited but its detached `@playwright/test/cli.js` runner has not, the runner is correctly
-   * reported as a survivor — but its argv names no registry path, so registry ownership is empty
-   * and reaping refused, leaving behind precisely the process the check was cleaning up.
-   *
-   * The caller knows more than the heuristic. Either signal is now enough.
-   */
-  it('reaps a Playwright-only group when the caller supplied its pgid', async () => {
-    const psFile = await listing(
-      '   6001    6000    6001       00:20 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/playwright.config.mjs',
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-      '--owned-pgid',
-      '6001',
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('would signal process group 6001');
-  });
-
-  /**
-   * The other half, unchanged and deliberately conservative: with no explicit list and no
-   * registry match, ownership is not established, so the survivor is reported and left running.
-   * On a CI runner every Playwright process is this job's — but this script also runs on a
-   * developer machine where it is not, and an unprovable kill is the destructive direction.
-   */
-  it('still refuses a Playwright-only group when nobody claimed it', async () => {
-    const psFile = await listing(
-      '   6001    6000    6001       00:20 /usr/bin/node /repo/node_modules/@playwright/test/cli.js test --config /tmp/x/playwright.config.mjs',
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('not owned by this run');
-    expect(stdout).not.toContain('would signal process group 6001');
-  });
-
-  /**
-   * ⚠️ **A THIRD OWNERSHIP SIGNAL, FOR THE CASE THE OTHER TWO CANNOT REACH.** Raised as a P1 by
-   * the Codex review of this branch, and it defeated my own reasoning about an accepted residual.
-   *
-   * When chromium exits but its detached `@playwright/test/cli.js` runner does not, the runner is
-   * reported — but the normal-exit CI step supplies no `--owned-pgid` (it does not know the
-   * pgids), and the runner's argv names no browsers registry. So it was reported and left. I had
-   * written that off as the conservative default.
-   *
-   * The part I had missed: **the very next check takes a fresh baseline, which then contains that
-   * process, and subtracts it.** So the job finishes carrying exactly the leaked tree AC4 exists
-   * to clean up, and nothing reports it a second time. Reported-then-hidden is worse than
-   * reported.
-   *
-   * `--owned-under <dir>` closes it precisely: the runner's argv carries its `cliPath`, which
-   * lives under the workspace this job checked out. An operator's own Playwright, in another
-   * project, does not.
-   */
-  it('claims a Playwright runner whose argv lives under an owned directory', async () => {
-    const psFile = await listing(
-      '   6001    6000    6001       00:20 /usr/bin/node /work/specwitness/node_modules/@playwright/test/cli.js test --config /tmp/x/pw.mjs',
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-      '--owned-under',
-      '/work/specwitness',
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('would signal process group 6001');
-  });
-
-  it('does not claim a Playwright runner from a different project', async () => {
-    const psFile = await listing(
-      '   6002    6000    6002       00:20 /usr/bin/node /home/dev/other-project/node_modules/@playwright/test/cli.js test',
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-      '--owned-under',
-      '/work/specwitness',
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('not owned by this run');
-    expect(stdout).not.toContain('would signal process group 6002');
-  });
-
-  /**
-   * ⚠️ A directory that claims everything is not an ownership signal. `/` would make every
-   * process on the machine "owned", which is the destructive direction this whole guard exists
-   * to close — so it is refused outright rather than accepted and regretted.
-   */
-  /**
-   * ⚠️ **A PREFIX IS NOT A PATH, AND ON THIS MACHINE THAT IS NOT HYPOTHETICAL.** Raised as a P2
-   * by the Codex review of this branch.
-   *
-   * `--owned-under` matched by substring, so `--owned-under /work/specwitness` also claimed
-   * anything under `/work/specwitness-other`. This story was written in
-   * `/Users/jundymek/dev/specwitness-agents/chuck`, one of SIX sibling agent worktrees, beside a
-   * main checkout at `/Users/jundymek/dev/specwitness` — and `specwitness` is a prefix of
-   * `specwitness-agents`. The substring rule would have authorised this script to SIGKILL a peer
-   * agent's Playwright process group.
-   *
-   * Ownership now requires a separator boundary: the directory, then `/`.
-   */
-  it('does not claim a process from a similarly-prefixed directory', async () => {
-    const psFile = await listing(
-      '   6003    6000    6003       00:20 /usr/bin/node /work/specwitness-other/node_modules/@playwright/test/cli.js test',
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-      '--owned-under',
-      '/work/specwitness',
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('not owned by this run');
-    expect(stdout).not.toContain('would signal process group 6003');
-  });
-
-  /**
-   * ⚠️ **THE SAME PREFIX BUG, IN THE SIBLING FUNCTION, FOUR LINES AWAY — AND I HAD JUST WRITTEN
-   * THE LESSON ABOUT IT INTO THE PR BODY.** Raised as a P1 by the Codex review of this branch.
-   *
-   * `--owned-under` was made separator-aware one round earlier. The REGISTRY ownership check was
-   * not, so `--browsers-path /cache/ms-playwright` still claimed anything under
-   * `/cache/ms-playwright-other` and authorised signalling its whole group — an unrelated browser
-   * or a concurrent Playwright run.
-   *
-   * Note what stays broad: DETECTION still matches by substring, because a browser helper that
-   * outlives its parent is the thing being hunted and over-reporting is free. Only OWNERSHIP —
-   * the permission to send a signal — requires the boundary. That is the same split every other
-   * fix on this branch made, applied to the one place that had been missed.
-   */
-  it('detects, but refuses to reap, a browser from a similarly-prefixed registry', async () => {
-    const psFile = await listing(
-      `   9300    9000    9300       00:05 ${BROWSERS_PATH}-other/chromium-1234/chrome-linux/chrome`,
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-    ]);
-
-    // Detected and reported: over-reporting is free, and this is a browser.
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('9300');
-    // Never signalled: a prefix is not a path.
-    expect(stdout).toContain('not owned by this run');
-    expect(stdout).not.toContain('would signal process group 9300');
-  });
-
-  it('still reaps a browser from the registry itself', async () => {
-    const psFile = await listing(
-      `   9400    9000    9400       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
-    );
-
-    const { exitCode, stdout } = await run([
-      '--ps-file',
-      psFile,
-      '--browsers-path',
-      BROWSERS_PATH,
-      '--reap',
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('would signal process group 9400');
-  });
-
-  it('refuses an --owned-under that would claim the whole filesystem', async () => {
-    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
-
-    const { exitCode, stderr } = await run([
-      '--ps-file',
-      psFile,
-      '--owned-under',
-      '/',
-    ]);
-
-    expect(exitCode).toBe(64);
-    expect(stderr).toContain('--owned-under');
-  });
-
-  it('refuses a relative --owned-under, which would match unpredictably', async () => {
-    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
-
-    const { exitCode, stderr } = await run(['--ps-file', psFile, '--owned-under', 'node_modules']);
-
-    expect(exitCode).toBe(64);
-    expect(stderr).toContain('--owned-under');
   });
 
   it('reaps nothing, and says so, when nothing survived', async () => {
@@ -1082,38 +824,6 @@ describe('the browser leak check', () => {
     expect(stdout).not.toContain('would signal');
   });
 
-  /**
-   * ⚠️ **A FLAG THAT SILENTLY EATS THE NEXT FLAG IS HOW A CALLER'S BUG BECOMES THIS SCRIPT'S
-   * BUG.** A caller emitted `--owned-pgid` with an empty value; the parser consumed the
-   * following `--label` as its value, the label text then read as a bare argument, and the step
-   * failed with a usage error that pointed at the wrong thing entirely. The caller was fixed —
-   * and so is this, because "the caller should not do that" is not a parser.
-   *
-   * Real CI failure: run 33913171525, `browser (ubuntu-latest)`, exit 64.
-   */
-  it('rejects a flag value that is another flag, instead of swallowing it', async () => {
-    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
-
-    const { exitCode, stderr } = await run([
-      '--ps-file',
-      psFile,
-      '--owned-pgid',
-      '--label',
-      'a label that should never be consumed as a pgid',
-    ]);
-
-    expect(exitCode).toBe(64);
-    expect(stderr).toContain('--owned-pgid');
-  });
-
-  it('rejects a non-numeric owned pgid', async () => {
-    const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
-
-    const { exitCode, stderr } = await run(['--ps-file', psFile, '--owned-pgid', 'not-a-number']);
-
-    expect(exitCode).toBe(64);
-    expect(stderr).toContain('--owned-pgid');
-  });
 
   it('exits 64 on an unknown flag', async () => {
     const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
