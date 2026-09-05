@@ -1,5 +1,9 @@
 # Dependencies
 node_modules/
+# pnpm's content-addressable store. Normally resolved outside the project, but an npm or
+# pnpm invocation configured with a project-local store writes it here — its SQLite files
+# are large binaries that must never be committed.
+.pnpm-store/
 
 # Build output
 dist/
