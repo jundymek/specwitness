@@ -16,7 +16,7 @@
  * Hermetic (H-8): every case runs in its own `mkdtemp` project. No subprocess is spawned.
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -39,7 +39,13 @@ import {
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    roots.splice(0).map(async (root) => {
+      // Restore any permission a case removed, or the removal fails too.
+      await chmod(join(root, '.specwitness', SCORECARD_FILENAME), 0o600).catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }),
+  );
 });
 
 const clock: Clock = { now: () => new Date('2026-09-05T10:00:00.000Z') };
@@ -381,6 +387,48 @@ describe('scorecard summary', () => {
   it('reports an uninitialised project as infrastructure', async () => {
     const root = await uninitialised();
     await expect(runScorecardSummary(root, {})).rejects.toThrow(InfraError);
+  });
+});
+
+describe('an unreadable scorecard is infrastructure, not "report a SpecWitness bug"', () => {
+  // A P2 from round 6 of the codex review — the third site of one class, after the
+  // attribution store's write path (round 1) and its read path. Story 6.5's
+  // `ScorecardStore` propagates a raw Node error, and a raw error is not an
+  // `isSpecWitnessError`, so `main.ts` reports "unexpected internal failure ... this is a
+  // SpecWitness bug" at an operator whose file is merely unreadable.
+  //
+  // Translated at THIS command's edge rather than in the store: 6.5's module is merged
+  // code this story does not modify, and this command is its only new reader.
+
+  it('reports an unreadable scorecard as InfraError from summary', async () => {
+    const root = await project();
+    await chmod(join(root, '.specwitness', SCORECARD_FILENAME), 0o000);
+
+    await expect(runScorecardSummary(root, {})).rejects.toThrow(InfraError);
+  });
+
+  it('reports an unreadable scorecard as InfraError from add', async () => {
+    const root = await project();
+    await chmod(join(root, '.specwitness', SCORECARD_FILENAME), 0o000);
+
+    await expect(
+      runScorecardAdd(root, RUN_ID, { criterion: 'E6-01', attribution: 'unique' }, clock),
+    ).rejects.toThrow(InfraError);
+  });
+
+  it('names the path and a remedy rather than sending the operator to the bug tracker', async () => {
+    const root = await project();
+    await chmod(join(root, '.specwitness', SCORECARD_FILENAME), 0o000);
+
+    await expect(runScorecardSummary(root, {})).rejects.toMatchObject({
+      hint: expect.stringContaining('readable') as unknown as string,
+    });
+  });
+
+  it('still treats an ABSENT scorecard as an empty one, not a failure', async () => {
+    // The boundary: "recorded nothing yet" is a fact, not a fault.
+    const root = await project([]);
+    await expect(runScorecardSummary(root, {})).resolves.toBeDefined();
   });
 });
 

@@ -182,6 +182,38 @@ async function assertInitialised(projectRoot: string): Promise<void> {
 }
 
 /**
+ * Reads story 6.5's scorecard, translating a filesystem failure into an `InfraError`.
+ *
+ * A P2 from round 6 of the codex review, and the third site of one class: a raw Node
+ * `EACCES`/`EIO` is not an `isSpecWitnessError`, so the global handler in `main.ts`
+ * reports *"unexpected internal failure ... this is a SpecWitness bug - please report
+ * it"* at an operator whose file is merely unreadable. Reproduced against the built
+ * binary with a `chmod 000` scorecard.
+ *
+ * TRANSLATED HERE RATHER THAN IN THE STORE, deliberately. `ScorecardStore` is story 6.5's
+ * merged module and this story does not modify it - my own `AttributionStore` translates
+ * at its own boundary because I own it. This command is the only new caller of
+ * `ScorecardStore.read()`, so wrapping at my edge fixes the symptom on my path without
+ * changing behaviour for `verify`, which calls the store's WRITE path and has its own
+ * (deliberately unfailable) contract.
+ *
+ * An ABSENT file is not a failure and never reaches here: the store answers an empty
+ * scorecard for `ENOENT`, which is the correct reading of "this project has recorded
+ * nothing yet".
+ */
+async function readScorecard(projectRoot: string) {
+  const store = new ScorecardStore(projectRoot);
+  try {
+    return await store.read();
+  } catch (cause) {
+    throw new InfraError(
+      `the scorecard could not be read: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `check that ${store.path} is readable, then run the command again`,
+    );
+  }
+}
+
+/**
  * AC1 — append one attribution, linked to a run and a criterion.
  *
  * VALIDATION ORDER IS DELIBERATE: every pure, string-only check happens before the
@@ -233,7 +265,7 @@ export async function runScorecardAdd(
 
   await assertInitialised(projectRoot);
 
-  const { records, skipped } = await new ScorecardStore(projectRoot).read();
+  const { records, skipped } = await readScorecard(projectRoot);
   const record = records.find((entry) => entry.runId === runId);
 
   if (record === undefined) {
@@ -369,7 +401,7 @@ export async function runScorecardSummary(
 ): Promise<ScorecardOutput> {
   await assertInitialised(projectRoot);
 
-  const scorecard = await new ScorecardStore(projectRoot).read();
+  const scorecard = await readScorecard(projectRoot);
   const attributions = await new AttributionStore(projectRoot).read();
 
   const summary = summarizeScorecard({ scorecard, attributions });
