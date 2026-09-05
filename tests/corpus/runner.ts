@@ -894,6 +894,64 @@ export function compareOutcome(
     }
   }
 
+  // ── evidence KINDS (story 6.10) ──────────────────────────────────────────────────────
+  //
+  // The corpus pins what a run CONCLUDED — verdict, exit code, criterion statuses — and was
+  // silent about what it OBSERVED. Those are different failures: a change that leaves every
+  // verdict correct while a verification surface quietly stops producing evidence is
+  // invisible to a fixture that does not pin kinds. Set arithmetic, and deliberately nothing
+  // more — AD-6 says evidence belongs to a run document, so this reads it and never
+  // synthesises it, and AD-3 is untouched because nothing here reaches a shell.
+  //
+  // ⚠️ KINDS ONLY, AND THE MESSAGE SAYS ONLY KINDS. A failure that quoted the evidence it
+  // compared would put URLs, request bodies, command output and provider payloads into CI
+  // logs. A kind is one of six known words; everything else in an evidence record is content
+  // that has to be assumed sensitive.
+  if (expected.evidence !== undefined) {
+    if (observed.document === null) {
+      // Without this arm the branch would simply be skipped and the fixture would assert
+      // nothing about evidence while its author believed otherwise — the same green-for-
+      // nothing the whole key exists to close, arriving through the comparator.
+      problems.push(
+        `evidence: this fixture pins evidence kinds [${expected.evidence.kinds.join(', ')}] ` +
+          'but the run produced no result document at all, so no evidence can be read back ' +
+          'from anything. An expectation about what a run observed cannot be checked against ' +
+          'a run that recorded nothing.',
+      );
+    } else {
+      // `?? []` because a document with no evidence array and a document with an empty one
+      // are the same claim here: the run observed nothing. Both must be able to fail.
+      const observedKinds = new Set((observed.document.evidence ?? []).map((e) => e.kind));
+      const expectedKinds = new Set(expected.evidence.kinds);
+
+      const missing = [...expectedKinds].filter((kind) => !observedKinds.has(kind)).sort();
+      // `subset` permits extra kinds; that permission IS the difference between the two
+      // modes, and it is why `assertion` has no default.
+      const unexpected =
+        expected.evidence.assertion === 'exact'
+          ? [...observedKinds].filter((kind) => !expectedKinds.has(kind)).sort()
+          : [];
+
+      if (missing.length > 0 || unexpected.length > 0) {
+        const detail = [
+          missing.length > 0 ? `missing [${missing.join(', ')}]` : null,
+          unexpected.length > 0 ? `unexpected [${unexpected.join(', ')}]` : null,
+        ]
+          .filter((part) => part !== null)
+          .join(', ');
+
+        problems.push(
+          `evidence kinds (${expected.evidence.assertion}): ${detail}. ` +
+            `expected [${[...expectedKinds].sort().join(', ')}], ` +
+            `observed [${[...observedKinds].sort().join(', ')}]. ` +
+            'A kind this fixture names and the run did not produce means a verification ' +
+            'surface stopped observing; a kind the run produced and an `exact` fixture does ' +
+            'not name means it started observing something its author never saw.',
+        );
+      }
+    }
+  }
+
   const stderr = normalizer.normalizeText(observed.stderr);
   for (const needle of expected.stderrContains ?? []) {
     if (!stderr.includes(needle)) {
@@ -951,6 +1009,10 @@ export function renderFailure(
             status: entry.status,
           })),
         ),
+      // KINDS ONLY — the same rule the comparator follows. This line is read off a failed run
+      // in a CI log, so it must not become a place evidence CONTENTS get printed.
+      '  observed evidence kinds: ' +
+        JSON.stringify([...new Set((observed.document.evidence ?? []).map((e) => e.kind))].sort()),
       '',
     );
   }

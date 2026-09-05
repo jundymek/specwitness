@@ -1,0 +1,42 @@
+# SpecWitness Project Config for the corpus fixture `runner-evidence-kinds`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Every command here is `node <relative path inside this fixture>`:
+# argv, never a shell line, with nothing to quote and nothing for a shell to
+# interpret even if one were involved. None of them reaches the network, reads
+# anything outside this directory, or installs anything.
+#
+# ⚠️ NO `services:` BLOCK, AND THAT IS DELIBERATE — not an omission.
+#
+# Two reasons, in order of importance. First, this fixture is about the KINDS of
+# evidence a run produces, and a service adds none of its own: the kinds come
+# from the gate, the observation command and the shell command below. A service
+# would only be here to enable an `http` probe, and `http` is not needed to prove
+# a set comparison works. Second, wave 2 of this epic established — three agents
+# independently, recorded in the epic journal — that every corpus fixture
+# declaring a `services:` block fails under the codex review sandbox with EPERM,
+# and every service-free fixture passes. A fixture whose whole subject is
+# instruments reporting in their own favour should not itself generate review
+# noise that has to be explained away on every sign-off.
+#
+# The consequence is stated rather than hidden: this fixture pins three of the
+# six evidence kinds. `http` and `browser` need a service; `provider` cannot
+# appear in a corpus fixture at all, because every fixture ships a precompiled
+# plan and no provider is ever in scope (FR-18).
+
+version: 1
+
+project:
+  baseBranch: master
+
+# Produces `gate` evidence. Green on purpose — see gates/lint.cjs.
+gates:
+  - { id: lint, run: node gates/lint.cjs }
+
+observations:
+  # Drives the OBSERVATION surface -> `observation` evidence.
+  inventory: { run: node commands/inventory-observation.cjs }
+  # Drives the SHELL surface -> `command` evidence.
+  report: { run: node commands/report.cjs }

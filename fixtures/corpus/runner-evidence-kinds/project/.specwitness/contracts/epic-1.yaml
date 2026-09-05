@@ -1,0 +1,37 @@
+# Hand-written Verification Contract for the corpus fixture
+# `runner-evidence-kinds`.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
+# `specwitness contract epic-1 --freeze`; see `fixtures/corpus/README.md`.
+#
+# BOTH CRITERIA PASS. This fixture's expectation is about what the run OBSERVED,
+# not about what it concluded, so nothing here may fail: a fixture that also
+# failed a criterion could go red for a reason that has nothing to do with
+# evidence kinds, and the proof would be worth less.
+spec:
+  epic: epic-1
+  version: 1
+  criteria:
+    - id: E1-01
+      statement: The inventory reports every item as in stock.
+      kind: behavioral
+      severity: normal
+      verifiability: automated
+    - id: E1-02
+      statement: The report command reports the stable catalog.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 62041a07a22a9fc5e18791e5d471e1594eacbf304ab7e6a61f604529b7f5080a
+  createdAt: 2026-09-05T09:00:00.000Z
+  frozenAt: 2026-09-05T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-05T09:00:00.000Z
+  history: []

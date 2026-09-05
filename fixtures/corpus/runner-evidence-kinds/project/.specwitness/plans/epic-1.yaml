@@ -1,0 +1,75 @@
+# Hand-written Verification Plan for the corpus fixture
+# `runner-evidence-kinds`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18, AC1's "no real providers"). The `contract.fingerprint` below must
+# match the frozen contract beside it; the runner does not patch it, so a
+# contract re-freeze means this line is re-copied by hand.
+#
+# THE PLAN IS CORRECT AND SO IS THE APPLICATION. Unlike `runner-criterion-fail`,
+# nothing here is meant to fail: this fixture's claim is about the KINDS of
+# evidence the run produced, and a criterion failing as well would give it a
+# second, unrelated way to go red.
+#
+# THE SURFACE IS WHAT CHOOSES THE EVIDENCE KIND, which is the one thing to
+# understand before editing this file:
+#
+#   gates: in config.yaml   -> `gate` evidence
+#   surface: observation    -> `observation` evidence
+#   surface: shell          -> `command` evidence
+#
+# Both probes below read a command declared under `observations:` in
+# config.yaml — that block declares the COMMAND, and the plan decides which
+# surface runs it. Changing either `surface:` line changes the set of kinds this
+# fixture produces and will turn `expected.json` red, which is exactly what it
+# is there for.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 62041a07a22a9fc5e18791e5d471e1594eacbf304ab7e6a61f604529b7f5080a
+  data:
+    seed: corpusseed000010
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: inventory-in-stock
+          surface: observation
+          mechanics:
+            commandId: inventory
+            args: []
+          assertions:
+            - description: every inventory item is in stock
+              target: { source: jsonPath, path: $.allInStock, phase: snapshot }
+              comparison: equals
+              expected: "true"
+
+    - criterionId: E1-02
+      disposition: automated
+      probes:
+        - id: report-catalog
+          surface: shell
+          mechanics:
+            commandId: report
+            args: []
+            argumentAllowlist: []
+          assertions:
+            - description: the report command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: it reports the stable catalog
+              target: { source: stdout }
+              comparison: contains
+              expected: catalog=stable
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-05T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

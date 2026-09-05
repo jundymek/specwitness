@@ -400,3 +400,236 @@ describe('stderr assertions run against NORMALISED text', () => {
     expect(problems.join('\n')).toContain('NOT to contain');
   });
 });
+
+/* ── story 6.10: evidence-kind comparison ───────────────────────────────────────────── */
+
+/**
+ * An observation whose document carries evidence of the given kinds.
+ *
+ * Only `kind` is populated. The comparison is set arithmetic over kinds and reads no other
+ * field, so filling in URLs and command output here would be inventing detail the function
+ * never looks at — and would put fixture-shaped payloads into a test that is about kinds.
+ */
+function withEvidence(kinds: readonly string[], rest: Partial<ObservedOutcome> = {}) {
+  const base = observation(rest);
+  return {
+    ...base,
+    document: { ...base.document, evidence: kinds.map((kind) => ({ kind })) } as unknown as RunResultDocument,
+  };
+}
+
+describe('evidence kinds are compared when, and only when, a fixture pins them', () => {
+  it('says nothing about evidence when the fixture omits the key', () => {
+    // AC2 at the comparator, the other half of the schema's optionality. Every fixture merged
+    // before story 6.10 omits `evidence`, and a run producing any kinds at all must still
+    // compare exactly as it did before the key existed.
+    const problems = compareOutcome(
+      expectation(),
+      withEvidence(['gate', 'command', 'provider']),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
+  });
+
+  it('passes when an `exact` expectation matches the observed set', () => {
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'exact', kinds: ['gate', 'command'] } }),
+      withEvidence(['command', 'gate']),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
+  });
+
+  it('ignores ORDER, because a set is not a list', () => {
+    // Two runs differing only in the order their evidence was recorded describe the same run.
+    // A comparator that disagreed would produce a fixture that fails on Tuesday, which the
+    // format's own README names as the failure that gets a corpus disabled.
+    const problems = compareOutcome(
+      expectation({
+        evidence: { assertion: 'exact', kinds: ['observation', 'gate', 'command'] },
+      }),
+      withEvidence(['command', 'observation', 'gate']),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
+  });
+
+  it('ignores DUPLICATE observed records of the same kind', () => {
+    // Three gates produce three `gate` evidence members. The claim is "the run produced gate
+    // evidence", not "the run produced exactly one".
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'exact', kinds: ['gate'] } }),
+      withEvidence(['gate', 'gate', 'gate']),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
+  });
+});
+
+describe('a missing evidence kind is a fixture FAILURE, naming both sides', () => {
+  it('catches a kind that stopped being produced, under `exact`', () => {
+    // THE DEFECT THIS STORY EXISTS FOR: the verdict is still correct, every criterion status
+    // is unchanged, and a verification surface quietly stopped producing evidence. Every
+    // fixture merged before this key is blind to it.
+    const problems = compareOutcome(
+      expectation({
+        evidence: { assertion: 'exact', kinds: ['gate', 'command', 'observation'] },
+      }),
+      withEvidence(['gate', 'command']),
+      normalizer,
+    );
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/evidence/);
+    expect(problems[0]).toMatch(/observation/);
+  });
+
+  it('catches it under `subset` too — the weaker claim still requires presence', () => {
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'subset', kinds: ['gate', 'observation'] } }),
+      withEvidence(['gate', 'command']),
+      normalizer,
+    );
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/observation/);
+  });
+
+  it('names the EXPECTED kinds and the OBSERVED kinds, so the reader can see the difference', () => {
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'exact', kinds: ['gate', 'http'] } }),
+      withEvidence(['gate', 'command']),
+      normalizer,
+    );
+
+    const message = problems.join('\n');
+    expect(message).toMatch(/expected/i);
+    expect(message).toMatch(/observed/i);
+    expect(message).toMatch(/http/);
+    expect(message).toMatch(/command/);
+  });
+});
+
+describe('an EXTRA evidence kind is where exact and subset differ', () => {
+  it('`exact` fails when the run produced a kind the fixture does not list', () => {
+    // The property `stderrContains` cannot express: story 6.2's merged fixtures pin the
+    // rendered Evidence lines as a PRESENCE check, so a run that starts producing an
+    // additional kind still passes there. Here it does not.
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'exact', kinds: ['gate'] } }),
+      withEvidence(['gate', 'provider']),
+      normalizer,
+    );
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/provider/);
+  });
+
+  it('`subset` PERMITS it, and that is the whole difference between the two', () => {
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'subset', kinds: ['gate'] } }),
+      withEvidence(['gate', 'provider']),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
+  });
+});
+
+describe('the degenerate cases, which are where a comparison goes quietly green', () => {
+  it('an `exact` empty expectation FAILS when the run produced evidence', () => {
+    // `exact` + `[]` is a real claim — "this run produced no evidence at all" — and this is
+    // it going red, which is why the schema allows it while refusing `subset` + `[]`.
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'exact', kinds: [] } }),
+      withEvidence(['gate']),
+      normalizer,
+    );
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/gate/);
+  });
+
+  it('an `exact` empty expectation passes when the run produced none', () => {
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'exact', kinds: [] } }),
+      withEvidence([]),
+      normalizer,
+    );
+
+    expect(problems).toEqual([]);
+  });
+
+  it('a run that produced NO EVIDENCE cannot satisfy a fixture that names kinds', () => {
+    // The vacuous pass, at the comparator rather than at load. A run whose evidence array is
+    // empty is precisely the regression this key was added to catch, so it must be loud.
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'subset', kinds: ['gate', 'command'] } }),
+      withEvidence([]),
+      normalizer,
+    );
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/gate/);
+    expect(problems[0]).toMatch(/command/);
+  });
+
+  it('a run that produced NO DOCUMENT cannot silently satisfy an evidence expectation', () => {
+    // An edge refusal writes no document at all. Without this arm the evidence branch would
+    // simply be skipped and the fixture would assert nothing about evidence while claiming to
+    // — the same "green for nothing" one level down.
+    const problems = compareOutcome(
+      expectation({
+        exitCode: 3,
+        outcome: { infraError: 'integrity' },
+        criteria: { assertion: 'subset', statuses: {} },
+        stderrContains: ['ERROR: the frozen contract does not match its fingerprint'],
+        evidence: { assertion: 'subset', kinds: ['gate'] },
+      }),
+      observation({
+        exitCode: 3,
+        document: null,
+        documentSource: 'none',
+        runDirectory: null,
+        stderr: 'ERROR: the frozen contract does not match its fingerprint',
+      }),
+      normalizer,
+    );
+
+    expect(problems.some((problem) => /evidence/.test(problem))).toBe(true);
+  });
+});
+
+describe('the failure message quotes kinds and NOTHING else', () => {
+  it('does not leak evidence contents into the problem text', () => {
+    // Spec Security: kinds are safe to print; request bodies, command output and provider
+    // payloads are not. A failure message that started quoting the evidence it compared would
+    // put un-redacted run content into CI logs.
+    const secret = 'authorization: Bearer sk-live-DEADBEEF';
+    const base = observation();
+    const observed = {
+      ...base,
+      document: {
+        ...base.document,
+        evidence: [
+          { kind: 'http', request: { url: 'http://127.0.0.1:1/x', headers: secret } },
+        ],
+      } as unknown as RunResultDocument,
+    };
+
+    const problems = compareOutcome(
+      expectation({ evidence: { assertion: 'exact', kinds: ['gate'] } }),
+      observed,
+      normalizer,
+    );
+
+    expect(problems).toHaveLength(1);
+    expect(problems.join('\n')).not.toContain('DEADBEEF');
+    expect(problems.join('\n')).not.toContain('Bearer');
+    expect(problems[0]).toMatch(/http/);
+  });
+});
