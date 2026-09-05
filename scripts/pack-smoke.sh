@@ -195,8 +195,27 @@ done
 # than 2.3MB, and the repository is public and MIT, so nothing is disclosed that a reader
 # cannot already fetch) — see DECISIONS.md D3. This check exists so that the day someone
 # decides otherwise, they change a stated expectation instead of discovering a surprise.
+# ⚠️ WHY THIS REPORTS AND DOES NOT FAIL — asked in review, and answered here because the
+# next reader will ask it too. Failing is the obvious move: AC2 says "no source", the
+# sourcemap embeds source, so make the check red. It is the wrong move for this branch.
+#
+# Whether the published package carries `sourcesContent` is an OWNER decision and is
+# already with the owner as a pending item — shipping is an owner-only gate here, and the
+# remedy is a one-line change to `tsup.config.ts` belonging to whoever takes that decision.
+# A documentation story is explicitly forbidden from changing build behaviour, so the two
+# options actually open are "report it" and "turn CI red on a question nobody has answered
+# yet". Red would block an epic on a decision that is not this branch's to take, and would
+# train people to ignore a red packaging check — the failure this whole file exists to
+# prevent.
+#
+# So it reports, but LOUDLY and as a deviation rather than as a neutral note: a reader of
+# the CI log must not be able to mistake this step for having certified AC2's phrasing.
 if printf '%s\n' "$tarball_listing" | grep -Fqx 'package/dist/cli.js.map'; then
-  echo "    note: dist/cli.js.map ships and embeds the TypeScript source (DECISIONS.md D3)"
+  echo "    !! KNOWN DEVIATION FROM AC2's LITERAL WORDING, PENDING AN OWNER DECISION:"
+  echo "       dist/cli.js.map ships and embeds sourcesContent for ~120 modules, so"
+  echo "       'no source ships' is FALSE of this package even though no src/ path is"
+  echo "       listed above. AC2's INTENT — a built artifact, not a checkout — holds."
+  echo "       Deliberate; see DECISIONS.md D3. This step does not certify that phrase."
 fi
 
 echo "==> npm publish --dry-run must be clean"
