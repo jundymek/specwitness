@@ -101,8 +101,24 @@ fi
 # nothing). Reading `package.json` would prove what we asked for; this proves what we got.
 echo "==> the tarball must contain the built CLI and templates ONLY"
 
+# ⚠️ THE LISTING IS READ ONCE, INTO A VARIABLE, AND EVERY CHECK BELOW GREPS THE VARIABLE.
+# This is not tidiness — it is a LINUX BUG FIX, and CI on ubuntu-latest is what found it
+# while macOS stayed green (run 33967685767).
+#
+# The checks below used to be `tar -tzf "$TARBALL" | grep -q …`. `grep -q` exits the
+# instant it matches, which closes the pipe; GNU tar then fails writing to it, prints
+# `tar: stdout: write error`, and `set -o pipefail` (line 11) makes the whole pipeline
+# non-zero — so a check REPORTED FAILURE ON A MATCH. The Linux job failed with
+# `ERROR: the tarball is missing dist/cli.js` while printing `package/dist/cli.js` two
+# lines below it. BSD tar on macOS exits quietly on SIGPIPE, so the same code passed
+# locally and in the macOS job: a guard that was wrong on one platform only.
+#
+# Reading once removes the early-exit pipe entirely, and incidentally replaces eight
+# invocations of tar with one.
+tarball_listing="$(tar -tzf "$TARBALL")"
+
 # Top-level entry of every path, deduped: `package/dist/cli.js` -> `dist`.
-actual_entries="$(tar -tzf "$TARBALL" | sed 's|^package/||' | cut -d/ -f1 | sort -u | grep -v '^$')"
+actual_entries="$(printf '%s\n' "$tarball_listing" | sed 's|^package/||' | cut -d/ -f1 | sort -u | grep -v '^$')"
 
 # `templates` and `dist` are the `files` field; the rest are npm's always-include set.
 allowed_entries='CHANGELOG.md
@@ -119,7 +135,7 @@ if [ -n "$unexpected" ]; then
   echo "$unexpected" | sed 's/^/         /' >&2
   echo "" >&2
   echo "       full tarball listing:" >&2
-  tar -tzf "$TARBALL" | sed 's/^/         /' >&2
+  printf '%s\n' "$tarball_listing" | sed 's/^/         /' >&2
   echo "HINT: check the 'files' field in package.json. fixtures/, tests/, docs/ and src/" >&2
   echo "      must never ship — fixtures/corpus/ in particular carries fixture apps and" >&2
   echo "      a second language's source." >&2
@@ -131,9 +147,9 @@ fi
 # widens the allow-list by accident still trips here, and the reader is told which
 # forbidden tree appeared rather than being handed a diff of directory names.
 for forbidden in src tests fixtures docs; do
-  if tar -tzf "$TARBALL" | grep -Eq "^package/${forbidden}/"; then
+  if printf '%s\n' "$tarball_listing" | grep -Eq "^package/${forbidden}/"; then
     echo "ERROR: tarball contains ${forbidden}/ — it must never ship" >&2
-    tar -tzf "$TARBALL" | grep -E "^package/${forbidden}/" | sed 's/^/         /' >&2
+    printf '%s\n' "$tarball_listing" | grep -E "^package/${forbidden}/" | sed 's/^/         /' >&2
     exit 1
   fi
 done
@@ -142,9 +158,9 @@ done
 # what must be ABSENT would pass an empty tarball — Epic 4 retro §2 observation 7: two
 # assertions that both ran against empty output and both passed.
 for required in dist/cli.js templates/config.yaml; do
-  if ! tar -tzf "$TARBALL" | grep -Fqx "package/${required}"; then
+  if ! printf '%s\n' "$tarball_listing" | grep -Fqx "package/${required}"; then
     echo "ERROR: the tarball is missing ${required}" >&2
-    tar -tzf "$TARBALL" | sed 's/^/         /' >&2
+    printf '%s\n' "$tarball_listing" | sed 's/^/         /' >&2
     exit 1
   fi
 done
@@ -156,7 +172,7 @@ done
 # than 2.3MB, and the repository is public and MIT, so nothing is disclosed that a reader
 # cannot already fetch) — see DECISIONS.md D3. This check exists so that the day someone
 # decides otherwise, they change a stated expectation instead of discovering a surprise.
-if tar -tzf "$TARBALL" | grep -Fqx 'package/dist/cli.js.map'; then
+if printf '%s\n' "$tarball_listing" | grep -Fqx 'package/dist/cli.js.map'; then
   echo "    note: dist/cli.js.map ships and embeds the TypeScript source (DECISIONS.md D3)"
 fi
 
