@@ -114,6 +114,7 @@ let writeBaselineFile;
 let writeSurvivorsFile;
 let reap = false;
 let browsersOnly = false;
+let exclusiveMachine = false;
 const ownedPgids = [];
 let waitSeconds = 0;
 let label = 'after the run';
@@ -157,6 +158,10 @@ for (let index = 0; index < argv.length; index += 1) {
     case '--browsers-only':
       browsersOnly = true;
       break;
+    // ⚠️ THE ONE CONDITION UNDER WHICH A BASELINE DIFF IS OWNERSHIP. See ownedGroups below.
+    case '--exclusive-machine':
+      exclusiveMachine = true;
+      break;
     // The tighter ownership bound, for a caller that KNOWS which groups it spawned.
     //
     // ⚠️ VALIDATED, because an unvalidated value flag swallows the next FLAG. A caller emitted
@@ -190,6 +195,13 @@ for (let index = 0; index < argv.length; index += 1) {
     default:
       usage(`ERROR: unknown argument ${flag}`);
   }
+}
+
+if (exclusiveMachine && baselineFile === undefined) {
+  usage(
+    'ERROR: --exclusive-machine needs --baseline: without one nothing is subtracted, so every ' +
+      'matching process would look new and be treated as this run\'s',
+  );
 }
 
 /* ── reading the listing ─────────────────────────────────────────────────────────────── */
@@ -582,7 +594,28 @@ function reapSurvivors() {
   // is now the sole authority to signal. The path heuristics remain, but only for DETECTION -
   // which is the split this script has been converging on all along, applied to the last place
   // that had it wrong.
-  const ownedGroups = new Set(ownedPgids);
+  // ⚠️ TWO WAYS TO OWN A GROUP, AND THE SECOND ONE NAMES ITS PRECONDITION.
+  //
+  // Two P1s on this branch pulled opposite ways. One: shared paths cannot authorise a kill,
+  // because a neighbour's Playwright uses the same `~/.cache/ms-playwright` and may touch the
+  // same workspace. The other: a detected survivor that is never reaped outlives the job,
+  // "indefinitely if the workflow is moved to a persistent runner".
+  //
+  // They resolve by naming the precondition rather than pretending a path proves ownership. IF
+  // THIS JOB OWNS THE WHOLE MACHINE AND THE MACHINE IS DISCARDED AFTERWARDS, then "appeared
+  // after the baseline" IS run-specific: nothing else could have started it. True of a
+  // GitHub-hosted runner, false of a laptop or a self-hosted one — so the caller must ASSERT it
+  // (`--exclusive-machine`, which the workflow passes only when RUNNER_ENVIRONMENT is
+  // github-hosted). Absent that assertion, only a caller-supplied pgid authorises a signal.
+  const ownedGroups = new Set(
+    exclusiveMachine ? survivors.map((row) => row.pgid) : ownedPgids,
+  );
+  if (exclusiveMachine) {
+    lines.push(
+      '    ownership: --exclusive-machine — every survivor appeared after the baseline on a ' +
+        'machine this job owns exclusively',
+    );
+  }
 
   const signallable = [];
   for (const pgid of groups) {
@@ -601,7 +634,7 @@ function reapSurvivors() {
     // runner has not, the runner is a survivor whose argv names no registry path — so registry
     // ownership is empty, reaping was refused, and the check left behind exactly the process it
     // was cleaning up. The caller knows more than the heuristic.
-    if (!ownedGroups.has(pgid)) {
+    if (!ownedGroups.has(pgid) && !ownedPgids.includes(pgid)) {
       lines.push(
         `    NOT reaped, reported only: process group ${pgid} was not claimed by the caller ` +
           '(--owned-pgid). A shared browsers registry or workspace path is not proof of ' +

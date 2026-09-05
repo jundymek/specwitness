@@ -808,6 +808,65 @@ describe('the browser leak check', () => {
     expect(stdout).not.toContain('would signal process group');
   });
 
+  /**
+   * ⚠️ **THE ONE CONDITION UNDER WHICH A BASELINE DIFF *IS* OWNERSHIP.**
+   *
+   * Two P1s on this branch pulled in opposite directions: one established that shared paths
+   * (`~/.cache/ms-playwright`, the workspace) cannot authorise a kill, because a neighbour's
+   * Playwright uses the same ones; the other established that a detected survivor which is never
+   * reaped can outlive the job — *"indefinitely if the workflow is moved to a persistent
+   * runner"*.
+   *
+   * Both are right, and they resolve by naming the precondition instead of pretending a path
+   * proves ownership. **If this job owns the entire machine and the machine is discarded
+   * afterwards, then "appeared after the baseline" IS run-specific** — nothing else can have
+   * started it. That is true of a GitHub-hosted runner and false of a developer laptop or a
+   * self-hosted runner, so it is an explicit flag the caller must assert, not an inference.
+   *
+   * `RUNNER_ENVIRONMENT=github-hosted` is what the workflow checks before passing it. On a
+   * persistent runner the flag is absent and the check reports without reaping — which is the
+   * conservative half, kept.
+   */
+  it('reaps a baseline-diff survivor only when the caller asserts an exclusive machine', async () => {
+    const dir = await scratch();
+    const baselinePath = join(dir, 'baseline.txt');
+    const before = await listing('   1000     900    1000       10:00 /usr/bin/node idle.js');
+    await run(['--ps-file', before, '--browsers-path', BROWSERS_PATH, '--write-baseline', baselinePath]);
+
+    const after = await listing(
+      '   1000     900    1000       10:30 /usr/bin/node idle.js',
+      `   7700    7000    7700       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const withoutFlag = await run([
+      '--ps-file', after, '--browsers-path', BROWSERS_PATH, '--baseline', baselinePath, '--reap',
+    ]);
+    expect(withoutFlag.exitCode).toBe(1);
+    expect(withoutFlag.stdout).toContain('not claimed by the caller');
+    expect(withoutFlag.stdout).not.toContain('would signal process group 7700');
+
+    const withFlag = await run([
+      '--ps-file', after, '--browsers-path', BROWSERS_PATH, '--baseline', baselinePath, '--reap',
+      '--exclusive-machine',
+    ]);
+    expect(withFlag.exitCode).toBe(1);
+    expect(withFlag.stdout).toContain('would signal process group 7700');
+  });
+
+  /** The flag is meaningless without a baseline: with nothing subtracted, everything looks new. */
+  it('refuses --exclusive-machine without a baseline to diff against', async () => {
+    const psFile = await listing(
+      `   7700    7000    7700       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stderr } = await run([
+      '--ps-file', psFile, '--browsers-path', BROWSERS_PATH, '--reap', '--exclusive-machine',
+    ]);
+
+    expect(exitCode).toBe(64);
+    expect(stderr).toContain('--exclusive-machine');
+  });
+
   it('reaps nothing, and says so, when nothing survived', async () => {
     const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
 

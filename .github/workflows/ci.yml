@@ -364,11 +364,26 @@ jobs:
         # visible report the operator can act on is strictly better than this job killing
         # something it cannot prove is its own. The cancelled-run check below DOES reap, because
         # it spawns the groups itself and passes their pgids explicitly.
+        #
+        # `--exclusive-machine` is what lets this step reap without knowing the suites' pgids, and
+        # it is guarded rather than assumed. On a GitHub-hosted runner the job owns the whole VM
+        # and the VM is destroyed afterwards, so "appeared after the baseline" really is
+        # run-specific — nothing else could have started it. On a self-hosted or persistent
+        # runner that is false, `RUNNER_ENVIRONMENT` is not `github-hosted`, the flag is not
+        # passed, and this step reports without reaping. Naming the precondition is what makes
+        # both review findings satisfiable at once.
         run: |
+          exclusive=""
+          if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+            exclusive="--exclusive-machine"
+          else
+            echo "RUNNER_ENVIRONMENT=${RUNNER_ENVIRONMENT:-unset} is not github-hosted; reporting without reaping"
+          fi
           node scripts/browser-leak-check.mjs \
             --browsers-path "$HOME/.cache/ms-playwright" \
             --baseline "$RUNNER_TEMP/browser-baseline.txt" \
             --wait-seconds 30 \
+            --reap ${exclusive} \
             --label "after the suites finished normally"
 
       - name: No browser process survived a CANCELLED run (AC4, SIGKILL)

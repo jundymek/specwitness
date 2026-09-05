@@ -78,6 +78,19 @@ work="$(mktemp -d)"
 # script acquiring the authority to kill processes it cannot prove are its own.
 baseline="${BASELINE_FILE:-${work}/baseline.txt}"
 
+# ⚠️ TWO BASELINES, BECAUSE THEY ANSWER TWO DIFFERENT QUESTIONS.
+#
+# Raised as a P2 immediately after the inheritance above was added, and it is a direct
+# consequence of it: if a survivor from the NORMAL suite run is outside the inherited baseline,
+# the LAUNCH PREDICATE sees it and concludes "a browser is up" before this check has started one.
+# It would then SIGKILL the new runner before any browser existed and, if the old survivor
+# happened to exit, finish cleanly having tested nothing. The inheritance that keeps a leak
+# visible would have made the cancellation check vacuous.
+#
+#   baseline         inherited in CI  -> the final leak REPORT, so earlier leaks stay visible
+#   launch_baseline  always fresh     -> "did THIS run launch a browser?", about this run only
+launch_baseline="${work}/launch-baseline.txt"
+
 leak_check_args=(scripts/browser-leak-check.mjs)
 if [ -n "${BROWSERS_PATH}" ]; then
   leak_check_args+=(--browsers-path "${BROWSERS_PATH}")
@@ -87,8 +100,15 @@ fi
 # only the groups it spared itself, passed explicitly as --owned-pgid below.
 
 echo "==> [1/5] recording what is already running"
+node "${leak_check_args[@]}" --write-baseline "${launch_baseline}" \
+  --label "fresh baseline for the launch predicate" >/dev/null || {
+  echo "ERROR: could not record the launch baseline; this check cannot tell a new browser from an old one" >&2
+  exit 3
+}
+
 if [ -n "${BASELINE_FILE:-}" ] && [ -s "${BASELINE_FILE}" ]; then
   echo "    inheriting the job baseline from ${BASELINE_FILE} - anything the suites leaked stays visible"
+  echo "    and a separate fresh baseline for the launch predicate, so an earlier leak cannot fake a launch"
 else
   node "${leak_check_args[@]}" --write-baseline "${baseline}" --label "before the cancelled run" || {
     echo "ERROR: could not record a baseline; the cancelled-run check cannot interpret anything without one" >&2
@@ -197,7 +217,7 @@ trap cleanup EXIT INT TERM
 launched=no
 deadline=$((SECONDS + LAUNCH_TIMEOUT_SECONDS))
 while [ ${SECONDS} -lt ${deadline} ]; do
-  node "${leak_check_args[@]}" --baseline "${baseline}" --browsers-only \
+  node "${leak_check_args[@]}" --baseline "${launch_baseline}" --browsers-only \
     --label "waiting for a real browser" >/dev/null 2>&1
   probe=$?
   if [ ${probe} -eq 1 ]; then
