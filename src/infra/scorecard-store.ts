@@ -294,10 +294,30 @@ export class ScorecardStore {
 }
 
 /**
- * Reports through a caller-supplied `warn`, and swallows a throw from it.
+ * Reports through a caller-supplied `warn`, and swallows a SYNCHRONOUS throw from it.
  *
- * ⚠️ THE INNER BOUNDARY THAT MAKES `appendRecord`'s PROMISE TRUE, and it was a P2 from the
- * codex review of this story before it existed. `warn` is bound at the CLI edge to
+ * ⚠️ READ THE LIMIT BEFORE TRUSTING THIS. It contains a synchronous throw and nothing
+ * else. It CANNOT contain an asynchronous stream error — and on the most likely route,
+ * a closed stderr, that is exactly what arrives: `process.stderr.write` on a broken pipe
+ * surfaces `EPIPE` as an `'error'` EVENT on the stream, after this function has already
+ * returned. An earlier version of this comment claimed the boundary made
+ * `appendRecord`'s promise true outright. It does not, and the codex review of this
+ * branch was right to say so.
+ *
+ * MEASURED, not reasoned about (round 6, story 6.5). With the report piped to a consumer
+ * that exits after one line: one stderr line exits 0; TWO stderr lines exit 1; and piping
+ * stdout alone while discarding stderr exits 0. So the fatal event is the second write to
+ * a closed pipe, delivered asynchronously, and no `try`/`catch` anywhere can catch it.
+ *
+ * THE REMEDY IS NOT HERE. It is a one-time `'error'` listener on the process's own
+ * standard streams, which is process-global state at the CLI edge, owned by no Epic 6
+ * story, and it would change behaviour for every other warning this product prints. It
+ * is reported with its reproduction in this story's PR body and Dev Agent Record rather
+ * than fixed from a scorecard module. What this function still buys is real and worth
+ * keeping: a `warn` that throws synchronously — an injected one, a future edge that
+ * validates its argument — cannot escape `appendRecord`.
+ *
+ * It was itself a P2 from an earlier round of the same review, before it existed. `warn` is bound at the CLI edge to
  * `printWarning`, which writes to `process.stderr` — and `specwitness verify | head -1`
  * destroys that stream. Without this, an EPIPE from the WARNING escaped `appendRecord`,
  * reached `main.ts` and became exit 3: a completed verification reported as a broken
