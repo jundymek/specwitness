@@ -285,10 +285,13 @@ never `0%` and never `NaN`, because "we measured and found none" and "there was 
 measure" are different answers. The north star is a **count**, not a rate: it carries
 `count`, `ofAttributed` and `ofAllFindings` rather than a percentage.
 
-The summary also reports two honesty counters: `runsWithTruncatedFindingIds` (runs with
-more findings than the record lists individually, so those cannot be attributed by id) and
-`orphanedAttributions` (attributions naming a finding no record lists — reported, and
-excluded from every metric). **An unattributed finding is never counted as `unique`.**
+The summary also reports honesty counters under `findings`, so a denominator can never
+shrink silently: `runsWithTruncatedFindingIds` (runs with more findings than the record
+lists individually), `runsWithUnreadableStoredResult` (of those, the ones whose uncapped
+list could not be read, so some findings cannot be attributed by id), `orphanedAttributions`
+(attributions naming a finding no record lists — reported, and excluded from every metric),
+and `enumerated` (findings named by id, as against `total`). **An unattributed finding is
+never counted as `unique`.**
 
 Attributions are append-only, and re-attributing is allowed — people change their minds, so
 a correction is a later line and the last record wins. `scorecard` adjudicates nothing: it
@@ -461,9 +464,18 @@ nothing.
 > that never had `node_modules`. Until it is filled, make the install your **first gate**
 > instead — gates genuinely execute.
 
-**Every command in this file is a security boundary.** Only commands declared here are ever
-executed: a provider can never name an executable and can never produce a shell string, so
-the set of programs SpecWitness can run is exactly the set you committed here.
+**Every command in this file is a security boundary** — for the commands SpecWitness runs
+*on your project's behalf*. Gates, service start-up, data commands, observations and shell
+probes come only from this file; a provider can never name one of those executables and can
+never produce a shell string.
+
+**That is not the same as "the only programs SpecWitness ever runs".** It also runs a small,
+fixed set of its own tools, which are hard-coded rather than configured and are therefore
+not in this file: **`git`** (`src/infra/vcs.ts:495`) for worktrees and ref resolution;
+**`claude`** or **`codex`** (`src/providers/*.ts`) when you assign an AI role — the config
+names an *adapter*, and the adapter supplies the binary name; and the Playwright browser
+binaries if you use browser probes. Reviewing this file enumerates what SpecWitness runs
+*from your project*, not the toolchain it runs as itself.
 
 **A provider *can* choose the arguments** to one of those commands, when it compiles the
 plan. Arguments are checked against an allowlist twice, but on an AI-compiled plan the same
@@ -568,17 +580,24 @@ by the corpus suite, which runs every fixture with a constructed environment who
 points inside a throwaway directory, so a credential store is not merely unread but
 unreachable.
 
-**Only config-declared commands are executed, and nothing reaches a shell at all.**
-Provider output cannot introduce a command. The type system carries this: a raw string
-becomes an executable `DeclaredCommand` at exactly one point, inside the config schema, and
-a test scans for any other route. Child processes are spawned as
+**Nothing reaches a shell at all, and every command run against your project comes from
+your config.** Provider output cannot introduce a command. The type system carries this: a
+raw string becomes an executable `DeclaredCommand` at exactly one point, inside the config
+schema, and a test scans for any other route. Child processes are spawned as
 `ProcessRunner.run(binary, args)` with no shell in the path, so shell metacharacters in any
 untrusted string arrive as literal argv text rather than as syntax.
-**The limit of this promise:** a provider that compiles a plan chooses the *arguments* to
-your declared commands, and on an AI-compiled plan it also writes the allowlist those
-arguments are checked against. Review and commit your plan, or verify with `--no-ai`. The
-[integration guide](docs/harness-integration.md#4-allowlisting-the-command) states the
-boundary exactly.
+
+**Two limits on that promise, both stated because the short version misleads:**
+
+- **SpecWitness also runs its own fixed toolchain**, which is hard-coded and not in your
+  config: `git`, the `claude`/`codex` binary behind a configured AI role, and the
+  Playwright browser binaries if you use browser probes. Your config governs what runs
+  *from your project* — not what SpecWitness is built out of.
+- **A provider that compiles a plan chooses the *arguments*** to your declared commands,
+  and on an AI-compiled plan it also writes the allowlist those arguments are checked
+  against. Review and commit your plan, or verify with `--no-ai`. The
+  [integration guide](docs/harness-integration.md#4-allowlisting-the-command) states this
+  boundary exactly.
 
 **Local-first — and here is the exact boundary, because the short version is misleading.**
 

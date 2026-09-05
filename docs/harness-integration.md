@@ -177,8 +177,16 @@ What a provider can **never** do: name an executable, or produce a shell string.
 cannot express a command at all — a probe carries a `commandId` referring to a command
 declared in `.specwitness/config.yaml`, and the path from a declared command to a child
 process is `ProcessRunner.run(binary, args)` with no shell anywhere in it, so `;` and
-`$(…)` arrive at the child as literal argv text. **The set of executables that can run is
-exactly the set a human committed to the config.**
+`$(…)` arrive at the child as literal argv text. **The set of executables that can run
+against your project is exactly the set a human committed to the config** — gates,
+services, data commands, observations and shell probes.
+
+**SpecWitness also runs its own fixed toolchain, which your config does not list:** `git`
+(`src/infra/vcs.ts:495`), the `claude`/`codex` binary behind a configured AI role (the
+config names an *adapter*; the adapter supplies the binary), and the Playwright browser
+binaries if you use browser probes. Those are hard-coded, not provider-chosen — but a
+reader auditing this grant should know that reviewing `config.yaml` enumerates what runs
+*from the project*, not everything the process spawns.
 
 What a provider **can** do: **choose the arguments** to one of those commands. A compiled
 plan's shell and observation probes carry `mechanics.args`, and `src/surfaces/shell.ts:35`
