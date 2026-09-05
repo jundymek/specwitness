@@ -575,6 +575,76 @@ describe('authoritative finding ids close the add/summary gap', () => {
   });
 });
 
+describe('a stored result that cannot be read is REPORTED, not silently narrowed', () => {
+  /**
+   * A finding of the auto-review over this branch's final head, and the last shape of the
+   * truncation problem. When an authoritative list is unavailable the summary falls back
+   * to the capped one — and an attribution `scorecard add` legitimately accepted earlier,
+   * while the result WAS readable, silently becomes an orphan. That undercounts the north
+   * star with nothing on screen to say so: the silently-shrinking-denominator failure
+   * ADR-008 section 5 exists to prevent, arriving by a different route.
+   */
+  const truncatedRun = (): ScorecardRecord => {
+    const base = run({
+      id: 'run-20260904T120009Z-r009',
+      outcome: { verdict: 'FAIL' },
+      durationMs: 1000,
+      providerInvocations: 0,
+      fail: ['E6-01'],
+      truncated: true,
+    });
+    return { ...base, criteria: { ...base.criteria, total: 300, fail: 300 } };
+  };
+
+  it('counts a truncated run whose authoritative list is missing', () => {
+    const summary = summarizeScorecard(
+      input({ scorecard: { records: [truncatedRun()], skipped: [] } }),
+    );
+
+    expect(summary.findings.runsWithTruncatedFindingIds).toBe(1);
+    expect(summary.findings.runsWithUnreadableStoredResult).toBe(1);
+  });
+
+  it('counts zero unrecoverable when the authoritative list WAS supplied', () => {
+    const summary = summarizeScorecard({
+      scorecard: { records: [truncatedRun()], skipped: [] },
+      attributions: { records: [], skipped: [] },
+      authoritativeFindingIds: new Map([
+        ['run-20260904T120009Z-r009', new Set(['E6-01', 'E6-250'])],
+      ]),
+    });
+
+    expect(summary.findings.runsWithTruncatedFindingIds).toBe(1);
+    expect(summary.findings.runsWithUnreadableStoredResult).toBe(0);
+  });
+
+  it('does not claim findings are unattributable when the list WAS recovered', () => {
+    // The warning became false the moment the recovery path worked — false guidance in
+    // exactly the case where the feature had just succeeded.
+    const text = renderScorecardSummaryTerminal(
+      summarizeScorecard({
+        scorecard: { records: [truncatedRun()], skipped: [] },
+        attributions: { records: [], skipped: [] },
+        authoritativeFindingIds: new Map([
+          ['run-20260904T120009Z-r009', new Set(['E6-01', 'E6-250'])],
+        ]),
+      }),
+    );
+
+    expect(text).toMatch(/recovered from the run/i);
+    expect(text).not.toMatch(/cannot be attributed by id/i);
+  });
+
+  it('DOES say so when the list could not be recovered', () => {
+    const text = renderScorecardSummaryTerminal(
+      summarizeScorecard(input({ scorecard: { records: [truncatedRun()], skipped: [] } })),
+    );
+
+    expect(text).toMatch(/cannot be attributed by id/i);
+    expect(text).not.toMatch(/recovered from the run/i);
+  });
+});
+
 describe('an attribution that joins to no finding is reported, never counted', () => {
   it('excludes an orphan from the metrics and surfaces it as its own number', () => {
     // An attribution whose run is missing from the scorecard (its line was skipped, or
@@ -663,6 +733,7 @@ describe('--json and the terminal view carry the same facts (AD-11)', () => {
       ['Findings attributed', summary.findings.attributed],
       ['Unattributed', summary.findings.unattributed],
       ['Runs with a cut list', summary.findings.runsWithTruncatedFindingIds],
+      ['...list unrecoverable', summary.findings.runsWithUnreadableStoredResult],
       ['Orphaned attributions', summary.findings.orphanedAttributions],
       ['unique', summary.attributionCounts.unique],
       ['duplicate', summary.attributionCounts.duplicate],
@@ -705,6 +776,7 @@ describe('--json and the terminal view carry the same facts (AD-11)', () => {
       'findings.attributed',
       'findings.unattributed',
       'findings.runsWithTruncatedFindingIds',
+      'findings.runsWithUnreadableStoredResult',
       'findings.orphanedAttributions',
       'attributionCounts.unique',
       'attributionCounts.duplicate',

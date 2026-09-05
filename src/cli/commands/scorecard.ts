@@ -174,7 +174,24 @@ export function register(program: Command): void {
  */
 async function assertInitialised(projectRoot: string): Promise<void> {
   const specwitnessDir = dirname(new ScorecardStore(projectRoot).path);
-  const found = await stat(specwitnessDir).catch(() => undefined);
+
+  let found;
+  try {
+    found = await stat(specwitnessDir);
+  } catch (cause) {
+    // ⚠️ ONLY ENOENT MEANS "NOT INITIALISED", and conflating the two was a finding of the
+    // auto-review over this branch's final head. A `stat` that fails with EACCES or EIO
+    // says nothing about whether the project is initialised — reporting "run
+    // 'specwitness init'" then gives an incorrect diagnosis AND points the operator at a
+    // mutation that will not help and may not be what they want.
+    if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new InfraError(
+        `the SpecWitness directory could not be read: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `check that ${specwitnessDir} is readable, then run the command again`,
+      );
+    }
+    found = undefined;
+  }
 
   if (found === undefined || !found.isDirectory()) {
     throw new InfraError(

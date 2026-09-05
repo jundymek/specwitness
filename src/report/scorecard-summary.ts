@@ -183,6 +183,22 @@ export interface FindingCounts {
   /** Runs whose id list was cut. A cut list must never be read as a complete one. */
   readonly runsWithTruncatedFindingIds: number;
   /**
+   * Truncated runs whose UNCAPPED list could not be supplied — no stored result, or one
+   * that could not be read.
+   *
+   * ⚠️ REPORTED BECAUSE THE FALLBACK IS SILENT OTHERWISE, and that was a finding of the
+   * auto-review over this branch's final head. When an authoritative list is missing the
+   * summary falls back to the capped one, and attributions beyond the cap — which
+   * `scorecard add` may legitimately have accepted earlier, when the result WAS readable —
+   * become orphans. That undercounts `uniqueDefects` with nothing on screen to say so,
+   * which is the silently-shrinking-denominator failure ADR-008 §5 exists to prevent,
+   * arriving by a different route.
+   *
+   * Zero on every ordinary project: it can only be non-zero for a run with more than 200
+   * findings whose `result.json` is missing or unreadable.
+   */
+  readonly runsWithUnreadableStoredResult: number;
+  /**
    * Attributions naming a `(runId, criterionId)` that no record enumerates.
    *
    * Reported, never counted. Including one would add to a numerator whose denominator it
@@ -318,6 +334,7 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
   let findingsTotal = 0;
   let findingsEnumerated = 0;
   let truncatedRuns = 0;
+  let unreadableStoredResults = 0;
   const durations: number[] = [];
 
   /**
@@ -365,6 +382,11 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
 
     if (record.findingCriterionIdsTruncated) {
       truncatedRuns += 1;
+      // A truncated run with no authoritative list is one whose full finding set this
+      // summary cannot see. Counted rather than silently narrowed.
+      if (input.authoritativeFindingIds?.has(record.runId) !== true) {
+        unreadableStoredResults += 1;
+      }
     }
 
     // The record's own ids, WIDENED by the authoritative list when the record truncated
@@ -435,6 +457,7 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
       attributed,
       unattributed,
       runsWithTruncatedFindingIds: truncatedRuns,
+      runsWithUnreadableStoredResult: unreadableStoredResults,
       orphanedAttributions,
     },
     attributionCounts,
@@ -620,13 +643,31 @@ export function renderScorecardSummaryTerminal(summary: ScorecardSummary): strin
   lines.push(`    Findings named by id:  ${findings.enumerated}`);
   lines.push(`    Findings attributed:   ${findings.attributed}`);
   lines.push(`    Runs with a cut list:  ${findings.runsWithTruncatedFindingIds}`);
+  lines.push(`    ...list unrecoverable:  ${findings.runsWithUnreadableStoredResult}`);
   lines.push(`    Orphaned attributions: ${findings.orphanedAttributions}`);
 
+  // ⚠️ THE WORDING IS CONDITIONAL BECAUSE THE BEHAVIOUR IS. An earlier version said flatly
+  // that truncated findings "cannot be attributed by id" — which became FALSE the moment
+  // the authoritative-list path recovered them, giving operators false guidance in exactly
+  // the case where the feature had just worked. Flagged by the auto-review over this
+  // branch's final head.
   if (findings.runsWithTruncatedFindingIds > 0) {
-    lines.push(
-      `    ⚠ ${findings.runsWithTruncatedFindingIds} run(s) had more findings than the record ` +
-        `names individually — those cannot be attributed by id.`,
-    );
+    const recovered =
+      findings.runsWithTruncatedFindingIds - findings.runsWithUnreadableStoredResult;
+    if (recovered > 0) {
+      lines.push(
+        `    ⚠ ${recovered} run(s) had more findings than the record names individually; ` +
+          `their full list was recovered from the run's stored result.`,
+      );
+    }
+    if (findings.runsWithUnreadableStoredResult > 0) {
+      lines.push(
+        `    ⚠ ${findings.runsWithUnreadableStoredResult} run(s) had more findings than the ` +
+          `record names individually AND no readable stored result — findings beyond the ` +
+          `named ones cannot be attributed by id, and any existing attribution of one is ` +
+          `counted as orphaned above.`,
+      );
+    }
   }
 
   if (findings.orphanedAttributions > 0) {

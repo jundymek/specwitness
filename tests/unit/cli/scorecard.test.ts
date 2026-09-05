@@ -545,6 +545,24 @@ describe('an unreadable scorecard is infrastructure, not "report a SpecWitness b
     });
   });
 
+  it('does not report an UNREADABLE .specwitness as "not initialised"', async () => {
+    // A finding of the auto-review over this branch's final head. A `stat` that fails with
+    // EACCES says nothing about whether the project is initialised; answering "run
+    // 'specwitness init'" is both a wrong diagnosis and a push toward an unrelated
+    // mutation. Only ENOENT means "not initialised".
+    const root = await mkdtemp(join(tmpdir(), 'specwitness-unreadable-'));
+    roots.push(root);
+    await mkdir(join(root, '.specwitness'), { recursive: true });
+    await chmod(root, 0o000);
+
+    try {
+      await expect(runScorecardSummary(root, {})).rejects.toThrow(InfraError);
+      await expect(runScorecardSummary(root, {})).rejects.not.toThrow(/not initialised/);
+    } finally {
+      await chmod(root, 0o700);
+    }
+  });
+
   it('still treats an ABSENT scorecard as an empty one, not a failure', async () => {
     // The boundary: "recorded nothing yet" is a fact, not a fault.
     const root = await project([]);
