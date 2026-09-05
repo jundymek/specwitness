@@ -71,7 +71,20 @@ describe('the published package declares the surface story 6.7 documents', () =>
     // prerelease tags and multi-part identifiers are still rejected, because the point of
     // the assertion is that the version is one of the plan's TWO cases — a release or a
     // `next` candidate — rather than something nobody has a publishing rule for.
-    expect((await manifest()).version).toMatch(/^\d+\.\d+\.\d+(-next\.\d+)?$/);
+    // Each numeric component is `0|[1-9]\d*`, not `\d+`. Semver forbids leading zeroes,
+    // so `01.2.3`, `1.02.3` and `1.2.3-next.01` are not versions at all — and a plain
+    // `\d+` accepted every one of them, which Codex review caught as a P2 on this branch.
+    // That mattered for the same reason the Playwright assertion above did: the comment
+    // claims "the plan's two shapes and no more", and a guard that admits a string the
+    // plan cannot produce is a guard whose stated purpose and behaviour disagree. The
+    // practical cost is a release branch passing this step and failing later at pack or
+    // publish time, which is exactly the "release process that cannot execute itself"
+    // failure this file already exists to prevent.
+    const SEMVER_COMPONENT = String.raw`(?:0|[1-9]\d*)`;
+    const PLAN_VERSION = new RegExp(
+      `^${SEMVER_COMPONENT}\\.${SEMVER_COMPONENT}\\.${SEMVER_COMPONENT}(?:-next\\.${SEMVER_COMPONENT})?$`,
+    );
+    expect((await manifest()).version).toMatch(PLAN_VERSION);
   });
 });
 
