@@ -58,6 +58,29 @@ if [ "$help_rc" -ne 0 ]; then
   exit 1
 fi
 
+# ⚠️ AND AGAIN THROUGH `npx`, WHICH IS THE INVOCATION EVERYTHING ACTUALLY PROMISES.
+# Epic 1's exit criterion and story 6.7's AC2 both say "`npx specwitness --help` works from
+# a packed tarball", and the README and integration guide tell readers to run exactly that.
+# The check above runs `node_modules/.bin/specwitness` directly, which proves the bin
+# mapping, the shebang and the executable bit — but it BYPASSES npm's own command
+# resolution, so a failure specific to the documented invocation would pass CI. Codex review
+# raised that as a P2 on this branch and it is a fair reading of the AC.
+#
+# `--no-install` is load-bearing: without it, a resolution failure sends npx to the registry
+# to fetch `specwitness`, which would either test a published package (there is none) or
+# hang. With it, npx must resolve the LOCAL install or fail — which is the property under
+# test. `--yes` is deliberately not passed for the same reason.
+echo "==> npx specwitness --help must exit 0 (the documented invocation)"
+set +e
+npx --no-install specwitness --help >/dev/null 2>&1
+npx_rc=$?
+set -e
+if [ "$npx_rc" -ne 0 ]; then
+  echo "ERROR: 'npx specwitness --help' exited $npx_rc from the packed install, expected 0" >&2
+  echo "HINT: the bin path works but npx cannot resolve it — check the bin mapping name" >&2
+  exit 1
+fi
+
 echo "==> exit codes 64 and 3 must survive packaging"
 # The 3 case used to rely on `init` being an unimplemented stub. Story 1.4
 # implemented it, so this now asserts something better and permanent: the

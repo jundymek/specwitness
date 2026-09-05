@@ -297,15 +297,41 @@ What a consumer can rely on:
 | `finishedAt` | When the run completed. Present on any run that persisted a result. |
 | `runId` | `run-<YYYYMMDDTHHmmssZ>-<4 chars>` — the compact UTC timestamp of the run, plus a suffix for uniqueness. |
 
-**`runId` sorts chronologically as a plain string.** `report <epic>` relies on exactly
-this: "latest" is a descending string sort over run ids with no date parsing anywhere. A
-harness can do the same.
+**`runId` sorts chronologically as a plain string — to one-second resolution, and no
+further.** The id is `run-<YYYYMMDDTHHmmssZ>-<4 base36>`: the timestamp is truncated to
+whole seconds and the four trailing characters are **random**, not a counter. So a string
+sort orders runs correctly whenever they are more than a second apart, and **orders two
+runs from the same second arbitrarily.**
 
-**Freshness against a commit.** If your flow compares a verification's age to the branch it
-verified — the pattern the first-client harness uses for its own status files — compare
-`finishedAt` to the commit timestamp of `headSha`, both of which the run document records.
-Do not use the run directory's mtime: `clean` may touch run directories, and a rerun does
-not modify an earlier run's files.
+`report <epic>` resolves "latest" with exactly this sort, so the limitation is the
+product's and not only a harness's: **two runs started in the same second can be reported
+in either order.** In practice a verification run takes far longer than a second, so this
+needs deliberate concurrency to hit — but a harness that fires runs in parallel, or a test
+that seeds fixtures in a loop, is exactly where it would appear. If you need a total
+order, sort on `startedAt` from the run document rather than on the id.
+
+### ⚠️ Freshness: compare SHAs, not timestamps
+
+**To decide whether a stored run covers what you are about to merge, resolve the ref and
+compare its SHA to the run's `headSha`. Nothing else is safe.**
+
+```bash
+test "$(git rev-parse "$REF")" = "$(jq -r .headSha result.json)"
+```
+
+**Do not decide it from timestamps.** Comparing `finishedAt` against the commit timestamp
+of the head is the intuitive check and it is **wrong**: commit timestamps are not
+monotonic. A rebase, a cherry-pick, an amend or a force-push can put a *newer* head on an
+*older* committer date — and clocks on other people's machines are not yours. A run that
+verified different code then looks fresh, and **unverified code merges.** Timestamps are
+for reporting age to a human, never for deciding coverage.
+
+Do not use the run directory's mtime either: `clean` may touch run directories, and a
+rerun does not modify an earlier run's files.
+
+*(An earlier draft of this guide recommended the timestamp comparison. That was a defect
+in this document, caught in review, and it is called out here rather than quietly
+replaced — a harness that copied the old advice should change it.)*
 
 **A run that never finished has no `result.json`.** `report` answers such a run from the
 crash-recovery manifest instead, printing the run id, creation time, epic, whether it was

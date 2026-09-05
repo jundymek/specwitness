@@ -514,7 +514,10 @@ Listed because a README that describes an intended product is worse than none.
 
 - **No SaaS, cloud, accounts, billing, dashboards, hosted execution or browser farms.**
 - **No web UI.** The CLI is the whole product.
-- **No cloud telemetry.** Nothing leaves your machine; the scorecard is local.
+- **No cloud telemetry from SpecWitness itself.** It phones nothing home, and the
+  scorecard is local. **This is not the same as "nothing leaves your machine"** — see
+  [security properties](#security-properties): if you configure an AI role, SpecWitness
+  runs your `claude` or `codex` CLI, and *that* CLI sends prompt content to its provider.
 - **No GitHub App**, status checks, GitLab CI integration or MCP server.
 - **No ingestion of harness formats other than BMAD v6.**
 - **No differential BASE/HEAD execution.** Runs *record* base and head, but V0 executes
@@ -577,9 +580,28 @@ arguments are checked against. Review and commit your plan, or verify with `--no
 [integration guide](docs/harness-integration.md#4-allowlisting-the-command) states the
 boundary exactly.
 
-**Local-first.** No network calls, no telemetry, no phoning home. Browser probes talk to
-your own services; provisioning a browser is the one operation that downloads anything, and
-only if you use browser probes.
+**Local-first — and here is the exact boundary, because the short version is misleading.**
+
+**SpecWitness's own code** makes no network calls, sends no telemetry and phones nothing
+home. Browser probes talk to your own services; provisioning a browser is the only thing it
+downloads, and only if you use browser probes.
+
+> ### ⚠️ But configuring an AI role sends your specification to that provider's cloud
+>
+> SpecWitness authors contracts, plans, explanations and adaptations by running the
+> `claude` or `codex` CLI **as a subprocess**. Those CLIs are cloud-backed: the prompt —
+> which contains your epic specification, criterion statements, and for an explainer the
+> failure evidence — **goes to Anthropic's or OpenAI's service under your own account and
+> their data policies, not ours.**
+>
+> **"Nothing leaves your machine" is therefore false whenever an AI role is configured**,
+> and it would be a bad thing to believe if your specifications are confidential.
+>
+> What is true: **no AI role is configured by default**, and a run with a compiled plan
+> makes **zero provider calls** — `--no-ai` refuses to compile one, which is a guarantee
+> you can hold. So verification of an already-planned epic really is local; *authoring* is
+> not. Prompt content is redacted and bounded before it is sent, which reduces exposure but
+> does not change where it goes.
 
 **Verdicts are never delegated to a model.** Aggregation is a pure function over recorded
 results. A provider may draft a contract, compile a plan, or write a clearly-labelled
