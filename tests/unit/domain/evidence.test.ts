@@ -90,6 +90,71 @@ describe('redactText — AD-10, redaction at capture', () => {
     expect(redactText(raw)).toBe(raw);
   });
 
+  /**
+   * The vocabulary gained `pgpassword` and `pwd` after a measured gap (story 6.11's
+   * follow-up). THIS TEST IS THE HALF THAT MATTERS: a redaction change without a
+   * non-redaction test only proves that something was widened.
+   *
+   * Every name below reduces to a final segment that is NOT in the set, and each is a real
+   * variable somebody could plausibly have in captured output:
+   *
+   *   OLDPWD -> ['oldpwd']   (one segment — the `_` in MYSQL_PWD is what splits it)
+   *   PGHOST -> ['pghost']
+   *   CWD    -> ['cwd']
+   *   MONKEY -> ['monkey']   (the original counterexample, kept)
+   *
+   * If a future change makes any of these redact, the boundary rule has been loosened into
+   * substring matching and this test is the thing that says so.
+   */
+  it('does not swallow innocent names after the pgpassword/pwd additions', () => {
+    const raw = [
+      'OLDPWD=/home/dev/previous',
+      'PGHOST=127.0.0.1',
+      'CWD=/home/dev/project',
+      'MONKEY=banana',
+    ].join('\n');
+
+    expect(redactText(raw)).toBe(raw);
+  });
+
+  /**
+   * The positive half, in the absence-assertion idiom: the SECRET must be gone. Asserting
+   * that `[REDACTED]` is present is the weaker claim — output carrying the marker with the
+   * secret still beside it passes that check and fails this one.
+   *
+   * `PGPASSWORD` is the one that matters most: it is libpq's standard environment variable,
+   * so it is what somebody actually writes when a `data.reset` needs a Postgres password,
+   * and it passed through this redactor untouched until now.
+   */
+  it('redacts PGPASSWORD and MYSQL_PWD, which previously passed through', () => {
+    const raw = ['PGPASSWORD=s3cr3t-db-value', 'MYSQL_PWD=another-s3cr3t'].join('\n');
+
+    const redacted = redactText(raw);
+
+    expect(redacted).not.toContain('s3cr3t-db-value');
+    expect(redacted).not.toContain('another-s3cr3t');
+    // The NAME survives, so a reader can still see which variable was involved.
+    expect(redacted).toContain('PGPASSWORD=');
+    expect(redacted).toContain('MYSQL_PWD=');
+  });
+
+  /**
+   * A COLLISION, recorded deliberately rather than discovered later.
+   *
+   * `pwd` as a whole segment necessarily also matches bare `PWD`, the POSIX
+   * working-directory variable, which is not a credential. That is accepted, and it is
+   * closer to a small win than a cost: `PWD` holds an ABSOLUTE PATH, usually under the
+   * operator's home directory, and keeping absolute home paths out of persisted evidence is
+   * a requirement this project already has (AD-10).
+   *
+   * It is pinned so the behaviour is a decision somebody made, not a surprise somebody hits.
+   */
+  it('also redacts bare PWD, an accepted collision rather than an oversight', () => {
+    const redacted = redactText('PWD=/Users/dev/project');
+
+    expect(redacted).toBe('PWD=[REDACTED]');
+  });
+
   it('applies caller-supplied extra patterns, with or without the global flag', () => {
     const raw = 'internal-id=ACME-1234 and again ACME-1234';
 
