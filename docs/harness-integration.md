@@ -351,6 +351,53 @@ several versions should branch on `schemaVersion` and ignore keys it does not kn
 | **3** | *infra* | **No verdict was reached.** Environment or SpecWitness failed. | Fix and **rerun**. Never report as a failing epic. |
 | **64** | *usage* | Bad invocation — unknown flag, malformed epic id, missing argument. | Fix the command. |
 
+**The table above is true of a run whose output is read to the end.** There is one known
+way to get `1` out of a passing run, and because a harness is the thing most likely to hit
+it, it has its own section immediately below.
+
+> ### ⚠️ KNOWN DEFECT — a PASS can exit `1` when your reader closes the pipe early
+>
+> **This violates the exit-code contract, it is unfixed in `0.1.0`, and it is reachable
+> from a harness.** If you take one thing from this guide, take this and the `3` note below.
+>
+> **The shape.** Merge stderr into stdout and feed it to a reader that stops early —
+> `2>&1 | head -1`, `2>&1 | grep -q …` — and a run that passed can exit `1`.
+>
+> **The mechanism**, as measured by the author of story 6.5 who found it: the **second
+> write to a closed pipe** is fatal, whichever descriptor carries it. On stderr the `EPIPE`
+> arrives as an asynchronous `'error'` event, so no `try`/`catch` in the CLI can contain
+> it. It therefore needs *two* writes — typically a warning printed before the report, then
+> the report itself. Their measurement: with the pipe closing early, a run that printed a
+> warning from merged code before a passing report exited `1`; the same run unpiped exited
+> `0`. **Piping stdout alone, with stderr discarded, exited `0`** — a single write to a
+> not-yet-closed pipe cannot `EPIPE`.
+>
+> **It is not fixed because the remedy is a change to stdout error handling at the CLI edge
+> and a decision about the ADR-002 contract itself** — merged code that no Epic 6 story
+> owns. It was escalated rather than patched, on the principle that several agents fixing
+> one defect several different ways is worse than the defect.
+>
+> **What a harness should do — any one of these avoids it entirely:**
+>
+> 1. **Do not merge stderr into stdout.** Keep them separate; the guide already recommends
+>    it, because under `--json` stdout must carry the document alone.
+> 2. **Do not pipe our output into an early-closing reader.** Redirect to a file and read
+>    the file: `… --json > result.json 2> verify.log`. `head`, `grep -q` and `head -n1` are
+>    the readers that close early.
+> 3. **Prefer the persisted document.** `.specwitness/runs/<run-id>/result.json` is the
+>    same bytes and is not affected by any of this.
+> 4. **Treat exit `1` with no `criteria` reported as suspect** rather than as a verdict. A
+>    real `FAIL` always comes with a document naming what failed.
+>
+> **Honest limit on this note.** I documented this from story 6.5's recorded measurement
+> and its own corrected mechanism, and I cite it rather than claim it. **I did not
+> reproduce it myself:** five shapes I tried against `0.1.0` — `report --json` piped to
+> `head -c 20`, to `head -1`, the human report, `--help`, and all of those again with
+> `2>&1` — every one exited `0`. That is consistent with the measurement (those are single
+> writes, or the two writes land too close together), and it means the trigger is narrower
+> than "any pipe". Take the four rules above as cheap insurance, not as a sign that every
+> piped invocation is unsafe.
+
 > ### ⚠️ Do not treat `3` as a failing verdict.
 >
 > Exit `3` means the question was not answered. Reporting it as "the epic failed" invents

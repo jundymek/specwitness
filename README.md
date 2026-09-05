@@ -362,6 +362,22 @@ attribution is accepted with a warning rather than refused.
 | **3** | *infra* | **SpecWitness or the environment failed.** No verdict was reached. | Fix the environment and **rerun**. |
 | **64** | *usage* | The invocation was wrong — bad flag, bad epic id, missing argument. | Fix the command. |
 
+> ### ⚠️ Known defect: a PASS can exit `1` when your reader closes the pipe early
+>
+> The table above is true of a run whose output is read to the end. **Merge stderr into
+> stdout and feed it to something that stops early — `2>&1 | head -1`, `2>&1 | grep -q` —
+> and a passing run can exit `1`.** The second write to a closed pipe is fatal, and on
+> stderr it arrives asynchronously where no `try`/`catch` can contain it.
+>
+> **Unfixed in `0.1.0`**: the remedy is a change to error handling at the CLI edge and a
+> decision about the exit-code contract itself, so it was escalated rather than patched.
+>
+> **Avoid it by not merging the streams, and by redirecting to a file rather than piping
+> into `head` or `grep -q`.** If you are wiring this into a harness, read
+> [the integration guide's section on it](docs/harness-integration.md#exit-codes-the-contract-you-branch-on)
+> — it has the measurement, the four mitigations, and an honest note on what was and was
+> not reproduced.
+
 ### The one thing that must not be got wrong
 
 > ### ⚠️ **Exit 3 is NOT a failing verdict.**
