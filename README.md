@@ -446,8 +446,15 @@ nothing.
 > instead — gates genuinely execute.
 
 **Every command in this file is a security boundary.** Only commands declared here are ever
-executed. Nothing an AI provider returns can introduce a command, a flag or a shell string
-— if it is not written in your config, it does not run.
+executed: a provider can never name an executable and can never produce a shell string, so
+the set of programs SpecWitness can run is exactly the set you committed here.
+
+**A provider *can* choose the arguments** to one of those commands, when it compiles the
+plan. Arguments are checked against an allowlist twice, but on an AI-compiled plan the same
+provider wrote the allowlist. **That is why the quickstart tells you to review the plan and
+commit it, and why `--no-ai` exists** — see
+[the integration guide](docs/harness-integration.md#4-allowlisting-the-command) for the
+precise boundary.
 
 A retried probe that fails and then passes is reported as a **`PASS` marked flaky**, with
 every attempt and its evidence recorded. Retries change how often something is tried, never
@@ -542,9 +549,17 @@ by the corpus suite, which runs every fixture with a constructed environment who
 points inside a throwaway directory, so a credential store is not merely unread but
 unreachable.
 
-**Only config-declared commands reach a shell.** Provider output cannot introduce a
-command. The type system carries this: a raw string becomes an executable `DeclaredCommand`
-at exactly one point, inside the config schema, and a test scans for any other route.
+**Only config-declared commands are executed, and nothing reaches a shell at all.**
+Provider output cannot introduce a command. The type system carries this: a raw string
+becomes an executable `DeclaredCommand` at exactly one point, inside the config schema, and
+a test scans for any other route. Child processes are spawned as
+`ProcessRunner.run(binary, args)` with no shell in the path, so shell metacharacters in any
+untrusted string arrive as literal argv text rather than as syntax.
+**The limit of this promise:** a provider that compiles a plan chooses the *arguments* to
+your declared commands, and on an AI-compiled plan it also writes the allowlist those
+arguments are checked against. Review and commit your plan, or verify with `--no-ai`. The
+[integration guide](docs/harness-integration.md#4-allowlisting-the-command) states the
+boundary exactly.
 
 **Local-first.** No network calls, no telemetry, no phoning home. Browser probes talk to
 your own services; provisioning a browser is the one operation that downloads anything, and

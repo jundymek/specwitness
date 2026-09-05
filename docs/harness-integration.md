@@ -170,11 +170,35 @@ is broader than "run the verification", and it includes at least:
 It does **not** permit amending a frozen contract non-interactively: `contract --amend`
 requires a terminal and refuses without one (item 6).
 
-**The bound worth knowing:** SpecWitness executes *only* commands written in the project's
-own config file. Nothing an AI provider returns can introduce a command, a flag or a shell
-string. So the blast radius of this grant is exactly the set of commands a human committed
-to `.specwitness/config.yaml` — which is why that file is meant to be reviewed and
-committed like code.
+**The bound worth knowing, stated precisely — because the obvious version of this sentence
+is wrong.**
+
+What a provider can **never** do: name an executable, or produce a shell string. A plan
+cannot express a command at all — a probe carries a `commandId` referring to a command
+declared in `.specwitness/config.yaml`, and the path from a declared command to a child
+process is `ProcessRunner.run(binary, args)` with no shell anywhere in it, so `;` and
+`$(…)` arrive at the child as literal argv text. **The set of executables that can run is
+exactly the set a human committed to the config.**
+
+What a provider **can** do: **choose the arguments** to one of those commands. A compiled
+plan's shell and observation probes carry `mechanics.args`, and `src/surfaces/shell.ts:35`
+says so in as many words — *"a shell probe is the one place in the product where a
+provider-authored artifact chooses ARGUMENTS to a real command."* Those arguments are
+checked against an `argumentAllowlist` twice, at schema time and again immediately before
+spawning, by exact string equality (no prefix, glob or regex). But **when the plan is
+compiled by AI, the provider authors that allowlist as well as the arguments**, so the
+check does not bound the provider — it bounds later edits to the plan file.
+
+**So the honest blast radius is: the executables in your config, invoked with arguments
+that may not be in your config.** An argument can itself be a flag, and a flag can change
+what a command does.
+
+**The mitigation is the one the quickstart already prescribes, and this is the reason for
+it.** Compile the plan with `specwitness plan <epic>`, **read it**, and commit it — a plan
+is committed YAML precisely so a human can review it before it executes. Then verify with
+`--no-ai`, which refuses to compile a plan and so guarantees no provider is in scope at
+all. **A harness that runs `verify` with AI enabled against a project with no committed
+plan is executing argument lists nobody has reviewed.**
 
 If you want a narrower grant, allowlist the specific invocations you intend rather than
 widening to `Bash(*)`. Do not grant anything broader than the line above on SpecWitness's
