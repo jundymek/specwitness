@@ -886,6 +886,58 @@ describe('the browser leak check', () => {
     expect(stdout).not.toContain('would signal process group 6003');
   });
 
+  /**
+   * ⚠️ **THE SAME PREFIX BUG, IN THE SIBLING FUNCTION, FOUR LINES AWAY — AND I HAD JUST WRITTEN
+   * THE LESSON ABOUT IT INTO THE PR BODY.** Raised as a P1 by the Codex review of this branch.
+   *
+   * `--owned-under` was made separator-aware one round earlier. The REGISTRY ownership check was
+   * not, so `--browsers-path /cache/ms-playwright` still claimed anything under
+   * `/cache/ms-playwright-other` and authorised signalling its whole group — an unrelated browser
+   * or a concurrent Playwright run.
+   *
+   * Note what stays broad: DETECTION still matches by substring, because a browser helper that
+   * outlives its parent is the thing being hunted and over-reporting is free. Only OWNERSHIP —
+   * the permission to send a signal — requires the boundary. That is the same split every other
+   * fix on this branch made, applied to the one place that had been missed.
+   */
+  it('detects, but refuses to reap, a browser from a similarly-prefixed registry', async () => {
+    const psFile = await listing(
+      `   9300    9000    9300       00:05 ${BROWSERS_PATH}-other/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    // Detected and reported: over-reporting is free, and this is a browser.
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('9300');
+    // Never signalled: a prefix is not a path.
+    expect(stdout).toContain('not owned by this run');
+    expect(stdout).not.toContain('would signal process group 9300');
+  });
+
+  it('still reaps a browser from the registry itself', async () => {
+    const psFile = await listing(
+      `   9400    9000    9400       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      psFile,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--reap',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('would signal process group 9400');
+  });
+
   it('refuses an --owned-under that would claim the whole filesystem', async () => {
     const psFile = await listing('   1234    1000    1234       01:02 /usr/bin/node server.js');
 

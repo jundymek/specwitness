@@ -308,8 +308,31 @@ function isSelf(row) {
  * Everything the broad patterns catch — the operator's Chrome, an Electron app — is suspicious
  * enough to REPORT and never sufficient to SIGNAL. See `reapSurvivors`.
  */
-function isOwned(row) {
+/**
+ * DETECTION: does this look like it came from a browsers registry we were told about?
+ *
+ * Substring is right here and deliberately stays. Detection is broad on purpose — a browser
+ * helper that outlives its parent is the thing being hunted, and over-reporting costs nothing.
+ */
+function matchesRegistry(row) {
   return browsersPaths.some((path) => path !== '' && row.args.includes(path));
+}
+
+/**
+ * OWNERSHIP: may we send a SIGNAL to this process's group?
+ *
+ * ⚠️ A MUCH STRONGER CLAIM THAN DETECTION, AND IT NEEDS THE SEPARATOR. `--owned-under` was made
+ * separator-aware one review round earlier; this function was not, so
+ * `--browsers-path /cache/ms-playwright` still claimed anything under
+ * `/cache/ms-playwright-other` and authorised SIGKILLing its whole group — an unrelated browser,
+ * or somebody's concurrent Playwright run.
+ *
+ * Reported as a P1 on this branch, and it is the same prefix bug as the `--owned-under` one, in
+ * the sibling function, four lines away. The lesson about repairing only the site that was
+ * reported was already written into this story's PR body when I repeated it here.
+ */
+function isOwned(row) {
+  return browsersPaths.some((path) => path !== '' && isUnder(row.args, path));
 }
 
 /**
@@ -331,7 +354,7 @@ function isBrowser(row) {
   if (isSelf(row)) {
     return false;
   }
-  if (isOwned(row)) {
+  if (matchesRegistry(row)) {
     return true;
   }
   if (BROWSER_PATTERNS.some((pattern) => pattern.test(row.args))) {
