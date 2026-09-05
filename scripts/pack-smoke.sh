@@ -80,11 +80,100 @@ if [ "$infra_rc" -ne 3 ]; then
   exit 1
 fi
 
-echo "==> the tarball must not ship sources or tests"
-if tar -tzf "$TARBALL" | grep -Eq '^package/(src|tests)/'; then
-  echo "ERROR: tarball contains src/ or tests/ — check the package.json files field" >&2
-  tar -tzf "$TARBALL" | grep -E '^package/(src|tests)/' >&2
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT THE TARBALL CONTAINS (story 6.7, AC2).
+#
+# ⚠️ THIS IS AN ALLOW-LIST, AND THAT REPLACED A DENY-LIST DELIBERATELY. Until story 6.7
+# this step grepped for `^package/(src|tests)/` — which passes any tree nobody thought to
+# name. `fixtures/` is exactly such a tree: it arrived in Epic 6, it carries fixture apps,
+# configs and (in the non-Node fixture) a second language's source, and the old deny-list
+# would have shipped every byte of it without a murmur. A packaging guard is only worth
+# what its DEFAULT is, so the default here is "refuse".
+#
+# The allow-list is `dist/` + `templates/` (the `files` field) plus the files npm includes
+# whatever `files` says: `package.json` always, and `README.md` / `LICENSE` / `LICENCE` /
+# `CHANGELOG.md` when they exist at the root. Those four are npm's rule, not ours — see
+# https://docs.npmjs.com/cli/configuring-npm/package-json#files — so listing them here is
+# describing npm's behaviour, not widening our surface.
+#
+# ⚠️ IT ASSERTS THE LISTED TARBALL, NOT THE `files` FIELD. The two disagree in ways only
+# packing reveals (`.npmignore`, npm's always-include rules, a `files` entry that matches
+# nothing). Reading `package.json` would prove what we asked for; this proves what we got.
+echo "==> the tarball must contain the built CLI and templates ONLY"
+
+# Top-level entry of every path, deduped: `package/dist/cli.js` -> `dist`.
+actual_entries="$(tar -tzf "$TARBALL" | sed 's|^package/||' | cut -d/ -f1 | sort -u | grep -v '^$')"
+
+# `templates` and `dist` are the `files` field; the rest are npm's always-include set.
+allowed_entries='CHANGELOG.md
+LICENCE
+LICENSE
+README.md
+dist
+package.json
+templates'
+
+unexpected="$(comm -23 <(echo "$actual_entries") <(echo "$allowed_entries" | sort))"
+if [ -n "$unexpected" ]; then
+  echo "ERROR: the tarball ships entries that are not the built CLI or templates:" >&2
+  echo "$unexpected" | sed 's/^/         /' >&2
+  echo "" >&2
+  echo "       full tarball listing:" >&2
+  tar -tzf "$TARBALL" | sed 's/^/         /' >&2
+  echo "HINT: check the 'files' field in package.json. fixtures/, tests/, docs/ and src/" >&2
+  echo "      must never ship — fixtures/corpus/ in particular carries fixture apps and" >&2
+  echo "      a second language's source." >&2
   exit 1
 fi
 
-echo "OK: packed tarball installs and behaves (help 0, usage 64, infra 3)"
+# Named explicitly ON TOP of the allow-list above, which already rejects them. The
+# allow-list is the guard; these four lines are the ERROR MESSAGE. A future edit that
+# widens the allow-list by accident still trips here, and the reader is told which
+# forbidden tree appeared rather than being handed a diff of directory names.
+for forbidden in src tests fixtures docs; do
+  if tar -tzf "$TARBALL" | grep -Eq "^package/${forbidden}/"; then
+    echo "ERROR: tarball contains ${forbidden}/ — it must never ship" >&2
+    tar -tzf "$TARBALL" | grep -E "^package/${forbidden}/" | sed 's/^/         /' >&2
+    exit 1
+  fi
+done
+
+# The two files the `bin` mapping and the config scaffold actually need. Asserting only
+# what must be ABSENT would pass an empty tarball — Epic 4 retro §2 observation 7: two
+# assertions that both ran against empty output and both passed.
+for required in dist/cli.js templates/config.yaml; do
+  if ! tar -tzf "$TARBALL" | grep -Fqx "package/${required}"; then
+    echo "ERROR: the tarball is missing ${required}" >&2
+    tar -tzf "$TARBALL" | sed 's/^/         /' >&2
+    exit 1
+  fi
+done
+
+# ⚠️ THE SOURCE DOES SHIP — INSIDE THE SOURCEMAP — AND THAT IS PINNED RATHER THAN HIDDEN.
+# `dist/cli.js.map` carries `sourcesContent` for all ~120 modules, so "no source ships" is
+# FALSE about this package even though no `src/` PATH appears above. Story 6.7 left the
+# sourcemap in place deliberately (a stack trace from a user's exit-3 report is worth more
+# than 2.3MB, and the repository is public and MIT, so nothing is disclosed that a reader
+# cannot already fetch) — see DECISIONS.md D3. This check exists so that the day someone
+# decides otherwise, they change a stated expectation instead of discovering a surprise.
+if tar -tzf "$TARBALL" | grep -Fqx 'package/dist/cli.js.map'; then
+  echo "    note: dist/cli.js.map ships and embeds the TypeScript source (DECISIONS.md D3)"
+fi
+
+echo "==> npm publish --dry-run must be clean"
+# Back to the repository: everything since the install has run inside $CONSUMER, and
+# `npm publish` reads the manifest of the CURRENT directory. Running it from the consumer
+# would dry-run the throwaway `npm init -y` package and report a clean result about
+# nothing at all.
+cd "$REPO_ROOT"
+# --dry-run PUBLISHES NOTHING. It runs every pre-publish check and prints the manifest it
+# WOULD send. Publishing is Epic 7 and the owner's decision (story 6.7 is explicitly
+# forbidden from it), so this is the strongest packaging assertion available here.
+if ! publish_log="$(npm publish --dry-run 2>&1)"; then
+  echo "ERROR: npm publish --dry-run failed" >&2
+  echo "$publish_log" >&2
+  exit 1
+fi
+echo "$publish_log" | grep -E 'npm notice (total files|package size|unpacked size):' | sed 's/^npm notice/   /'
+
+echo "OK: packed tarball installs and behaves (help 0, usage 64, infra 3); contents are dist+templates only"
