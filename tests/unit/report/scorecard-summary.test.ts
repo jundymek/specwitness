@@ -544,6 +544,122 @@ describe('--json and the terminal view carry the same facts (AD-11)', () => {
     expect(text).toMatch(/unattributed/i);
   });
 
+  it('renders EVERY numeric fact of the model, including zeroes', () => {
+    // ⚠️ A P2 from round 3 of the codex review. `findings.enumerated` was in `--json` and
+    // absent from the terminal, and two counters printed only when non-zero — so a reader
+    // could not tell a complete finding list from a truncated one, nor "zero orphans"
+    // from "orphans not reported".
+    //
+    // ⚠️ THE FIRST VERSION OF THIS TEST WAS VACUOUS, and it is worth saying how. It
+    // matched each value against `/:\s+<value>/` anywhere in the output — but in this
+    // fixture `findings.enumerated` and `findings.total` are BOTH 5, so deleting the
+    // enumerated line still matched the total line and the test passed over the exact
+    // defect it was written for. Planting the deletion is what exposed it.
+    //
+    // So each fact is now pinned to its own LABEL, and a fixture with deliberately
+    // distinct values is used where the FULL set collides.
+    const summary = summarizeScorecard(FULL);
+    const text = renderScorecardSummaryTerminal(summary);
+
+    const labelled: readonly (readonly [string, number])[] = [
+      ['Records read', summary.records.read],
+      ['Attributions read', summary.attributionsRead],
+      ['Records skipped', summary.skippedRecords.total],
+      ['Findings total', summary.findings.total],
+      ['Findings named by id', summary.findings.enumerated],
+      ['Findings attributed', summary.findings.attributed],
+      ['Unattributed', summary.findings.unattributed],
+      ['Runs with a cut list', summary.findings.runsWithTruncatedFindingIds],
+      ['Orphaned attributions', summary.findings.orphanedAttributions],
+      ['unique', summary.attributionCounts.unique],
+      ['duplicate', summary.attributionCounts.duplicate],
+      ['false-positive', summary.attributionCounts['false-positive']],
+    ];
+
+    for (const [label, value] of labelled) {
+      expect(text, `"${label}" (${value}) is missing from the terminal view`).toMatch(
+        new RegExp(`${label.replace(/[-[\]{}()*+?.,\\^$|#]/g, '\\$&')}:\\s+${value}(\\s|$)`, 'm'),
+      );
+    }
+
+    // The north star carries both its denominators on one line.
+    expect(text).toMatch(
+      new RegExp(
+        `Unique real defects:\\s+${summary.metrics.uniqueDefects.count} of ` +
+          `${summary.metrics.uniqueDefects.ofAttributed} judged, of ` +
+          `${summary.metrics.uniqueDefects.ofAllFindings} findings`,
+      ),
+    );
+  });
+
+  it('has a terminal label for every numeric fact the model carries', () => {
+    // The other half of parity, and the half a value-matching test cannot give: if a
+    // future field is ADDED to the model and forgotten in the renderer, the test above
+    // still passes because it only checks the labels it already knows. This walks the
+    // model's own numeric leaves and fails when one has no label here — which then forces
+    // the renderer to grow a line for it.
+    const summary = summarizeScorecard(FULL);
+
+    const KNOWN_NUMERIC_FIELDS = new Set([
+      'schemaVersion',
+      'records.read',
+      'attributionsRead',
+      'skippedRecords.total',
+      'skippedRecords.scorecard',
+      'skippedRecords.attributions',
+      'findings.total',
+      'findings.enumerated',
+      'findings.attributed',
+      'findings.unattributed',
+      'findings.runsWithTruncatedFindingIds',
+      'findings.orphanedAttributions',
+      'attributionCounts.unique',
+      'attributionCounts.duplicate',
+      'attributionCounts.false-positive',
+      'metrics.uniqueDefects.count',
+      'metrics.uniqueDefects.ofAttributed',
+      'metrics.uniqueDefects.ofAllFindings',
+      'metrics.falsePositiveRate.numerator',
+      'metrics.falsePositiveRate.denominator',
+      'metrics.falsePositiveRate.value',
+      'metrics.needsHumanRate.numerator',
+      'metrics.needsHumanRate.denominator',
+      'metrics.needsHumanRate.value',
+      'metrics.infraErrorRate.numerator',
+      'metrics.infraErrorRate.denominator',
+      'metrics.infraErrorRate.value',
+      'metrics.aiFreeRunShare.numerator',
+      'metrics.aiFreeRunShare.denominator',
+      'metrics.aiFreeRunShare.value',
+      'metrics.flakyRate.numerator',
+      'metrics.flakyRate.denominator',
+      'metrics.flakyRate.value',
+      'metrics.duration.medianMs',
+      'metrics.duration.count',
+    ]);
+
+    const seen: string[] = [];
+    const walk = (value: unknown, path: string): void => {
+      if (typeof value === 'number' || value === null) {
+        seen.push(path);
+        return;
+      }
+      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        for (const [k, v] of Object.entries(value)) {
+          walk(v, path === '' ? k : `${path}.${k}`);
+        }
+      }
+    };
+    walk(summary, '');
+
+    const unaccounted = seen.filter((path) => !KNOWN_NUMERIC_FIELDS.has(path));
+    expect(
+      unaccounted,
+      'a numeric field was added to the summary model without being accounted for in the ' +
+        'terminal view — add it to the renderer and to the labelled list above',
+    ).toEqual([]);
+  });
+
   it('shows denominators in the terminal view, not bare percentages', () => {
     // SM-2: the author decides whether to keep the gate mandatory from this text. At n=1
     // a bare "100%" is technically true and practically a lie.

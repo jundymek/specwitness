@@ -527,11 +527,24 @@ export function renderScorecardSummaryTerminal(summary: ScorecardSummary): strin
   lines.push(`    false-positive:        ${summary.attributionCounts['false-positive']}`);
   lines.push('');
 
+  // ⚠️ EVERY FACT IN THE MODEL APPEARS HERE, UNCONDITIONALLY — a P2 from round 3 of the
+  // codex review of this branch. `findings.enumerated` was missing from this view while
+  // `--json` carried it, and `runsWithTruncatedFindingIds` / `orphanedAttributions` were
+  // printed only when non-zero. Both are AD-11 parity breaks: a terminal reader could not
+  // tell a complete finding list from a truncated one, and could not distinguish "zero
+  // orphans" from "orphans not reported". A conditional fact is a fact the reader has to
+  // already know about in order to miss it.
+  //
+  // The ⚠ lines below are kept for the non-zero cases, because EMPHASIS is a rendering
+  // decision and is not a fact — the numbers themselves are always present above them.
   lines.push('  COVERAGE');
   lines.push(`    Records read:          ${summary.records.read}`);
   lines.push(`    Attributions read:     ${summary.attributionsRead}`);
   lines.push(`    Findings total:        ${findings.total}`);
+  lines.push(`    Findings named by id:  ${findings.enumerated}`);
   lines.push(`    Findings attributed:   ${findings.attributed}`);
+  lines.push(`    Runs with a cut list:  ${findings.runsWithTruncatedFindingIds}`);
+  lines.push(`    Orphaned attributions: ${findings.orphanedAttributions}`);
 
   if (findings.runsWithTruncatedFindingIds > 0) {
     lines.push(
