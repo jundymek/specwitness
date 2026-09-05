@@ -322,6 +322,46 @@ describe('gates stage: AC3 — a gate that could NOT START is infrastructure', (
     expect(error.hint).toMatch(/install/i);
   });
 
+  /**
+   * ⚠️ A CREDENTIAL LEAK ON THIS PATH, and the route is not obvious.
+   *
+   * The executable token is not always a program name. Under AD-3 there is no
+   * shell, so `NPM_TOKEN=… pnpm test` — the shape a developer reaches for when a
+   * private registry needs a token — tokenizes with the ASSIGNMENT as the
+   * executable. Nothing on PATH is called that, so it lands in `notFoundError`,
+   * which interpolated the token into both the message and the hint.
+   *
+   * The failure is a CONFIGURATION mistake, which makes this exactly the message
+   * an operator pastes into an issue.
+   *
+   * Found during story 6.11, which closed the identical hole in its own
+   * `setup.ts` first and reported this one rather than patching another story's
+   * file; fixed here afterwards as owner-authorised follow-up work.
+   *
+   * The assertion is that the SECRET IS ABSENT, never that `[REDACTED]` is
+   * present — the idiom this repository settled on in Epic 3, because output
+   * carrying the marker with the secret still beside it survives review in a way
+   * a raw leak does not.
+   */
+  it('never prints a credential from an unsupported assignment-shaped gate command', async () => {
+    const secret = 's3cr3t-registry-value';
+    const gates = declaredGates([{ id: 'tests', run: `NPM_TOKEN=${secret} pnpm test` }]);
+
+    const error = await infraErrorFrom(
+      createGatesStage({
+        gates,
+        runner: recordingRunner(processResult({ outcome: 'not-found', exitCode: null })),
+        writeEvidence: recordingWriter(),
+      }).run(stageContext()),
+    );
+
+    expect(error.message).not.toContain(secret);
+    expect(error.hint ?? '').not.toContain(secret);
+    // Still diagnostic: the operator learns which gate failed and where to fix it.
+    expect(error.message).toContain('NPM_TOKEN');
+    expect(error.hint).toContain('gates[tests].run');
+  });
+
   it('gives a relative executable and a bare name DIFFERENT diagnoses', async () => {
     // The property that matters: two different causes must not produce one
     // answer. A single "could not start" for both is the confidently-wrong

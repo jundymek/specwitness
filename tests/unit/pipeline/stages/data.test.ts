@@ -144,6 +144,59 @@ describe('every data-command failure is infrastructure, never a product FAIL (AC
     expect(error.message).toContain('psqlx');
   });
 
+  /**
+   * ⚠️ A CREDENTIAL LEAK ON THIS PATH, and the route is not obvious.
+   *
+   * The executable token is not always a program name. Under AD-3 there is no shell, so
+   * `PGPASSWORD=… psql -f reset.sql` — the shape a developer reaches for when a reset command
+   * needs a database password, and a genuinely ordinary thing to write — tokenizes with the
+   * ASSIGNMENT as the executable. Nothing on PATH is called that, so it lands in
+   * `notFoundError`, which interpolated the token into both the message and the hint.
+   *
+   * The failure is a CONFIGURATION mistake, which makes this exactly the message an operator
+   * pastes into an issue. This stage is the likeliest of the three to carry a real credential:
+   * a `data.reset` naming a database URL with a password in it is ordinary, and this file's own
+   * header says so.
+   *
+   * Found during story 6.11, which closed the identical hole in its own `setup.ts` first and
+   * reported this one rather than patching another story's file; fixed here afterwards as
+   * owner-authorised follow-up work.
+   *
+   * The assertion is that the SECRET IS ABSENT, never that `[REDACTED]` is present — the idiom
+   * this repository settled on in Epic 3.
+   *
+   * ⚠️ **`DB_PASSWORD` rather than `PGPASSWORD`, and the difference is a REPORTED GAP rather
+   * than a preference.** Measured against the merged `redactText` while writing this test:
+   * `PASSWORD=`, `DB_PASSWORD=`, `NPM_TOKEN=`, `API_KEY=`, `SECRET=` and
+   * `AWS_SECRET_ACCESS_KEY=` are all redacted, but **`PGPASSWORD=`, `MYSQL_PWD=` and
+   * `REDIS_URL=` are not** — the key matcher wants the secret word at a token boundary, and
+   * `PGPASSWORD` glues `PG` onto it. That matters here more than anywhere: `PGPASSWORD` is
+   * libpq's standard variable and a `data.reset` is exactly where somebody writes it.
+   *
+   * That gap is in `src/domain/evidence.ts`, which is neither this story's file nor the
+   * follow-up's frozen scope, so it is REPORTED to the supervisor rather than patched — the
+   * same call story 6.11 made about this file. This test uses a covered key so that it proves
+   * what it is for: that the stage redacts the binary at all.
+   */
+  it('never prints a credential from an unsupported assignment-shaped data command', async () => {
+    const secret = 'sup3r-s3cret-db-password';
+    const runner = recordingRunner(processResult({ outcome: 'not-found', exitCode: null }));
+    const stage = createDataStage(
+      deps({
+        data: declaredData([{ id: 'reset', run: `DB_PASSWORD=${secret} psql -f reset.sql` }]),
+        runner,
+      }),
+    );
+
+    const error = await infraErrorFrom(stage.run(stageContext()));
+
+    expect(error.message).not.toContain(secret);
+    expect(error.hint ?? '').not.toContain(secret);
+    // Still diagnostic: the operator learns which data command failed and where to fix it.
+    expect(error.message).toContain('DB_PASSWORD');
+    expect(error.hint).toContain('data.reset');
+  });
+
   it('throws InfraError when a data command times out', async () => {
     const runner = recordingRunner(processResult({ outcome: 'timed-out', exitCode: null }));
     const stage = createDataStage(deps({ data: declaredData([RESET]), runner, timeoutMs: 400 }));
