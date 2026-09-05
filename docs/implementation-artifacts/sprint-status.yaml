@@ -103,7 +103,7 @@ development_status:
   # with its Task 5 (retro-fitting evidence expectations onto story 6.2's merged fixtures)
   # removed from scope - fixtures/corpus/ is not in REVIEW_IGNORE_PATHS, and the closing
   # wave should not re-stale sign-offs for work that can be done at any time afterwards.
-  6-10-corpus-evidence-kind-expectations: ready-for-dev
+  6-10-corpus-evidence-kind-expectations: review
   epic-6-retrospective: optional
 
   epic-7: backlog
