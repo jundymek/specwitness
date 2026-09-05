@@ -56,13 +56,38 @@ async function scratch(): Promise<string> {
   return dir;
 }
 
-/** Writes a `ps -eo pid,ppid,pgid,etime,args` shaped listing and returns its path. */
+/**
+ * A default absolute start time for fixture rows.
+ *
+ * `ps` reports `lstart` as an ABSOLUTE instant, identical on every scan of the same process —
+ * which is what lets identity be exact equality rather than a tolerance. See IDENTITY in the
+ * script.
+ */
+const STARTED = 'Fri Sep  5 08:00:00 2026';
+
+/**
+ * Writes a `ps -eo pid,ppid,pgid,etime,lstart,args` shaped listing.
+ *
+ * Rows are given as `<pid> <ppid> <pgid> <etime>|<args>` and the lstart column is inserted, so
+ * the existing cases stay readable. Pass `started` to give a row a different start instant.
+ */
 async function listing(...rows: readonly string[]): Promise<string> {
+  return await listingStarted(STARTED, ...rows);
+}
+
+async function listingStarted(started: string, ...rows: readonly string[]): Promise<string> {
   const dir = await scratch();
   const path = join(dir, 'ps.txt');
+  const withStart = rows.map((row) => {
+    // Insert the lstart column between etime and args: the fifth whitespace-separated field.
+    const m = /^(\s*\d+\s+\d+\s+\d+\s+\S+)\s+(.*)$/.exec(row);
+    return m === null ? row : `${m[1]} ${started} ${m[2]}`;
+  });
   await writeFile(
     path,
-    ['    PID    PPID    PGID     ELAPSED COMMAND', ...rows].join('\n') + '\n',
+    ['    PID    PPID    PGID     ELAPSED STARTED                      COMMAND', ...withStart].join(
+      '\n',
+    ) + '\n',
     'utf8',
   );
   return path;
@@ -250,9 +275,16 @@ describe('the browser leak check', () => {
   it('subtracts the baseline, so a process that was already running is not a leak', async () => {
     const dir = await scratch();
     const baselinePath = join(dir, 'baseline.txt');
-    await writeFile(baselinePath, '9001\n', 'utf8');
-    const psFile = await listing(
+    // The baseline is WRITTEN BY THE SCRIPT rather than hand-rolled, so the fixture cannot drift
+    // from the identity format. It drifted once already: these cases used to hand-write a bare
+    // pid, which the fail-closed identity rule now correctly refuses to match.
+    const before = await listing(
       '   9001    9000    9001       10:00 /opt/google/chrome/chrome --type=zygote',
+    );
+    await run(['--ps-file', before, '--browsers-path', BROWSERS_PATH, '--write-baseline', baselinePath]);
+
+    const psFile = await listing(
+      '   9001    9000    9001       10:30 /opt/google/chrome/chrome --type=zygote',
     );
 
     const { exitCode, stdout } = await run([
@@ -271,9 +303,13 @@ describe('the browser leak check', () => {
   it('still reports a process that appeared after the baseline was taken', async () => {
     const dir = await scratch();
     const baselinePath = join(dir, 'baseline.txt');
-    await writeFile(baselinePath, '9001\n', 'utf8');
-    const psFile = await listing(
+    const before = await listing(
       '   9001    9000    9001       10:00 /opt/google/chrome/chrome --type=zygote',
+    );
+    await run(['--ps-file', before, '--browsers-path', BROWSERS_PATH, '--write-baseline', baselinePath]);
+
+    const psFile = await listing(
+      '   9001    9000    9001       10:30 /opt/google/chrome/chrome --type=zygote',
       `   4210    4200    4210       00:42 ${BROWSERS_PATH}/chromium_headless_shell-1234/chrome-linux/headless_shell`,
     );
 
@@ -454,12 +490,10 @@ describe('the browser leak check', () => {
     );
     await run(['--ps-file', before, '--browsers-path', BROWSERS_PATH, '--write-baseline', baselinePath]);
 
-    // The same process on a later scan. `elapsed` grows by exactly the wall-clock that passed
-    // between the two samples — which is what keeps the computed START instant fixed — so the
-    // fixture cannot grow it faster than the test itself takes to run. On a real job the two
-    // scans are minutes apart and elapsed grows by those minutes; the start stays put either way.
+    // The same process on a later scan: `elapsed` has grown, but `lstart` is an ABSOLUTE instant
+    // and has not moved. That is the whole reason identity is keyed on it.
     const after = await listing(
-      `   9001    9000    9001       10:01 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+      `   9001    9000    9001       10:47 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
     );
     const { exitCode, stdout } = await run([
       '--ps-file',
@@ -478,14 +512,14 @@ describe('the browser leak check', () => {
     const dir = await scratch();
     const baselinePath = join(dir, 'baseline.txt');
 
-    const before = await listing(
+    const before = await listingStarted(
+      'Fri Sep  5 07:00:00 2026',
       `   9001    9000    9001    01:00:00 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
     );
     await run(['--ps-file', before, '--browsers-path', BROWSERS_PATH, '--write-baseline', baselinePath]);
 
-    // The same PID, but only seconds old: the original exited and the pid was reused. This is a
-    // NEW browser and a real survivor, however familiar its pid looks.
-    const after = await listing(
+    const after = await listingStarted(
+      'Fri Sep  5 08:00:00 2026',
       `   9001    9000    9001       00:03 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
     );
     const { exitCode, stdout } = await run([
@@ -500,6 +534,77 @@ describe('the browser leak check', () => {
     expect(exitCode).toBe(1);
     expect(stdout).toContain('9001');
     expect(stdout).not.toContain('no surviving browser process');
+  });
+
+  /**
+   * ⚠️ **THE THREE-SECOND WINDOW, CLOSED.** Raised as a P2 by the Codex review of this branch,
+   * against the very fix that was supposed to close pid reuse.
+   *
+   * Identity was pid plus a start time DERIVED from `etime` (`sampledAt - elapsed`). Both inputs
+   * have one-second resolution and the two scans are taken at different moments, so the derived
+   * value needed a ±3s tolerance — and a pid reused **within those three seconds** fell inside
+   * it. The false clean came back, narrowed but alive: the check would subtract a genuine
+   * survivor and report no leak.
+   *
+   * `lstart` is an ABSOLUTE instant reported by `ps`, identical on every scan of the same
+   * process, so identity is now EXACT EQUALITY with no tolerance at all. A derived value needed a
+   * band; an absolute one does not. **Twice this instrument was able to report in its own
+   * favour, and both times the fault was in how it infers identity** — which is why this is keyed
+   * on something measured rather than something computed.
+   */
+  it('reports a pid reused within the old three-second tolerance', async () => {
+    const dir = await scratch();
+    const baselinePath = join(dir, 'baseline.txt');
+
+    const before = await listingStarted(
+      'Fri Sep  5 08:00:00 2026',
+      `   9100    9000    9100       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+    await run(['--ps-file', before, '--browsers-path', BROWSERS_PATH, '--write-baseline', baselinePath]);
+
+    // Two seconds later a DIFFERENT browser takes the same pid — inside the old tolerance.
+    const after = await listingStarted(
+      'Fri Sep  5 08:00:02 2026',
+      `   9100    9000    9100       00:01 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      after,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--baseline',
+      baselinePath,
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('9100');
+    expect(stdout).not.toContain('no surviving browser process');
+  });
+
+  /**
+   * ⚠️ FAIL CLOSED WHEN IDENTITY CANNOT BE ESTABLISHED. A row whose start instant cannot be read
+   * is a row we cannot prove is the baseline's, so it is NOT subtracted — over-reporting, which
+   * is the safe direction for a leak check and the one every other guard here takes.
+   */
+  it('does not subtract a row whose start time cannot be read', async () => {
+    const dir = await scratch();
+    const baselinePath = join(dir, 'baseline.txt');
+    await writeFile(baselinePath, '9200 unknown\n', 'utf8');
+
+    const after = await listing(
+      `   9200    9000    9200       00:05 ${BROWSERS_PATH}/chromium-1234/chrome-linux/chrome`,
+    );
+    const { exitCode, stdout } = await run([
+      '--ps-file',
+      after,
+      '--browsers-path',
+      BROWSERS_PATH,
+      '--baseline',
+      baselinePath,
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain('9200');
   });
 
   /* ── reaping ──────────────────────────────────────────────────────────────────────── */

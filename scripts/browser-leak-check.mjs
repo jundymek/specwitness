@@ -226,64 +226,65 @@ function readListing() {
     return readFileSync(psFile, 'utf8');
   }
   // `args` last: it contains spaces, so every other column must be parsed before it.
-  return execFileSync('ps', ['-eo', 'pid,ppid,pgid,etime,args'], {
+  return execFileSync('ps', ['-eo', 'pid,ppid,pgid,etime,lstart,args'], {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
   });
 }
 
-/** Wall-clock seconds, sampled once per scan so every row in it shares one reference point. */
-const nowSeconds = () => Math.floor(Date.now() / 1000);
-
-/** `ps` elapsed time — `[[dd-]hh:]mm:ss` — as seconds. Unparseable input reads as 0. */
-function elapsedToSeconds(elapsed) {
-  const [days, clock] = elapsed.includes('-') ? elapsed.split('-') : ['0', elapsed];
-  const parts = clock.split(':').map((part) => Number(part));
-  if (parts.some((part) => !Number.isFinite(part))) {
-    return 0;
-  }
-  const [hours, minutes, seconds] =
-    parts.length === 3 ? parts : parts.length === 2 ? [0, parts[0], parts[1]] : [0, 0, parts[0]];
-  return Number(days) * 86_400 + hours * 3_600 + minutes * 60 + seconds;
-}
-
 /**
- * ⚠️ IDENTITY IS PID **PLUS START TIME**, NEVER PID ALONE. Raised as a P2 by the Codex review of
- * this branch, and it is a false-clean hole in this script's principal guarantee: if a baseline
- * browser exits and the OS hands its pid to a browser THIS job launches, matching on pid would
- * subtract the new process and the scan would report clean while a real leak ran on.
+ * ⚠️ IDENTITY IS PID **PLUS THE ABSOLUTE START INSTANT**, COMPARED EXACTLY.
  *
- * `ps` gives elapsed time rather than start time, and elapsed grows between the two scans — but
- * a process seen at T with elapsed E started at T − E, and THAT instant is stable. Compared with
- * a tolerance because `etime` has one-second resolution and the two samples are taken seconds
- * apart.
+ * A pid alone is not an identity: if a baseline browser exits and the OS hands its pid to a
+ * browser THIS job launches, matching on pid subtracts a genuine survivor and the scan reports
+ * clean while a leak runs on.
+ *
+ * The first fix for that derived a start time from `etime` (`sampledAt - elapsed`). Both inputs
+ * have one-second resolution and the two scans happen at different moments, so the derived value
+ * needed a ±3s tolerance — **and a pid reused inside those three seconds fell straight back into
+ * the hole.** Reported as a P2 on this branch, against the very fix meant to close it.
+ *
+ * `lstart` is an ABSOLUTE instant reported by `ps`, identical on every scan of the same process.
+ * So identity is exact equality and needs no tolerance at all. A derived value needed a band; a
+ * measured one does not.
+ *
+ * **Twice this instrument was able to report in its own favour** — first counting already-dead
+ * processes as orphans, then subtracting a reused pid — and both times the fault was in how it
+ * INFERS identity rather than in what it does with it. That is why this is now keyed on something
+ * `ps` measures rather than something this script computes.
+ *
+ * The residual, stated: `lstart` itself has one-second resolution, so a pid reused within the
+ * SAME SECOND would still collide. That is the limit of what `ps` offers, and it is a far smaller
+ * window than the three seconds it replaces.
  */
-const START_TOLERANCE_SECONDS = 3;
 
 /** One process row. `args` keeps its internal spacing, because it is quoted as evidence. */
 function parse(listing) {
-  const sampledAt = nowSeconds();
   const rows = [];
   for (const line of listing.split('\n')) {
     const text = line.trim();
     if (text === '') {
       continue;
     }
-    const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(text);
+    // `lstart` is `Www Mmm dd HH:MM:SS YYYY` on both macOS and Linux, and it contains spaces —
+    // hence the explicit shape rather than a field count.
+    const match =
+      /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/.exec(
+        text,
+      );
     if (match === null) {
       // The header, or anything else that is not a process row.
       continue;
     }
-    const elapsed = match[4];
     rows.push({
       pid: Number(match[1]),
       ppid: Number(match[2]),
       pgid: Number(match[3]),
-      elapsed,
-      // The instant this process STARTED, which is stable across scans while `elapsed` grows.
-      // See IDENTITY below for why a pid alone will not do.
-      startedAt: sampledAt - elapsedToSeconds(elapsed),
-      args: match[5],
+      elapsed: match[4],
+      // The ABSOLUTE instant this process started, as `ps` reports it. See IDENTITY below.
+      // Spaces collapsed so it survives a whitespace-separated baseline file.
+      startedAt: match[5].replace(/\s+/g, '_'),
+      args: match[6],
     });
   }
   return rows;
@@ -379,7 +380,7 @@ function readBaseline() {
     .split('\n')
     .map((line) => line.trim().split(/\s+/))
     .filter((parts) => parts[0] !== undefined && parts[0] !== '')
-    .map((parts) => ({ pid: Number(parts[0]), startedAt: Number(parts[1] ?? Number.NaN) }))
+    .map((parts) => ({ pid: Number(parts[0]), startedAt: parts[1] ?? '' }))
     .filter((entry) => Number.isInteger(entry.pid) && entry.pid > 0);
 }
 
@@ -401,14 +402,13 @@ let baseline;
 
 try {
   baseline = readBaseline();
+  // Exact equality on pid AND the absolute start instant. A baseline entry whose start could not
+  // be read (`unknown`, or an older pid-only file) matches NOTHING: identity we cannot establish
+  // must not subtract a process, because over-reporting is the safe direction for a leak check.
   const notInBaseline = (row) =>
     !baseline.some(
       (entry) =>
-        entry.pid === row.pid &&
-        // A baseline written by an older format carries no start time; fall back to pid-only
-        // rather than treating every baseline row as a mismatch.
-        (!Number.isFinite(entry.startedAt) ||
-          Math.abs(entry.startedAt - row.startedAt) <= START_TOLERANCE_SECONDS),
+        entry.pid === row.pid && entry.startedAt !== '' && entry.startedAt === row.startedAt,
     );
 
   survivors = scan().filter(notInBaseline);
