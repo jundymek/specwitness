@@ -448,6 +448,46 @@ export function renderScorecardSummaryJson(summary: ScorecardSummary): string {
   return `${JSON.stringify(summary, null, 2)}\n`;
 }
 
+/**
+ * Escapes every control character so a log's contents cannot forge terminal output.
+ *
+ * ⚠️ A P2 FROM ROUND 4 OF THE CODEX REVIEW, AND I INTRODUCED IT IN ROUND 3. Making the
+ * terminal print the parser's full skip message (as ADR-008 §5 requires, naming the
+ * unknown fields) also put UNTRUSTED TEXT on the terminal for the first time: an unknown
+ * key's NAME comes out of the file, and a JSON key may legally contain an ESC or a
+ * newline. Reproduced against the built binary — a key named
+ * `<ESC>[31mINJECTED<ESC>[0m\nFAKE LINE: pwned` coloured the output and **forged a line
+ * of its own** inside a metrics report.
+ *
+ * Redaction and byte-bounding do not help: neither removes control characters. `field()`
+ * in the schema modules bounds and redacts the key name, which is the right treatment for
+ * a SECRET, and this is the separate treatment for a CONTROL SEQUENCE.
+ *
+ * **Scope, stated precisely.** This is a local file the operator owns, so it is not a
+ * remote-attacker path; the reason it matters anyway is that a scorecard summary is the
+ * output most likely to be pasted into an issue or a report, and a forged line in a
+ * metrics report is the same class of harm this whole story exists to prevent. It also
+ * closes a hole in the no-TTY guarantee, which promises this command emits no escape
+ * sequence.
+ *
+ * **`--json` is unaffected and deliberately keeps the original**: `JSON.stringify`
+ * escapes control characters itself, so the machine document stays faithful while the
+ * human view stays safe. That asymmetry is not an AD-11 parity break — it is the same
+ * fact, rendered for two media with different hazards.
+ *
+ * The two scorecard log parsers both produce these messages, and this renderer is the
+ * only place either reaches a terminal, so one guard here covers both. Story 6.5's parser
+ * is merged code and is deliberately not modified.
+ */
+function printable(text: string): string {
+  // C0 (00–1F), DEL (7F) and C1 (80–9F). Rendered as `\xNN` so the operator can still see
+  // exactly what was in the file without the terminal acting on it.
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) =>
+    `\\x${character.charCodeAt(0).toString(16).padStart(2, '0')}`,
+  );
+}
+
 /** `1 of 5 (20.0%)`, or `— (no data)`. The denominator is always shown. */
 function formatRate(value: Rate): string {
   if (value.value === null) {
@@ -575,7 +615,7 @@ export function renderScorecardSummaryTerminal(summary: ScorecardSummary): strin
     // field caused the record to be dropped. The message is already bounded and redacted
     // and carries no value from the file (see `parseAttributionLine`).
     for (const entry of skippedRecords.detail) {
-      lines.push(`      - [${entry.source}/${entry.reason}] ${entry.message}`);
+      lines.push(`      - [${entry.source}/${entry.reason}] ${printable(entry.message)}`);
     }
   }
 

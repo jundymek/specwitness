@@ -684,6 +684,41 @@ describe('--json and the terminal view carry the same facts (AD-11)', () => {
     expect(text).not.toMatch(/NaN|undefined|Infinity/);
   });
 
+  it('escapes control characters in a skip message — no terminal injection', () => {
+    // ⚠️ A P2 from round 4 of the codex review, INTRODUCED BY MY OWN ROUND-3 FIX.
+    // Printing the parser's full message (so ADR-008 §5's unknown field names reach the
+    // operator) put untrusted text on the terminal for the first time: an unknown key's
+    // NAME comes from the file, and a JSON key may legally contain an ESC or a newline.
+    //
+    // Reproduced against the built binary before the fix — a key named
+    // `<ESC>[31mINJECTED<ESC>[0m\nFAKE LINE: pwned` coloured the output and FORGED A LINE
+    // OF ITS OWN inside a metrics report. Redaction and byte-bounding do not remove
+    // control characters; that is a separate treatment from a separate hazard.
+    const esc = String.fromCharCode(27);
+    const withInjection = input({
+      scorecard: {
+        records: [],
+        skipped: [
+          {
+            line: 2,
+            reason: 'version-skew',
+            message: `Unknown field(s): ${esc}[31mINJECTED${esc}[0m\nFAKE LINE: pwned.`,
+          },
+        ],
+      },
+    });
+
+    const text = renderScorecardSummaryTerminal(summarizeScorecard(withInjection));
+
+    // No raw ESC, and no forged line: the newline is escaped, so "FAKE LINE" cannot start
+    // one of its own.
+    expect(text).not.toContain(esc);
+    expect(text).not.toMatch(/^FAKE LINE/m);
+    // The content is still legible, so an operator can see what was actually in the file.
+    expect(text).toContain('INJECTED');
+    expect(text).toContain('\\x1b');
+  });
+
   it('warns in the terminal view when records were skipped', () => {
     const withSkips = input({
       scorecard: { records: RECORDS, skipped: [{ line: 3, reason: 'malformed', message: 'x' }] },
