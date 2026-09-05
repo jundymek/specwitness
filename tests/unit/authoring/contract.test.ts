@@ -8,6 +8,7 @@ import { ProviderError } from '../../../src/domain/errors.js';
 import { fingerprint } from '../../../src/schemas/canonical.js';
 import { CriterionSchema } from '../../../src/schemas/contract.js';
 import { FixedClock } from '../../fakes/ports.js';
+import { SEEDED_SECRET } from '../../fixtures/run-result.js';
 
 /**
  * Every case here runs through a scripted `AgentProvider` double — zero
@@ -477,5 +478,53 @@ describe('generateDraft — a whitespace-only statement never reaches the file',
     expect(contract.spec.criteria[0]?.statement).toBe(
       'The command prints the fingerprint on stdout.',
     );
+  });
+});
+
+/**
+ * The run's `RedactionOptions` reach the prompt through `generateDraft` — story 6.8.
+ *
+ * ⚠️ RAISED AS A P1 BY THE CODEX REVIEW, and correct: story 6.8's first version gave the
+ * prompt BUILDER a `redaction` parameter and left this entry point without one, so a
+ * project's config-declared `extraPatterns` could not reach it from production at all. The
+ * built-in patterns always applied; what was unreachable is exactly the shapes a project
+ * adds because the built-ins do not recognise its own secrets.
+ *
+ * These assert on the bytes the PROVIDER actually received, not on the builder called
+ * directly — which is the distinction the P1 was about.
+ */
+describe('the run redaction options reach the prompt (story 6.8, AD-10)', () => {
+  it('applies a config-declared extra pattern to the epic content', async () => {
+    const provider = scripted(ONE_CRITERION);
+    const epic: EpicSpec = { ...EPIC, goal: 'ship the release codenamed ORCHID' };
+
+    await generateDraft({
+      epicSpec: epic,
+      provider,
+      clock: new FixedClock(INSTANT),
+      providerName: 'hermetic',
+      model: null,
+      providerCliVersion: '0.144.4',
+      redaction: { extraPatterns: [/ORCHID/g] },
+    });
+
+    expect(provider.prompts).toHaveLength(1);
+    expect(provider.prompts[0]?.prompt).not.toContain('ORCHID');
+  });
+
+  it('still redacts built-in shapes when no options are supplied', async () => {
+    const provider = scripted(ONE_CRITERION);
+    const epic: EpicSpec = { ...EPIC, goal: `deploy with API_KEY=${SEEDED_SECRET}` };
+
+    await generateDraft({
+      epicSpec: epic,
+      provider,
+      clock: new FixedClock(INSTANT),
+      providerName: 'hermetic',
+      model: null,
+      providerCliVersion: '0.144.4',
+    });
+
+    expect(provider.prompts[0]?.prompt).not.toContain(SEEDED_SECRET);
   });
 });

@@ -36,6 +36,7 @@
  */
 
 import type { AgentProvider, AgentRequest } from '../domain/agent-provider.js';
+import type { RedactionOptions } from '../domain/evidence.js';
 import type { Contract } from '../domain/contract.js';
 import type { Plan } from '../domain/plan.js';
 import type { Clock, Ids } from '../domain/ports.js';
@@ -79,6 +80,27 @@ export interface CompilePlanInput {
   readonly model: string | null;
   /** The AGENT CLI's version (`claude --version`), never SpecWitness's. */
   readonly providerCliVersion: string | null;
+  /**
+   * The run's redaction options (AD-10), forwarded to the prompt assembly.
+   *
+   * ⚠️ **ADDED AFTER A CODEX P1**, and the reason is worth keeping. Story 6.8 first gave the
+   * prompt BUILDER a `redaction` parameter and left this entry point without one, so the
+   * run's config-declared `extraPatterns` could not reach the builder from production at
+   * all — the parameter was reachable only from a direct builder test, which is the weakest
+   * possible form of "the behaviour is implemented".
+   *
+   * The built-in patterns always applied and still do. What was unreachable is exactly the
+   * *config-declared extra* patterns, i.e. the shapes a project adds precisely because the
+   * built-ins do not recognise its own secrets.
+   *
+   * The seam is now continuous through the whole of `src/authoring/**`. It is still not fed,
+   * because **nothing in this product constructs a `RedactionOptions` from config anywhere**
+   * — `src/cli/commands/verify.ts` composes its probe dispatcher without one. Building that
+   * value is a feature (AD-10's config-declared patterns are unimplemented product-wide),
+   * not a refactor, and it is outside story 6.8's layer. When someone does wire it, this is
+   * the one place per flow that has to receive it.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 export interface CompilePlanResult {
@@ -104,7 +126,7 @@ export async function compilePlan(input: CompilePlanInput): Promise<CompilePlanR
 
   const request: AgentRequest<PlanDraft> = {
     role: 'plan-author',
-    prompt: buildPlanPrompt(contract, input.declared),
+    prompt: buildPlanPrompt(contract, input.declared, input.redaction),
     responseSchema: planDraftSchemaFor(contract, input.declared),
     // `jsonSchema` is deliberately NOT set. The gate derives it from `responseSchema` in
     // exactly one place, so two sites cannot disagree about the shape the model is steered

@@ -42,6 +42,7 @@ import {
   type Criterion,
 } from '../domain/contract.js';
 import type { EpicSpec } from '../domain/epic-spec.js';
+import type { RedactionOptions } from '../domain/evidence.js';
 import { buildCriterionId } from '../domain/ids.js';
 import type { Clock } from '../domain/ports.js';
 import { invoke } from '../providers/invoke.js';
@@ -96,6 +97,27 @@ export interface GenerateDraftInput {
   readonly model: string | null;
   /** The AGENT CLI's version (`codex --version`), never SpecWitness's. */
   readonly providerCliVersion: string | null;
+  /**
+   * The run's redaction options (AD-10), forwarded to the prompt assembly.
+   *
+   * ⚠️ **ADDED AFTER A CODEX P1**, and the reason is worth keeping. Story 6.8 first gave the
+   * prompt BUILDER a `redaction` parameter and left this entry point without one, so the
+   * run's config-declared `extraPatterns` could not reach the builder from production at
+   * all — the parameter was reachable only from a direct builder test, which is the weakest
+   * possible form of "the behaviour is implemented".
+   *
+   * The built-in patterns always applied and still do. What was unreachable is exactly the
+   * *config-declared extra* patterns, i.e. the shapes a project adds precisely because the
+   * built-ins do not recognise its own secrets.
+   *
+   * The seam is now continuous through the whole of `src/authoring/**`. It is still not fed,
+   * because **nothing in this product constructs a `RedactionOptions` from config anywhere**
+   * — `src/cli/commands/verify.ts` composes its probe dispatcher without one. Building that
+   * value is a feature (AD-10's config-declared patterns are unimplemented product-wide),
+   * not a refactor, and it is outside story 6.8's layer. When someone does wire it, this is
+   * the one place per flow that has to receive it.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 export interface GenerateDraftResult {
@@ -113,7 +135,7 @@ export interface GenerateDraftResult {
 export async function generateDraft(input: GenerateDraftInput): Promise<GenerateDraftResult> {
   const request: AgentRequest<z.infer<typeof DRAFT_RESPONSE_SCHEMA>> = {
     role: 'contract-author',
-    prompt: buildContractPrompt(input.epicSpec),
+    prompt: buildContractPrompt(input.epicSpec, input.redaction),
     responseSchema: DRAFT_RESPONSE_SCHEMA,
     // `jsonSchema` is deliberately NOT set. The gate derives it from
     // `responseSchema` in exactly one place, so that two sites cannot disagree

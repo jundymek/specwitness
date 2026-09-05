@@ -36,7 +36,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EXPLANATION_CAP_BYTES,
   MAX_EXPLAINED_CRITERIA,
-  PROMPT_CAP_CHARS,
+  PROMPT_CAP_BYTES,
   buildExplainPrompt,
   explainRun,
   explainableCriteria,
@@ -127,7 +127,7 @@ describe('AC1 — the prompt carries the three required inputs, and nothing forb
     const prompt = buildExplainPrompt(huge, explainableCriteria(huge));
 
     // A prompt is a subscription cost and a context window. Summaries, not dumps.
-    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CAP_CHARS);
+    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CAP_BYTES);
   });
 
   it('keeps the response instructions when the body is bounded away', () => {
@@ -157,8 +157,8 @@ describe('AC1 — the prompt carries the three required inputs, and nothing forb
     const prompt = buildExplainPrompt(huge, explainableCriteria(huge));
 
     // The bound really was reached, so nothing below passes vacuously.
-    expect(prompt.length).toBeGreaterThan(PROMPT_CAP_CHARS - 4_000);
-    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CAP_CHARS);
+    expect(prompt.length).toBeGreaterThan(PROMPT_CAP_BYTES - 4_000);
+    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CAP_BYTES);
 
     // The instructions survive at BOTH ends.
     expect(prompt).toContain('NON-AUTHORITATIVE');
