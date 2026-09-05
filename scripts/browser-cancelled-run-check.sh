@@ -80,6 +80,35 @@ node "${leak_check_args[@]}" --write-baseline "${baseline}" --label "before the 
 }
 
 echo "==> [2/5] starting ${SUITE} and waiting for a real browser"
+# ⚠️ DEFINED BEFORE THE RUNNER LAUNCHES, AND THEREFORE BEFORE THE TRAP IS ARMED.
+# Raised as a P2 on this branch: the trap was armed immediately after the runner started but
+# this function was defined further down, so a cancellation landing in that window would have
+# called an undefined command and reaped nothing - defeating the cancellation safety the trap
+# had just been added to provide. A cleanup handler may not depend on code that runs after it
+# becomes reachable.
+# Every descendant of the runner, breadth-first, as a space-separated list.
+#
+# `pkill -P` only reaches DIRECT children and vitest runs its tests in a forked worker pool, so
+# the closure has to be walked or the workers — the processes actually holding the browser's
+# parent handle — would survive the "kill".
+#
+# Written with plain strings rather than arrays and `mapfile`: macOS ships bash 3.2, which has
+# neither, and this script has to be runnable by the author before it is trusted on a runner.
+descendants() {
+  frontier="$1"
+  found=""
+  while [ -n "${frontier}" ]; do
+    next=""
+    for pid in ${frontier}; do
+      found="${found} ${pid}"
+      children="$(ps -eo pid=,ppid= | awk -v parent="${pid}" '$2 == parent { print $1 }' | tr '\n' ' ')"
+      next="${next} ${children}"
+    done
+    frontier="$(echo "${next}" | tr -s ' ' | sed 's/^ //;s/ $//')"
+  done
+  echo "${found}" | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
 pnpm exec vitest run "${SUITE}" >"${work}/run.log" 2>&1 &
 runner_pid=$!
 
@@ -130,28 +159,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Every descendant of the runner, breadth-first, as a space-separated list.
-#
-# `pkill -P` only reaches DIRECT children and vitest runs its tests in a forked worker pool, so
-# the closure has to be walked or the workers — the processes actually holding the browser's
-# parent handle — would survive the "kill".
-#
-# Written with plain strings rather than arrays and `mapfile`: macOS ships bash 3.2, which has
-# neither, and this script has to be runnable by the author before it is trusted on a runner.
-descendants() {
-  frontier="$1"
-  found=""
-  while [ -n "${frontier}" ]; do
-    next=""
-    for pid in ${frontier}; do
-      found="${found} ${pid}"
-      children="$(ps -eo pid=,ppid= | awk -v parent="${pid}" '$2 == parent { print $1 }' | tr '\n' ' ')"
-      next="${next} ${children}"
-    done
-    frontier="$(echo "${next}" | tr -s ' ' | sed 's/^ //;s/ $//')"
-  done
-  echo "${found}" | tr -s ' ' | sed 's/^ //;s/ $//'
-}
 
 # ⚠️ THE LAUNCH PREDICATE, AND WHY IT IS NARROWER THAN IT LOOKS LIKE IT SHOULD BE.
 #
