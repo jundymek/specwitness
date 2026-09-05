@@ -386,15 +386,23 @@ nothing.
 
 > ### ⚠️ `setup.install` is not run in `0.1.0`
 >
-> The config schema accepts it and `doctor`'s `commands-resolvable` check verifies it
-> resolves on your machine, so everything *looks* wired. But the pipeline's `setup` stage
-> is still a placeholder (`src/pipeline/stages/setup.ts` — it returns ok without doing
-> anything, and its own header says *"Filled by Epic 4"*, which has not happened).
+> **`doctor` and `verify` disagree about whether this key is live, and `doctor` is the one
+> that misleads you.** Its `commands-resolvable` check validates `setup.install` and
+> reports that it resolves on your machine — which is exactly what a pre-flight validator
+> saying "you are configured correctly" looks like. But the pipeline's `setup` stage is
+> still a placeholder (`src/pipeline/stages/setup.ts`, whose header says *"Filled by
+> Epic 4"* — which has not happened), and nothing else reads the key.
+>
+> To its credit, `verify` does not hide this: the stage reports `ok` with the detail
+> *"not implemented yet — Epic 4 runs the configured install command"*, deliberately, so
+> that a run says plainly which parts are unbuilt rather than implying they passed. **The
+> problem is that you have to read the timeline to find out**, after the command whose
+> whole job is checking your configuration told you the key was fine.
 >
 > **Consequence:** if you rely on `setup.install` to install dependencies inside the
-> isolated worktree, they will not be installed, the stage will still report `✓ ok`, and
-> your gates will run against a worktree that never had `node_modules`. Until this is
-> filled, make your first **gate** do the install instead — gates genuinely execute.
+> isolated worktree, they will not be installed and your gates will run against a worktree
+> that never had `node_modules`. Until it is filled, make the install your **first gate**
+> instead — gates genuinely execute.
 
 **Every command in this file is a security boundary.** Only commands declared here are ever
 executed. Nothing an AI provider returns can introduce a command, a flag or a shell string
@@ -464,9 +472,9 @@ Listed because a README that describes an intended product is worse than none.
 
 - `--root` is accepted by `verify` only; every other command resolves from the working
   directory.
-- **The `setup` stage is a placeholder and never runs `setup.install`**, while reporting
-  `✓ ok`. See the warning in the configuration reference — this is the one gap in `0.1.0`
-  that can silently change what a run means.
+- **The `setup` stage is a placeholder and never runs `setup.install`**, while `doctor`
+  validates the key and reports it resolves. See the warning in the configuration
+  reference — it is the one gap in `0.1.0` that can change what a run means.
 - `contract --amend` requires an interactive terminal and cannot be scripted — deliberately,
   since it is an operator action, but it means it is the one command an agent cannot call.
 
