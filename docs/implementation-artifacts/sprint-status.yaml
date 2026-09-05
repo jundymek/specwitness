@@ -147,7 +147,13 @@ action_items:
   - {id: e6-C, epic: 6, action: 'harness: e3-A is wrong in BOTH directions and on trivially-checkable inputs (findings reported over a one-markdown-file commit) - make the classifier content-based or stop emitting a label', owner: owner-harness, status: open}
   - {id: e6-D, epic: 6, action: 'harness: block-loops.sh has no run OR epic boundary - the first pass inherited four wave-2 incidents and one from a different epic dated 2026-09-03 (widens e5-H)', owner: owner-harness, status: open}
   - {id: e6-E, epic: 6, action: 'harness: a DIRECT push to the epic branch nudges nobody - no epic-updated, no rebase_pending; twice this wave the supervisor was the only detector', owner: owner-harness, status: open}
-  - {id: e6-F, epic: 6, action: 'decide setup.install: schedule story 6.11, or state the key is inert and make doctor say so', owner: owner, status: 'DONE 2026-09-05 - 6.11 ran as a solo follow-up cohort on epic/6-11-setup-stage and merged (PR #78). The setup stage now executes the declared install in the verification worktree; a failed install is exit 3 with gates skipped, never a product FAIL. doctor needed no change - it was already the correct half of the disagreement - and a test now drives both surfaces from one config'}
+  # e6-F closed 2026-09-05: story 6.11 ran as a solo follow-up cohort on epic/6-11-setup-stage
+  # and merged (PR #78). The setup stage now executes the declared install in the verification
+  # worktree; a failed install is exit 3 with the gates stage skipped, never a product FAIL.
+  # doctor needed no change - it was already the correct half of the disagreement - and a test
+  # now drives both surfaces from one config. Status is the canonical 'done' rather than prose
+  # so that bmad-sprint-planning actually retires it (sprint_status.py ACTION_STATUSES).
+  - {id: e6-F, epic: 6, action: 'decide setup.install: schedule story 6.11, or state the key is inert and make doctor say so', owner: owner, status: done}
   - {id: e6-G, epic: 6, action: 'decide the closing-pipe exit-1 fix before 0.1.0 is dogfooded, or accept the documented limitation', owner: owner, status: open}
   - {id: e6-H, epic: 6, action: 'harness: running a peer test suite from the supervisor worktree logs tests-passed under the SUPERVISOR agent id', owner: owner-harness, status: open}
   # From the epic/6-11-setup-stage retrospective (docs/findings/epic-6-11-retro-2026-09-05.md).
