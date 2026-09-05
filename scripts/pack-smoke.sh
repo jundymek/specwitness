@@ -190,6 +190,19 @@ if ! publish_log="$(npm publish --dry-run 2>&1)"; then
   echo "$publish_log" >&2
   exit 1
 fi
-echo "$publish_log" | grep -E 'npm notice (total files|package size|unpacked size):' | sed 's/^npm notice/   /'
+# ⚠️ REPORTING ONLY — ITS EXIT STATUS MUST NOT BE THE CHECK'S VERDICT, hence `|| true`.
+# The pass condition is the `if !` above: `npm publish --dry-run` succeeded. These three
+# lines are a convenience for whoever reads the CI log.
+#
+# Without `|| true` this is a latent failure with a trigger nobody would connect to it: an
+# npm configured with `loglevel=warn`, `error` or `silent` prints no `npm notice` lines at
+# all, so `grep` matches nothing and exits 1, and `set -euo pipefail` (line 11) turns a
+# SUCCESSFUL dry run into a failed packaging check.
+#
+# This is the THIRD time on this branch that a pipeline meant only to PRINT had its exit
+# status treated as a verdict — after `grep -q` closing the pipe under GNU tar, and the
+# same shape in the guard that found it. Worth naming, because the pattern is the defect,
+# not any one instance of it.
+echo "$publish_log" | grep -E 'npm notice (total files|package size|unpacked size):' | sed 's/^npm notice/   /' || true
 
 echo "OK: packed tarball installs and behaves (help 0, usage 64, infra 3); contents are dist+templates only"
