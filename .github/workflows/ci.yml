@@ -190,3 +190,237 @@ jobs:
         # this drives the REAL `dist/cli.js` as a subprocess and asserts its process
         # exit code — not an in-process call to a command function.
         run: pnpm test:corpus
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # The browser surface, actually running (story 6.9).
+  #
+  # ⚠️ WHAT THIS JOB IS FOR. Six merged integration suites depend on a real browser, and on
+  # every runner above they DO NOT RUN. Five sit behind `describeWithBrowser`
+  # (`tests/integration/surfaces/helpers/browser-fixture.ts:114`) and self-skip; the sixth,
+  # `conformance.test.ts`, silently narrows from four surfaces to three (its lines 136-150).
+  # The `verify` job's own skipped-suite step reports the first five by name, and on run
+  # 33881286844 it reported, on both platforms: 5 files, 10 suites, 42 tests skipped. This job
+  # exists to take that number to zero, and it proves it by running the SAME reporter over its
+  # own vitest report.
+  #
+  # ⚠️ NON-BLOCKING, DELIBERATELY, AND WITH A STATED END. `continue-on-error: true` means this
+  # job can never fail the workflow run. Browser suites are the most flake-prone thing any CI
+  # carries, and a REQUIRED check that goes red for unrelated reasons trains people to ignore
+  # red — the precise failure this product's exit-code taxonomy exists to prevent. So it lands
+  # amber. Its failures are still loud: every step below writes its verdict into the job
+  # summary, so a reader sees what happened without opening a scrollback.
+  #
+  # The promotion criterion is the PR body's, and flipping it is one line: delete
+  # `continue-on-error` and add `browser (ubuntu-latest)` to branch protection. (Verified with
+  # `gh api` while writing this: master, the epic branch and the ruleset list all report no
+  # protection at all today, so NO check on this repository is enforced.)
+  #
+  # ⚠️ THIS JOB MAY REACH THE NETWORK. THE CORPUS JOB MAY NOT. That is not an inconsistency:
+  # downloading a browser is this job's entire purpose, and story 6.1's corpus AC requires the
+  # corpus to be hermetic — zero provider calls, loopback only, a constructed environment. The
+  # exception is scoped to the steps below and reaches nothing above it. Two suites, two rules,
+  # and they are kept apart on purpose.
+  #
+  # ⚠️ `ubuntu-latest` ONLY. Linux is where this product's process-group, worktree and signal
+  # code had never run before this epic; macOS is where all of it has always run. A macOS
+  # browser job would buy a second data point on the platform that already has one, at browser
+  # prices.
+  browser:
+    name: browser (ubuntu-latest)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node FIRST, then corepack — both ordering traps recorded in `verify` are still live
+      # and apply identically here.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+
+      - name: Enable corepack
+        run: |
+          npm install --global corepack@latest
+          corepack enable
+          corepack --version
+          pnpm --version
+
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Read the pinned Playwright version
+        id: playwright
+        # Keyed on the PIN rather than on `hashFiles('package.json')`, so an unrelated edit to
+        # the manifest does not throw away a 150MB download. `tests/unit/infra/playwright-pin.test.ts`
+        # keeps this value and `PROVISIONED_PLAYWRIGHT_VERSION` in step, which is what makes
+        # the peer dependency a safe thing to key on.
+        run: |
+          version="$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).peerDependencies['@playwright/test'])")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "pinned @playwright/test: ${version}"
+
+      - name: Cache the chromium bundle
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          # Playwright's OWN default registry, mirrored in `src/infra/playwright-env.ts`
+          # (`playwrightDefaultBrowsersPath`). This is where the PROJECT route downloads to,
+          # and the project route is the one this repository takes.
+          #
+          # ⚠️ `PLAYWRIGHT_BROWSERS_PATH` is NOT SET, here or anywhere in this job. 5.1's
+          # header states it is "input, not authority": setting it would silently change which
+          # of the three resolution branches runs, and the job would be proving a path no user
+          # takes. The path below is what resolution computes on its own; it is cached, not
+          # imposed.
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+
+      - name: Record which browser processes are already running
+        # The "before" half of AC4. A survival scan is only a statement about THIS RUN if
+        # something subtracts what the runner arrived with — see the script's header for the
+        # 77-false-positives story that made this a diff rather than a count. Always exits 0:
+        # a runner that arrives with a browser up is a fact to record, not this job's failure.
+        run: |
+          node scripts/browser-leak-check.mjs \
+            --browsers-path "$HOME/.cache/ms-playwright" \
+            --write-baseline "$RUNNER_TEMP/browser-baseline.txt" \
+            --label "before anything ran"
+
+      - name: Provision Playwright through SpecWitness's OWN code
+        # ⚠️ THE FIRST TIME `provisionPlaywright` HAS EVER PROVISIONED ANYTHING.
+        # `src/cli/doctor/effects.ts:82` records that `doctor` deliberately does not call it,
+        # and every other reference in the repository is a unit test with an INJECTED
+        # `ProcessRunner`. Epic 5's retro §9 names the gap: "a real browser download —
+        # performed by no gate on any platform in this epic". `pnpm provision:browser` runs
+        # the real thing, through the real `createProcessRunner`.
+        #
+        # A separate step, not a `globalSetup`, so its wall-clock is a number the promotion
+        # decision can use.
+        #
+        # The duration is written whether or not provisioning SUCCEEDS. A cold download that
+        # times out is precisely the case where its wall-clock is the number somebody needs,
+        # and `set -e` would otherwise skip the export and leave the always-run summary saying
+        # `n/a` on exactly the failing runs. Status captured, duration written, status returned.
+        run: |
+          start=$(date +%s)
+          pnpm provision:browser || status=$?
+          echo "PROVISION_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+          exit ${status:-0}
+
+      - name: Run the browser-dependent suites
+        id: suites
+        # Same as the step above: a failing suite still reports how long it ran, because the
+        # summary is `always()` and a run that lost its timing is a run whose cost nobody can
+        # weigh against the promotion criterion.
+        run: |
+          start=$(date +%s)
+          pnpm test:browser || status=$?
+          echo "SUITES_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+          exit ${status:-0}
+
+      - name: Prove they RAN rather than skipped
+        # ⚠️ THE ACCEPTANCE EVIDENCE, and it is deliberately story 6.1's script UNCHANGED.
+        # A green job proves nothing here — a green job is exactly what the defect looked like.
+        # What proves it is this reporter answering "SKIPPED: 0 file(s), 0 suite(s)" over a run
+        # that collected the browser suites. `always()`: a failing suite is when the reader
+        # most needs to know whether it ran at all.
+        if: always()
+        run: pnpm report:skips:browser
+
+      - name: No browser process survived the run (AC4, normal exit)
+        # ⚠️ `--reap` IS NOT OPTIONAL HERE, and leaving it out was a P1 on this branch.
+        # This job is non-blocking and every step below is `always()`, so a survivor that was
+        # only REPORTED would keep running while the job finished around it — and the
+        # cancelled-run check would then record it in its own baseline and subtract it. The
+        # job would end having left a browser tree on a shared runner: the exact condition
+        # AC4 exists to prevent, produced by the check for it.
+        #
+        # Reaping happens after the report and does not change the exit code, so a leak that
+        # had to be reaped still fails this step.
+        if: always()
+        #
+        # ⚠️ THIS STEP REPORTS AND DOES NOT REAP, AND THAT IS THE CORRECTED POSITION.
+        #
+        # It briefly did reap, authorised by "the argv names this workspace or the shared browsers
+        # registry". A P1 on this branch established that neither is RUN-SPECIFIC:
+        # `~/.cache/ms-playwright` is the registry every Playwright on the machine shares, and any
+        # Chrome may reference a file under the checkout — so on a shared or self-hosted runner
+        # that rule could SIGKILL a neighbour's process group. Only a caller that spawned a group
+        # can vouch for it, and this step does not know the pgids the suites created.
+        #
+        # So it reports, names every survivor with its full argv, and FAILS the step. On a
+        # GitHub-hosted runner the VM is discarded immediately afterwards; on any other runner a
+        # visible report the operator can act on is strictly better than this job killing
+        # something it cannot prove is its own. The cancelled-run check below DOES reap, because
+        # it spawns the groups itself and passes their pgids explicitly.
+        #
+        # `--exclusive-machine` is what lets this step reap without knowing the suites' pgids, and
+        # it is guarded rather than assumed. On a GitHub-hosted runner the job owns the whole VM
+        # and the VM is destroyed afterwards, so "appeared after the baseline" really is
+        # run-specific — nothing else could have started it. On a self-hosted or persistent
+        # runner that is false, `RUNNER_ENVIRONMENT` is not `github-hosted`, the flag is not
+        # passed, and this step reports without reaping. Naming the precondition is what makes
+        # both review findings satisfiable at once.
+        run: |
+          exclusive=""
+          if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+            exclusive="--exclusive-machine"
+          else
+            echo "RUNNER_ENVIRONMENT=${RUNNER_ENVIRONMENT:-unset} is not github-hosted; reporting without reaping"
+          fi
+          node scripts/browser-leak-check.mjs \
+            --browsers-path "$HOME/.cache/ms-playwright" \
+            --baseline "$RUNNER_TEMP/browser-baseline.txt" \
+            --wait-seconds 30 \
+            --reap ${exclusive} \
+            --label "after the suites finished normally"
+
+      - name: No browser process survived a CANCELLED run (AC4, SIGKILL)
+        # ⚠️ THE CASE THAT ACTUALLY LEAKS. `concurrency.cancel-in-progress` above means every
+        # superseded push kills a browser run mid-flight on a SHARED runner, and Epic 4 retro
+        # §2 observation 8 records that a killed run executes no `afterEach` at all — so every
+        # self-limiting fixture in `browser-fixture.ts` is irrelevant in exactly this case.
+        # The script kills the runner's process GROUP and deliberately spares anything
+        # `ProcessRunner` detached into its own, which is what a cancellation leaves behind.
+        if: always()
+        #
+        # BASELINE_FILE hands this check the JOB-level baseline rather than letting it take a
+        # fresh one. That is what stops a survivor reported by the step above from being
+        # subtracted here and never mentioned again — reported-then-hidden, raised twice by
+        # review. The step above cannot reap (it cannot establish run-specific ownership), so the
+        # remedy is to keep the leak VISIBLE to the end of the job rather than to grant that step
+        # the authority to kill things it cannot prove are its own.
+        env:
+          WAIT_SECONDS: '180'
+        run: |
+          BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+          BASELINE_FILE="$RUNNER_TEMP/browser-baseline.txt" \
+          bash scripts/browser-cancelled-run-check.sh
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Browser job — timings and cache"
+            echo ""
+            echo "| what | value |"
+            echo "| --- | --- |"
+            echo "| chromium cache | ${{ steps.browser-cache.outputs.cache-hit == 'true' && 'HIT' || 'MISS (cold)' }} |"
+            echo "| pinned @playwright/test | ${{ steps.playwright.outputs.version }} |"
+            echo "| provisioning | ${PROVISION_SECONDS:-n/a}s |"
+            echo "| the six suites | ${SUITES_SECONDS:-n/a}s |"
+            echo ""
+            echo "This job is **non-blocking** (\`continue-on-error: true\`). A green workflow"
+            echo "run does **not** mean the browser suites passed — read the steps above."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -28,7 +28,10 @@
     "test": "vitest run",
     "test:corpus": "vitest run tests/corpus",
     "test:ci": "vitest run --reporter=default --reporter=json --outputFile=.vitest-report.json",
+    "test:browser": "vitest run tests/integration/surfaces/browser tests/integration/surfaces/conformance --reporter=default --reporter=json --outputFile=.vitest-browser-report.json",
+    "provision:browser": "vitest run --config vitest.provision.config.ts",
     "report:skips": "node scripts/report-skipped-suites.mjs .vitest-report.json",
+    "report:skips:browser": "node scripts/report-skipped-suites.mjs .vitest-browser-report.json",
     "test:watch": "vitest",
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
     "lint": "pnpm run depcruise"
