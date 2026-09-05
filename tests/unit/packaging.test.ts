@@ -31,6 +31,7 @@ interface Manifest {
   readonly dependencies?: Record<string, string>;
   readonly devDependencies?: Record<string, string>;
   readonly peerDependencies?: Record<string, string>;
+  readonly peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
 }
 
 async function manifest(): Promise<Manifest> {
@@ -119,5 +120,14 @@ describe('the product rules that are visible in the manifest', () => {
     const pkg = await manifest();
     expect(pkg.peerDependencies?.['@playwright/test']).toBe('1.62.1');
     expect(pkg.dependencies?.['@playwright/test']).toBeUndefined();
+
+    // ⚠️ THE ASSERTION THAT ACTUALLY CARRIES THE WORD "OPTIONAL", and it was missing
+    // until Codex review raised it as a P2 on this branch. The two lines above prove the
+    // peer is DECLARED and is not a runtime dependency — neither proves it is optional.
+    // `peerDependenciesMeta` is what makes it so: delete this block from package.json and
+    // npm installs the peer automatically for every consumer, silently contradicting the
+    // README's "everything else works without it", while both assertions above still pass.
+    // A test whose name claims a property it does not check is worse than no test.
+    expect(pkg.peerDependenciesMeta?.['@playwright/test']?.optional).toBe(true);
   });
 });
