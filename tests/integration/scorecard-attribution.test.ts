@@ -16,7 +16,7 @@
  * no `claude`, no `codex`, no network.
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,6 +49,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Restore any permission a case removed, or the cleanup fails too.
+  await chmod(join(projectRoot, '.specwitness'), 0o700).catch(() => undefined);
   await rm(projectRoot, { recursive: true, force: true });
 });
 
@@ -308,6 +310,74 @@ describe('scorecard summary — through the built binary', () => {
 
     expect(parsed.metrics.uniqueDefects.count).toBe(0);
     expect(parsed.findings.unattributed).toBe(2);
+  });
+});
+
+describe('add and summary agree about a truncated run — the P1 regression', () => {
+  it('a judgement accepted by add is counted by summary', async () => {
+    // ⚠️ The end-to-end form of the codex P1. `add` accepts an attribution for a criterion
+    // a truncated record cannot name; before the fix `summary` classified it as an orphan,
+    // so the operator was told "Recorded" while the north-star count could never reach it.
+    // The two halves of one command must not disagree about what was recorded.
+    await seedScorecard([
+      record({
+        criteria: { total: 300, pass: 0, fail: 300, needs_human: 0, skipped: 0, error: 0 },
+        findingCriterionIds: { fail: ['E6-01'], needs_human: [], error: [] },
+        findingCriterionIdsTruncated: true,
+      }),
+    ]);
+
+    const added = await cli([
+      'scorecard',
+      'add',
+      RUN_A,
+      '--criterion',
+      'E6-250',
+      '--attribution',
+      'unique',
+    ]);
+
+    expect(added.exitCode).toBe(EXIT_OK);
+    expect(added.stderr).toMatch(/truncated/i);
+
+    const summary = await cli(['scorecard', 'summary', '--json']);
+    const parsed = JSON.parse(summary.stdout) as {
+      metrics: { uniqueDefects: { count: number } };
+      findings: { orphanedAttributions: number; attributed: number };
+    };
+
+    expect(parsed.metrics.uniqueDefects.count).toBe(1);
+    expect(parsed.findings.attributed).toBe(1);
+    expect(parsed.findings.orphanedAttributions).toBe(0);
+  });
+});
+
+describe('a filesystem failure is actionable, not "report a SpecWitness bug" — the P2 regression', () => {
+  it('names the path and a remedy when the log cannot be written', async () => {
+    // Reproduced against this binary before the fix: exit 3 with
+    // `ERROR: unexpected internal failure: Error: EACCES ...` and
+    // `HINT: this is a SpecWitness bug — please report it`. The exit code was right and
+    // the message sent an operator with a permissions problem to the issue tracker.
+    await seedScorecard([record()]);
+    await chmod(join(projectRoot, '.specwitness'), 0o500);
+
+    const result = await cli([
+      'scorecard',
+      'add',
+      RUN_A,
+      '--criterion',
+      'E6-01',
+      '--attribution',
+      'unique',
+    ]);
+
+    await chmod(join(projectRoot, '.specwitness'), 0o700);
+
+    expect(result.exitCode).toBe(EXIT_INFRA);
+    expect(result.stderr).not.toMatch(/unexpected internal failure/);
+    expect(result.stderr).not.toMatch(/SpecWitness bug/);
+    expect(result.stderr).toMatch(/could not be recorded/);
+    expect(result.stderr).toMatch(/writable/);
   });
 });
 

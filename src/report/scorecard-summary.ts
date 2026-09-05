@@ -256,12 +256,15 @@ function key(runId: string, criterionId: string): string {
  */
 function resolveAttributions(
   records: readonly AttributionRecord[],
-): ReadonlyMap<string, AttributionValue> {
-  const winning = new Map<string, AttributionValue>();
+): readonly AttributionRecord[] {
+  // Keyed by `(runId, criterionId)` for de-duplication; the winning RECORD is kept rather
+  // than just its value, so the caller can join it back to a run without re-parsing a
+  // composite string key.
+  const winning = new Map<string, AttributionRecord>();
   for (const entry of records) {
-    winning.set(key(entry.runId, entry.criterionId), entry.attribution);
+    winning.set(key(entry.runId, entry.criterionId), entry);
   }
-  return winning;
+  return [...winning.values()];
 }
 
 /**
@@ -292,8 +295,19 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
   let truncatedRuns = 0;
   const durations: number[] = [];
 
-  /** Every `(runId, criterionId)` a finding could be about, across every record. */
-  const enumeratedFindings = new Set<string>();
+  /**
+   * Per run: the finding ids it names, and whether that list was cut.
+   *
+   * ⚠️ THE TRUNCATION FLAG IS CARRIED HERE FOR A REASON, and it was a P1 from the codex
+   * review of this branch. `scorecard add` deliberately ACCEPTS an attribution for a
+   * criterion a truncated record does not list (see `warnUnlessCriterionIsAFinding`) —
+   * so if this summary decided membership from the id list alone, that same attribution
+   * would be classified as an orphan and excluded from every metric. The command would
+   * tell an operator the judgement was recorded while the north-star count could never
+   * reach it. Accepting at write time and discarding at read time is precisely the
+   * "confidently wrong metric" this story exists to prevent.
+   */
+  const runFindings = new Map<string, { enumerated: Set<string>; truncated: boolean }>();
 
   for (const record of records) {
     durations.push(record.durationMs);
@@ -322,14 +336,24 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
       truncatedRuns += 1;
     }
 
+    // Two records could in principle share a run id (a hand-edited log); merging rather
+    // than replacing means neither one's findings are lost.
+    const entry = runFindings.get(record.runId) ?? {
+      enumerated: new Set<string>(),
+      truncated: false,
+    };
+    entry.truncated ||= record.findingCriterionIdsTruncated;
+
     for (const criterionId of [
       ...record.findingCriterionIds.fail,
       ...record.findingCriterionIds.needs_human,
       ...record.findingCriterionIds.error,
     ]) {
-      enumeratedFindings.add(key(record.runId, criterionId));
+      entry.enumerated.add(criterionId);
       findingsEnumerated += 1;
     }
+
+    runFindings.set(record.runId, entry);
   }
 
   // ── the human judgements ──────────────────────────────────────────────────────────
@@ -342,11 +366,18 @@ export function summarizeScorecard(input: ScorecardSummaryInput): ScorecardSumma
   };
   let orphanedAttributions = 0;
 
-  for (const [joinKey, value] of winning) {
-    if (enumeratedFindings.has(joinKey)) {
+  for (const { runId, criterionId, attribution: value } of winning) {
+    const entry = runFindings.get(runId);
+
+    // An attribution counts when the run is known AND either the record names that
+    // criterion, or the record's finding list was TRUNCATED — in which case the id's
+    // absence proves nothing, the record's exact counts already say more findings exist,
+    // and `scorecard add` accepted the judgement on exactly that basis. Anything else is
+    // an orphan: reported, never counted, because adding it to a numerator whose
+    // denominator it is not part of is the shape of a quietly wrong rate.
+    if (entry !== undefined && (entry.enumerated.has(criterionId) || entry.truncated)) {
       attributionCounts[value] += 1;
     } else {
-      // Reported, never counted. See `FindingCounts.orphanedAttributions`.
       orphanedAttributions += 1;
     }
   }

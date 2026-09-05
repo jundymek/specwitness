@@ -384,6 +384,83 @@ describe('findings are counted from the EXACT counts, not from the capped id arr
   });
 });
 
+describe('an attribution accepted for a TRUNCATED run actually reaches the metrics', () => {
+  it('counts a judgement whose criterion the truncated record could not name', async () => {
+    // ⚠️ THE P1 FROM THE CODEX REVIEW OF THIS BRANCH, as a test.
+    //
+    // `scorecard add` deliberately ACCEPTS an attribution for a criterion a truncated
+    // record does not list — the id list is capped at 200 by story 6.5, so absence proves
+    // nothing. Before the fix, this summary decided membership from the id list alone, so
+    // that same attribution was classified as an ORPHAN and excluded from every metric:
+    // the command said "Recorded", and the north-star count could never reach it.
+    //
+    // BY HAND: the record claims 300 failures and names one. E6-250 is not named, but the
+    // record is truncated, so the judgement counts. uniqueDefects = 1, orphans = 0.
+    const truncated = run({
+      id: 'run-20260904T120009Z-r009',
+      outcome: { verdict: 'FAIL' },
+      durationMs: 1000,
+      providerInvocations: 0,
+      fail: ['E6-01'],
+      truncated: true,
+    });
+    const withMore: ScorecardRecord = {
+      ...truncated,
+      criteria: { ...truncated.criteria, total: 300, fail: 300 },
+    };
+
+    const summary = summarizeScorecard(
+      input({
+        scorecard: { records: [withMore], skipped: [] },
+        attributions: {
+          records: [attribution('run-20260904T120009Z-r009', 'E6-250', 'unique')],
+          skipped: [],
+        },
+      }),
+    );
+
+    expect(summary.metrics.uniqueDefects.count).toBe(1);
+    expect(summary.findings.attributed).toBe(1);
+    expect(summary.findings.orphanedAttributions).toBe(0);
+    // 300 findings exist, one is judged, so 299 remain unjudged.
+    expect(summary.findings.unattributed).toBe(299);
+  });
+
+  it('still orphans an attribution whose RUN is unknown, truncated or not', () => {
+    // The fix must not become a blanket amnesty: a run that is not in the scorecard at all
+    // has no truncation flag to appeal to.
+    const summary = summarizeScorecard(
+      input({
+        scorecard: { records: RECORDS, skipped: [] },
+        attributions: {
+          records: [attribution('run-20260904T129999Z-zzzz', 'E6-77', 'unique')],
+          skipped: [],
+        },
+      }),
+    );
+
+    expect(summary.findings.orphanedAttributions).toBe(1);
+    expect(summary.metrics.uniqueDefects.count).toBe(0);
+  });
+
+  it('still orphans an unnamed criterion when the run was NOT truncated', () => {
+    // The other half of the boundary: an untruncated record's id list IS the set, so an
+    // id outside it is a genuine mismatch and must not be counted.
+    const summary = summarizeScorecard(
+      input({
+        scorecard: { records: RECORDS, skipped: [] },
+        attributions: {
+          records: [attribution('run-20260904T120002Z-r002', 'E6-88', 'unique')],
+          skipped: [],
+        },
+      }),
+    );
+
+    expect(summary.findings.orphanedAttributions).toBe(1);
+    expect(summary.metrics.uniqueDefects.count).toBe(0);
+  });
+});
+
 describe('an attribution that joins to no finding is reported, never counted', () => {
   it('excludes an orphan from the metrics and surfaces it as its own number', () => {
     // An attribution whose run is missing from the scorecard (its line was skipped, or

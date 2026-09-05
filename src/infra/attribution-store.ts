@@ -137,11 +137,28 @@ export class AttributionStore {
     // ONE write, `O_APPEND`. Not read-modify-write, not open-truncate-write: either would
     // lose a concurrent writer's record rather than merely interleave with it. The
     // separator travels in the SAME buffer, so this stays one `write(2)`.
-    await appendFile(
-      this.#path,
-      `${await this.#separatorForTornTail()}${serializeAttributionRecord(record)}`,
-      { encoding: 'utf8', flag: 'a' },
-    );
+    try {
+      await appendFile(
+        this.#path,
+        `${await this.#separatorForTornTail()}${serializeAttributionRecord(record)}`,
+        { encoding: 'utf8', flag: 'a' },
+      );
+    } catch (cause) {
+      // ⚠️ TRANSLATED AT THIS BOUNDARY, and it was a P2 from the codex review of this
+      // branch. A raw Node `EACCES`/`ENOSPC` is not an `isSpecWitnessError`, so the global
+      // handler in `main.ts` printed `unexpected internal failure: ...` with the hint
+      // *"this is a SpecWitness bug — please report it"*. Reproduced against the built
+      // binary with a read-only `.specwitness/`: the exit code was right (3) and the
+      // MESSAGE told an operator with a permissions problem to file a bug report.
+      //
+      // The adapter's job is to turn an environment failure into an actionable one. The
+      // cause's message is included because it names the errno and the path, which is what
+      // makes it fixable; no stack, which would name paths nobody asked about.
+      throw new InfraError(
+        `the attribution could not be recorded: ${describe(cause)}`,
+        `check that ${this.#path} is writable and that the disk is not full, then run the command again`,
+      );
+    }
   }
 
   /**
@@ -207,7 +224,12 @@ export class AttributionStore {
       if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
         return { records: [], skipped: [] };
       }
-      throw cause;
+      // Translated like the write path above, and for the same reason: an unreadable log
+      // is an environment problem the operator can fix, not a SpecWitness bug to report.
+      throw new InfraError(
+        `the attribution log could not be read: ${describe(cause)}`,
+        `check that ${this.#path} is readable, then run the command again`,
+      );
     }
 
     const records: AttributionRecord[] = [];
@@ -231,4 +253,14 @@ export class AttributionStore {
 
     return { records, skipped };
   }
+}
+
+/**
+ * One line about a thrown value, for an `InfraError` message.
+ *
+ * The message only — never a stack trace, which is rendered and would name paths the
+ * operator did not ask about. Mirrors `describe` in `src/infra/scorecard-store.ts`.
+ */
+function describe(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }

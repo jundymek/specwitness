@@ -19,6 +19,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { InfraError } from '../../../src/domain/errors.js';
 import { AttributionStore } from '../../../src/infra/attribution-store.js';
 import {
   ATTRIBUTION_RECORD_VERSION,
@@ -69,14 +70,29 @@ describe('a failed write is REPORTED, not swallowed', () => {
     // The whole point. Story 6.5's writer resolves on every path; this one must not,
     // because a human's judgement silently not being recorded is a lost measurement
     // nobody can reconstruct later.
-    await expect(new AttributionStore(root).append(record())).rejects.toThrow();
+    //
+    // ⚠️ ASSERTS THE ERROR TYPE, not merely that something threw. The first version of
+    // this test said `.rejects.toThrow()`, which passes for a raw Node `EACCES` too — and
+    // that is exactly the defect the codex review of this branch found as a P2: an
+    // untranslated error reaches `main.ts` and prints "unexpected internal failure ...
+    // this is a SpecWitness bug — please report it" at an operator whose disk is full.
+    await expect(new AttributionStore(root).append(record())).rejects.toThrow(InfraError);
   });
 
   it('rejects rather than writing when the path is not a regular file', async () => {
     const root = await project();
     await mkdir(fileOf(root), { recursive: true });
 
-    await expect(new AttributionStore(root).append(record())).rejects.toThrow();
+    await expect(new AttributionStore(root).append(record())).rejects.toThrow(InfraError);
+  });
+
+  it('names the path and a remedy, so the failure is actionable', async () => {
+    const root = await project();
+    await chmod(join(root, '.specwitness'), 0o500);
+
+    await expect(new AttributionStore(root).append(record())).rejects.toMatchObject({
+      hint: expect.stringContaining('writable') as unknown as string,
+    });
   });
 });
 
@@ -216,7 +232,7 @@ describe('reading — ADR-008 §5, and an absent file is not an error', () => {
     await writeFile(fileOf(root), serializeAttributionRecord(record()), 'utf8');
     await chmod(fileOf(root), 0o000);
 
-    await expect(new AttributionStore(root).read()).rejects.toThrow();
+    await expect(new AttributionStore(root).read()).rejects.toThrow(InfraError);
     await chmod(fileOf(root), 0o600);
   });
 });
