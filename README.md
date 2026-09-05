@@ -248,30 +248,63 @@ never defaulted, and omitting it is a usage error rather than a guess.
 
 ```bash
 # Attribute one finding. --attribution is required and takes
-# unique | duplicate | false-positive
-specwitness scorecard add <run-id> --criterion E12-03 --attribution unique
+# unique | duplicate | false-positive   (duplicate-of-earlier-gate is an alias)
+specwitness scorecard add <run-id> --criterion E12-03 --attribution unique [--note "…"]
 
 # Report the metrics
 specwitness scorecard summary [--json]
 ```
 
-`summary` reports the north-star number — **unique real defects found after earlier gates
-passed** — plus the false-positive, NEEDS_HUMAN, infra-error and flaky rates, median run
-duration, AI-free run share, and counts of skipped and unattributed records. Every rate
-shows its denominator, and a rate whose denominator is zero is `null`, never `0%`.
+```console
+$ specwitness scorecard summary
+SpecWitness dogfooding scorecard
+
+  THE NORTH STAR (SM-1) — real defects SpecWitness found that earlier gates missed
+    Unique real defects:   0 of 2 judged, of 2 findings
+    Unattributed:          0 finding(s) nobody has judged yet
+
+  RATES (numerator of denominator — a rate at n=1 is not a trend)
+    False-positive rate:   1 of 2 (50.0%)
+    NEEDS_HUMAN rate:      0 of 2 (0.0%)
+    Infra-error rate:      1 of 2 (50.0%)
+    AI-free run share:     1 of 2 (50.0%)
+    Flaky (retry-to-green): 1 of 2 (50.0%)
+    Median duration:       8000 ms (median of 2)
+```
+
+**Every rate shows its denominator, and a rate whose denominator is zero is `null`** —
+never `0%` and never `NaN`, because "we measured and found none" and "there was nothing to
+measure" are different answers. The north star is a **count**, not a rate: it carries
+`count`, `ofAttributed` and `ofAllFindings` rather than a percentage.
+
+The summary also reports two honesty counters: `runsWithTruncatedFindingIds` (runs with
+more findings than the record lists individually, so those cannot be attributed by id) and
+`orphanedAttributions` (attributions naming a finding no record lists — reported, and
+excluded from every metric). **An unattributed finding is never counted as `unique`.**
 
 Attributions are append-only, and re-attributing is allowed — people change their minds, so
 a correction is a later line and the last record wins. `scorecard` adjudicates nothing: it
-can exit `0`, `64` or `3`, and never `1` or `2`.
+can exit `0`, `64` or `3`, and never `1` or `2`. `add` can also warn on stderr and still
+exit `0` — when a run's finding list was truncated, membership cannot be confirmed, so the
+attribution is accepted with a warning rather than refused.
+
+`summary --json` carries its own `"schemaVersion": 1` (the `scorecardSummary` artifact —
+**a different document from the run report**, so pin it separately).
+
+> **`--note` redaction is real but bounded — do not over-trust it.** Notes are capped at
+> 512 bytes, and assignment- and header-shaped secrets are removed (`api_key=…` becomes
+> `api_key=[REDACTED]`). **A bare opaque token sitting in prose is not redacted**, because
+> nothing can distinguish one from an ordinary word. Do not paste credentials into a note.
 
 > **⚠️ Status.** These two commands are story 6.6 of this epic, developed in parallel with
-> this README and **not yet merged when this section was written**, so they are the one
-> part of this README not verified by running the binary. The surface above was
-> cross-checked against 6.6's implementation source — `--criterion` and `--attribution`
-> are both `requiredOption`s, and `duplicate-of-earlier-gate` is accepted as an alias for
-> `duplicate` — and matches the specification its author published. If
-> `specwitness scorecard --help` ever disagrees with the text above, the binary is right
-> and this is a documentation bug; please report it.
+> this README and **not yet merged when this section was written** — the one part of this
+> README whose binary the author of this section did not run personally. It is not
+> unverified, though: the surface was cross-checked against 6.6's implementation source
+> (`--criterion` and `--attribution` are both `requiredOption`s;
+> `duplicate-of-earlier-gate` aliases `duplicate`), and every claim above — including the
+> pasted output and the `null`-on-zero-denominator rule — was confirmed by 6.6's author
+> against **their** built binary. If `specwitness scorecard --help` ever disagrees with
+> this text, the binary is right and this is a documentation bug; please report it.
 
 ### `verify` flags
 

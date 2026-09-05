@@ -83,9 +83,12 @@ exits `3`, not `64` — the invocation was well-formed, the environment was not 
 
 ## 3. The machine contract: `--json`
 
-`verify --json` and `report --json` emit the **run document**. `doctor --json` and
-`contract --status --json` emit different, smaller documents — do not write one parser for
-all four.
+`verify --json` and `report --json` emit the **run document**. `doctor --json`,
+`contract --status --json` and `scorecard summary --json` emit different documents — **do
+not write one parser for all of them.** Each versioned document carries its own
+`schemaVersion` and they move independently: the run report is the `jsonReport` artifact
+(version `1`), the dogfooding summary is `scorecardSummary` (version `1`). Pin the one you
+consume.
 
 ### The property to rely on
 
