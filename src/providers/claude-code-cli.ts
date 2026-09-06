@@ -81,8 +81,24 @@ const DEFAULT_BILLING_ENV_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] a
  */
 const PROBE_TIMEOUT_MS = 5_000;
 
-/** Generation bound. Drafting a contract is slow work, but never unbounded. */
-const DEFAULT_INVOCATION_TIMEOUT_MS = 300_000;
+/**
+ * Generation bound. Drafting is slow work, but never unbounded.
+ *
+ * **Fifteen minutes, raised from five on 2026-09-05 by measurement during the first real
+ * dogfooding run**, and deliberately above `codex-cli.ts`'s ten. The old value was chosen
+ * for the CONTRACT role — the comment it replaced said so — but this constant serves every
+ * role, and `plan-author` is the larger job by a wide margin: a contract draft reads an
+ * epic and emits criteria, while a plan must emit probes, assertions and reviewer guidance
+ * for EVERY criterion in one response. On a real 40-criterion contract the five-minute
+ * bound fired before the model had finished, three attempts running, and the retry budget
+ * was spent re-hitting the same wall rather than recovering from anything.
+ *
+ * Higher than codex's because the two are not doing equal work: `codex exec` is handed a
+ * JSON Schema via `--output-schema` and the API enforces the shape, whereas this adapter
+ * carries the schema in the PROMPT and the model must hold it while composing. That is
+ * strictly more to do per token, and the timeout follows the work rather than the binary.
+ */
+const DEFAULT_INVOCATION_TIMEOUT_MS = 900_000;
 
 /**
  * Above this many bytes the prompt travels on stdin instead of argv.
