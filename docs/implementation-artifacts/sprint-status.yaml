@@ -115,6 +115,12 @@ development_status:
   epic-6-retrospective: done
 
   epic-7: backlog
+  # Repair story written 2026-09-06 from the FIRST REAL DOGFOODING RUN (gitnebula Epic 6),
+  # not from planning; it is not in epics.md. Numbered 7.0 because it precedes 7.1's
+  # completion: the harness integration it belongs to is the run that found it. Recorded as
+  # D-5 in docs/findings/dogfooding-defects-2026-09-05.md. Spec in
+  # docs/implementation-artifacts/epic-7-dogfooding-repairs/.
+  7-0-provision-playwright-on-first-browser-probe: ready-for-dev
   7-1-harness-integration-first-real-contract: backlog
   7-2-first-real-epic-verification-repair-loop: backlog
   7-3-hypothesis-verdict-report: backlog
@@ -156,6 +162,13 @@ action_items:
   - {id: e6-F, epic: 6, action: 'decide setup.install: schedule story 6.11, or state the key is inert and make doctor say so', owner: owner, status: done}
   - {id: e6-G, epic: 6, action: 'decide the closing-pipe exit-1 fix before 0.1.0 is dogfooded, or accept the documented limitation', owner: owner, status: open}
   - {id: e6-H, epic: 6, action: 'harness: running a peer test suite from the supervisor worktree logs tests-passed under the SUPERVISOR agent id', owner: owner-harness, status: open}
+  # From the first real dogfooding run, 2026-09-06 (gitnebula Epic 6). Evidence and
+  # reproductions in docs/findings/dogfooding-defects-2026-09-05.md.
+  - {id: d1, epic: 7, action: 'the plan response schema is not expressible in OpenAI structured outputs, so codex can NEVER compile a plan: z.record emits a type where additionalProperties must be false, discriminated unions emit oneOf which is forbidden, and .optional() leaves a key out of required which is rejected outright. Needs a schema redesign (arrays of pairs, an explicit discriminator field, explicit null) - touches PLAN_SCHEMA_VERSION, the corpus fixtures carrying pre-compiled plans, and an ADR. NOT patchable in the adapter: oneOf->anyOf changes meaning and .optional() has no safe translation', owner: owner, status: open}
+  - {id: d2, epic: 7, action: 'generation timeout was sized for the contract role and fired on a 40-criterion plan', owner: owner, status: 'done 2026-09-06 in 103ec20 - DEFAULT_INVOCATION_TIMEOUT_MS 300s -> 900s, above codex-cli.ts''s 600s because this adapter carries the schema in the PROMPT while codex has the API enforce it. 206 provider tests pass; no test pinned the old value. Carried question: there is still no configuration surface for it'}
+  - {id: d3, epic: 7, action: 'plan refuses to recompile after new surfaces are declared and says "nothing needs recompiling", which is false: the staleness check reads the contract fingerprint only, while a plan references commandId/serviceId, so declaring an observation genuinely widens what can be planned. Include the declared ids in the check, or narrow the sentence', owner: owner, status: open}
+  - {id: d4, epic: 7, action: 'a transient provider probe failure spends all three recorded attempts in ~15s (3 x PROBE_TIMEOUT_MS) with no backoff; claude answered in 15ms immediately afterwards. A retry with no delay cannot recover from the only failure class retries exist for', owner: owner, status: open}
+  - {id: d5, epic: 7, action: 'provisionPlaywright is exported and unit-tested but called from NOWHERE in src/, so a browser probe can never provision - structurally the same defect 6.11 closed for setup.install. Two user-facing messages promise provisioning that does not happen', owner: owner, status: 'scheduled as story 7.0, spec written 2026-09-06'}
   # From the epic/6-11-setup-stage retrospective (docs/findings/epic-6-11-retro-2026-09-05.md).
   - {id: e6.11-A, epic: 6.11, action: 'process: a SUPERVISOR-authored spec must cite path:line read in the authoring session for every claim about merged behaviour - the rule such specs already impose on their implementer (e5-B). Two claims in the 6.11 spec were wrong: AC3 required an infra error to reach aggregate/persist, which run-pipeline.ts:322-329 has never done for any stage, and the placeholder call-site count was seven against a real two', owner: owner-process, status: open}
   - {id: e6.11-B, epic: 6.11, action: 'decide URL-userinfo redaction: DATABASE_URL=postgres://admin:SECRET@db/app leaks whole, and so does a bare connection string in captured output with no assignment at all, which no name-based rule can reach. Needs a value-shaped rule in src/domain/evidence.ts (the single chokepoint before persistence), backtracking-free, idempotent against the marker pass, with its own corpus of URL shapes INCLUDING ones that must not change. Measured and reproduced by the supervisor; more consequential than the PGPASSWORD gap 6.11 closed', owner: owner, status: open}
