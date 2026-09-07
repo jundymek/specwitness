@@ -131,6 +131,13 @@ development_status:
   7-1-harness-integration-first-real-contract: backlog
   7-2-first-real-epic-verification-repair-loop: backlog
   7-3-hypothesis-verdict-report: backlog
+  # Written 2026-09-07 by the SUPERVISOR of epic/7-dogfooding-repairs, with the owner's
+  # agreement, from evidence found while reviewing story 7.0's follow-up: AD-10's
+  # config-declared extra redaction patterns have no configuration surface at all, so every
+  # extraPatterns path in the domain, the four surfaces and the authoring path has been dead
+  # in production since Epic 3. Recorded as finding 17 in 7.0's Dev Agent Record. Unassigned:
+  # writing the spec schedules nothing, and which wave it lands in is the owner's call.
+  7-4-redaction-extra-patterns-config-surface: ready-for-dev
   epic-7-retrospective: optional
 
 # Appended per the workflow note above; established at the Epic 3 retrospective
