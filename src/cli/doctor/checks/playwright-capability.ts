@@ -153,7 +153,10 @@ export const playwrightCapabilityCheck: DoctorCheck = {
         detail:
           `${preamble}; no browser bundle downloaded in ${environment.browsersPath}. ` +
           `HINT: ${manualInstallCommand(environment)}, or let \`specwitness verify\` download ` +
-          'it on the next run whose plan carries a browser probe (this command never downloads)',
+          'it on the next run whose plan carries a browser probe — except under ' +
+          `PLAYWRIGHT_BROWSERS_PATH=0 on a project's own ${PACKAGE}, where SpecWitness ` +
+          'refuses to write a bundle inside the project tree and the command above is the ' +
+          'only route. This command never downloads',
       };
     }
 

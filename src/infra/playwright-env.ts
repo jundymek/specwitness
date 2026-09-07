@@ -1208,8 +1208,15 @@ function classify(result: ProcessResult, what: string, binary: string): void {
   if (result.outcome === 'timed-out') {
     throw new InfraError(
       `${what} timed out`,
-      'a first browser download can take several minutes on a slow connection — raise the ' +
-        'timeout, or provision Playwright yourself and run the command again',
+      // ⚠️ DELIBERATELY DOES NOT SAY "raise the timeout" (story 7.0). The budget is a
+      // constant — `verify` has no flag for it and the Project Config schema has no key —
+      // and this path became reachable in production the moment `verify` began provisioning.
+      // `src/providers/codex-cli.ts:729` states the rule for the identical shape: under the
+      // ERROR/HINT contract an unactionable hint is worse than none, so every step below is
+      // something the operator can actually run.
+      'a first browser download can take several minutes on a slow connection — check the ' +
+        `connection, or install ${PLAYWRIGHT_PACKAGE} and run \`npx playwright install ` +
+        `${PROVISIONED_BROWSER}\` in the project yourself, then run the command again`,
     );
   }
 

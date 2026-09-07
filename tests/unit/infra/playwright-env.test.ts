@@ -1058,6 +1058,13 @@ describe('provisionPlaywright', () => {
 
       expect(error).toBeInstanceOf(InfraError);
       expect(error.message).toMatch(/timed out/i);
+      // ⚠️ THE HINT MUST NOT NAME A KNOB THAT DOES NOT EXIST (story 7.0). The budget is a
+      // constant — `verify` has no flag for it and the Project Config schema has no key —
+      // and this path became reachable in production the moment `verify` began provisioning.
+      // `src/providers/codex-cli.ts:729` states the rule for exactly this shape: under the
+      // ERROR/HINT contract an unactionable hint is worse than none.
+      expect(error.hint).not.toMatch(/raise the timeout/i);
+      expect(error.hint).toMatch(/install/i);
     } finally {
       await rm(project, { recursive: true, force: true });
       await rm(home, { recursive: true, force: true });

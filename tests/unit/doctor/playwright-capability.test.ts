@@ -207,6 +207,20 @@ describe('playwright-capability (optional)', () => {
     },
   );
 
+  it('names the one state in which `verify` will NOT download, rather than promising it (story 7.0)', async () => {
+    // ⚠️ THE EXCEPTION THE NEW HINT WOULD OTHERWISE PAPER OVER. With
+    // `PLAYWRIGHT_BROWSERS_PATH=0` and a project-installed Playwright, provisioning REFUSES
+    // — `playwright-env.ts` will not write a browser bundle inside a project's own package
+    // — so "let `specwitness verify` download it" would be untrue in exactly the state this
+    // branch reports. Found by review of this branch. AC6 is about not leaving a message
+    // that promises what the code does not do, and a hint that is true in most states is
+    // still the message an operator meets in the one where it is not.
+    const result = await run(projectReady({ browsersPresent: false, browsersPathFromEnv: true }));
+
+    expect(result.status).toBe('warn');
+    expect(result.detail).toContain('PLAYWRIGHT_BROWSERS_PATH=0');
+  });
+
   it('reports an unknown version rather than pretending it read one', async () => {
     const result = await run(projectReady({ version: null }));
 
