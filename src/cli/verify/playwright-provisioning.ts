@@ -65,6 +65,7 @@
  */
 
 import { InfraError } from '../../domain/errors.js';
+import { redactText } from '../../domain/evidence.js';
 import type { Plan } from '../../domain/plan.js';
 import type { ProcessRunner } from '../../domain/process-runner.js';
 import type { ParentEnvironment } from '../../infra/process-runner.js';
@@ -211,14 +212,41 @@ export async function resolveBrowserEnvironment(
     return await resolvePlaywrightEnvironment(environment);
   }
 
+  // ⚠️ A RECORDING FAILURE IS NOT A PROVISIONING DIAGNOSIS, and it arrives as the same TYPE.
+  // AD-8 wires `RunStore.recordProcessGroup` into every spawn, and `ProcessRunner`
+  // deliberately kills the child and RETHROWS a failure from that hook unchanged rather than
+  // flattening it into a subprocess outcome (`infra/process-runner.ts:719-723`). What comes
+  // out is an `InfraError` about the run losing its ability to record a process group — the
+  // thing `specwitness clean` needs to reap a killed download — and deferring THAT would let
+  // the pipeline carry on and, behind a failing gate, exit 1 with a durability failure nobody
+  // ever hears about. So it is remembered here and rethrown below: only a failure this module
+  // asked for and can explain may be downgraded. Raised as a P2 by the codex review.
+  let recordingFailure: unknown;
+  const onProcessGroup =
+    inputs.onProcessGroup === undefined
+      ? undefined
+      : async (pgid: number): Promise<void> => {
+          try {
+            await inputs.onProcessGroup?.(pgid);
+          } catch (failure) {
+            recordingFailure = failure;
+            throw failure;
+          }
+        };
+
   try {
     return await provisionPlaywright({
       ...environment,
       runner: inputs.runner,
       timeoutMs: inputs.timeoutMs ?? PROVISION_TIMEOUT_MS,
-      ...(inputs.onProcessGroup === undefined ? {} : { onProcessGroup: inputs.onProcessGroup }),
+      ...(onProcessGroup === undefined ? {} : { onProcessGroup }),
     });
   } catch (failure) {
+    if (recordingFailure !== undefined) {
+      // Rethrown whatever its shape: the run's own bookkeeping failed, and this module is not
+      // entitled to translate that into a statement about the operator's browser.
+      throw failure;
+    }
     if (!(failure instanceof InfraError)) {
       throw failure;
     }
@@ -240,6 +268,15 @@ export async function resolveBrowserEnvironment(
  * executor's own refusal appends advice about `doctor` and has no way to reproduce "check
  * connectivity, proxy and registry settings" or "PLAYWRIGHT_BROWSERS_PATH points inside the
  * project" — which is the only actionable half of most of these failures.
+ *
+ * ⚠️ AND IT IS REDACTED HERE, AT CAPTURE, NOT AT EACH SINK. These messages quote paths the
+ * operator chose — `PLAYWRIGHT_BROWSERS_PATH` and `XDG_CACHE_HOME` are untrusted input and
+ * can carry credential-shaped material. `BrowserSurfaceExecutor` redacts before building its
+ * refusal, but story 7.0 added two sinks that bypass it: the aggregate stage's timeline
+ * detail, which is PERSISTED inside `result.json`, and the edge's `WARNING:`. Redacting once,
+ * where the text enters this product's own data, covers every sink that exists now and every
+ * one added later; `redactText` is idempotent, so the executor redacting again costs nothing.
+ * Raised as a P1 by the codex auto-review of this branch.
  */
 async function unusableAfterProvisioning(
   environment: PlaywrightEnvironmentInputs,
@@ -254,9 +291,10 @@ async function unusableAfterProvisioning(
     cacheDir: paths.cacheDir,
     browsersPath: paths.browsersPath,
     browsersPathFromEnv: paths.browsersPathFromEnv,
-    reason:
+    reason: redactText(
       failure.hint === undefined || failure.hint === ''
         ? failure.message
         : `${failure.message} — ${failure.hint}`,
+    ),
   };
 }

@@ -31,6 +31,7 @@ import {
   planRequiresBrowser,
   resolveBrowserEnvironment,
 } from '../../../src/cli/verify/playwright-provisioning.js';
+import { InfraError } from '../../../src/domain/errors.js';
 import type { Plan, PlanCriterion, ProbeSpec } from '../../../src/domain/plan.js';
 import type { ProcessResult, ProcessRunOptions } from '../../../src/domain/process-runner.js';
 import { PLAYWRIGHT_PACKAGE } from '../../../src/infra/playwright-env.js';
@@ -431,6 +432,34 @@ describe('resolveBrowserEnvironment, when the operator points the cache inside t
     expect(await treeOf(project)).toEqual(before);
   });
 
+  it('redacts the carried reason, because the paths in it are operator input', async () => {
+    // ⚠️ THE REFUSAL QUOTES A PATH THE OPERATOR CHOSE, and an environment variable is
+    // untrusted text: `PLAYWRIGHT_BROWSERS_PATH` can carry anything, including
+    // credential-shaped material. The browser executor redacts before putting a reason in a
+    // message, but story 7.0 added two NEW sinks that bypass it — the aggregate stage's
+    // timeline detail, which is persisted inside `result.json`, and the edge's WARNING. So
+    // the redaction happens where the text is captured rather than at each sink. Raised as a
+    // P1 by the codex auto-review of this branch.
+    //
+    // Asserting the SECRET IS ABSENT rather than that a marker is present: Epic 3 retro §7.
+    const project = await tempRoot();
+    const home = await tempRoot();
+    const { runner } = fakeRunner([ok()]);
+
+    const refusal = await unusable({
+      projectRoot: project,
+      plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
+      runner,
+      env: { PLAYWRIGHT_BROWSERS_PATH: join(project, 'API_TOKEN=hunter2andsomemore') },
+      platform: 'linux',
+      homeDir: home,
+    });
+
+    expect(refusal.reason).not.toContain('hunter2andsomemore');
+    // The refusal still SAYS what went wrong; redaction removes the value, not the sentence.
+    expect(refusal.reason).toContain('inside the target project');
+  });
+
   it('refuses when XDG_CACHE_HOME points into the project, for the same reason', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
@@ -491,6 +520,40 @@ describe('resolveBrowserEnvironment, when provisioning fails', () => {
     });
 
     expect(refusal.reason).toContain('not on PATH');
+  });
+
+  it('lets an onProcessGroup failure stay fatal, because that is durability and not diagnosis', async () => {
+    // ⚠️ NOT EVERY `InfraError` OUT OF PROVISIONING IS A PROVISIONING DIAGNOSIS. AD-8 wires
+    // `RunStore.recordProcessGroup` into every spawn, and `ProcessRunner` deliberately kills
+    // the child and RETHROWS a recording failure unchanged rather than flattening it into a
+    // subprocess outcome (`src/infra/process-runner.ts:719-723`). That error is the run
+    // losing its ability to record a process group — the thing `specwitness clean` needs to
+    // reap a killed download — and downgrading it to "the browser is unavailable" would let
+    // the pipeline carry on and, behind a failing gate, exit 1 with a durability failure
+    // nobody ever hears about. Raised as a P2 by the codex review of this branch.
+    const project = await tempRoot();
+    const home = await tempRoot();
+    const { runner } = fakeRunner([ok({ pgid: 4242 })]);
+
+    const failure = await resolveBrowserEnvironment({
+      projectRoot: project,
+      plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
+      runner,
+      onProcessGroup: () => {
+        // Exactly what `RunStore.recordProcessGroup` raises when the manifest cannot be
+        // written: an InfraError, indistinguishable by TYPE from a provisioning refusal.
+        throw new InfraError('could not record process group 4242', 'check the run directory');
+      },
+      env: {},
+      platform: 'linux',
+      homeDir: home,
+    }).then(
+      () => 'RESOLVED',
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(InfraError);
+    expect((failure as InfraError).message).toContain('could not record process group');
   });
 
   it('lets a non-InfraError through untouched, because only a diagnosed failure may be downgraded', async () => {
