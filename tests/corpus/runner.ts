@@ -24,7 +24,10 @@
  *     `npm install` or anything else whose purpose is to fetch. Runtime:
  *     `nonLoopbackEvidenceTargets` reads the URLs the run ACTUALLY recorded in its own
  *     evidence, so a hostname assembled at runtime is caught where a text scan could not
- *     see it.
+ *     see it. And, since story 7.0, `npm`/`npx` TRIPWIRES first on `PATH`: the product
+ *     itself can now fetch — `verify` provisions Playwright when the plan carries a browser
+ *     probe — so the fetch a fixture triggers is no longer one a fixture had to ask for in
+ *     text.
  *     **The honest limit, stated because overclaiming here would be worse than the gap:**
  *     none of this is a network sandbox. A fixture that opened a raw socket from inside a
  *     gate script would not be caught by any of the three. Closing that properly means
@@ -457,6 +460,40 @@ async function writeProviderTripwires(binRoot: string, markersRoot: string): Pro
 }
 
 /**
+ * The PACKAGE-REGISTRY tripwires (story 7.0).
+ *
+ * ⚠️ **WITHOUT THESE, A BROWSER-PROBE FIXTURE DOWNLOADS PLAYWRIGHT FROM THE REGISTRY, IN CI.**
+ * `verify` now provisions Playwright when the compiled plan carries a browser probe (story
+ * 7.0, defect D-5), which is a real `npm install` and a chromium download of hundreds of
+ * megabytes. Tooth 2 of this file's header — *no network beyond localhost* — was written
+ * when no code path in the product could fetch anything; the moment one could, the static
+ * text scan stopped being enough, because the fetch is asked for by the PRODUCT rather than
+ * by the fixture.
+ *
+ * So `npm` and `npx` are shadowed by scripts that fetch nothing and fail loudly. The
+ * fixture `browser-probe-provisions` pins what the product does when they do: exit 3,
+ * naming the provisioning step it could not complete — which is only reachable at all
+ * because a call site now exists, and is exactly what this corpus could not previously see.
+ *
+ * They exit 1 rather than 0: an install that reported success and installed nothing is the
+ * green-for-nothing shape, and `provisionPlaywright` would then refuse a second time with a
+ * less legible message. NO MARKER FILE IS WRITTEN — `providerTripwireMarkers` must keep
+ * meaning "a provider CLI ran", and an expected, deliberate `npm` refusal is not that.
+ */
+async function writeRegistryTripwires(binRoot: string): Promise<void> {
+  await mkdir(binRoot, { recursive: true });
+
+  for (const name of ['npm', 'npx']) {
+    const script =
+      '#!/bin/sh\n' +
+      `echo "corpus tripwire: ${name} was invoked; the corpus never fetches from a package ` +
+      'registry" >&2\n' +
+      'exit 1\n';
+    await writeFile(join(binRoot, name), script, { encoding: 'utf8', mode: 0o755 });
+  }
+}
+
+/**
  * Copies a fixture into its own temp workspace and makes it a real git repository.
  *
  * TWO COMMITS ON TWO BRANCHES, deliberately. The base branch holds one empty commit; the
@@ -484,6 +521,7 @@ export async function materializeFixture(
     await mkdir(tempRoot, { recursive: true });
     await mkdir(homeRoot, { recursive: true });
     await writeProviderTripwires(binRoot, markersRoot);
+    await writeRegistryTripwires(binRoot);
 
     // Ports are allocated from the placeholder names found in the CHECKED-IN tree, then
     // substituted into the COPY. The checked-in file keeps its placeholder forever.

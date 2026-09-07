@@ -1,0 +1,32 @@
+# SpecWitness Project Config for the corpus fixture `browser-probe-provisions`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. The single command here is `node <relative path inside this
+# fixture>`: argv, never a shell line. It reaches no network, reads nothing
+# outside this directory, and installs nothing.
+#
+# ⚠️ ON A CORRECT PRODUCT THE SERVICE NEVER STARTS. This fixture is decided
+# before the services stage: the plan carries a browser probe, `verify`
+# provisions Playwright for it (story 7.0), the corpus shadows `npm` with a
+# tripwire that fetches nothing, and the run stops at exit 3 having built no
+# environment. The service is declared because the plan's `serviceId` must name
+# something the project actually declares — an undeclared id is a different
+# refusal, and this fixture must fail for its own reason.
+#
+# `{{PORT:app}}` is substituted by the corpus runner with a freshly allocated
+# ephemeral loopback port at materialisation time.
+
+version: 1
+
+project:
+  baseBranch: master
+
+services:
+  app:
+    run: node app/server.cjs {{PORT:app}}
+    port: {{PORT:app}}
+    ready:
+      url: http://127.0.0.1:{{PORT:app}}/health
+      timeoutSec: 30

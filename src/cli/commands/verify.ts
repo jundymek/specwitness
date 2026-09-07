@@ -82,7 +82,6 @@ import type { RefResolution, RefRole, RepoRoot, RootResolution, Vcs } from '../.
 import { SystemClock } from '../../infra/clock.js';
 import { RandomIds } from '../../infra/ids.js';
 import { createProcessRunner, terminateProcessGroup } from '../../infra/process-runner.js';
-import { resolvePlaywrightEnvironment } from '../../infra/playwright-env.js';
 import { RunStore } from '../../infra/run-store.js';
 import { ScorecardStore } from '../../infra/scorecard-store.js';
 import { createGitVcs } from '../../infra/vcs.js';
@@ -107,6 +106,7 @@ import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
 import { armInterruptNotice } from '../verify/interrupt.js';
 import { explainVerifiedRun, publishExplainedRun } from '../verify/explain.js';
+import { resolveBrowserEnvironment } from '../verify/playwright-provisioning.js';
 import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
 
@@ -335,11 +335,6 @@ async function verify(
   // `specwitness clean` can reap.
   const created = await store.createRun({ epic });
 
-  // Which Playwright a browser probe would drive, if this plan has one (story 5.1).
-  // Resolution performs no network I/O and never spawns; it answers `absent` rather than
-  // throwing, which is what lets a run with no browser probes proceed untouched.
-  const playwright = await resolvePlaywrightEnvironment({ projectRoot });
-
   const environment: RunEnvironment = {
     nodeVersion: process.version,
     platform: process.platform,
@@ -355,6 +350,7 @@ async function verify(
   // lets `specwitness clean` reap a run killed mid-gate, mid-service or mid-probe.
   const recordProcessGroup = (pgid: number): Promise<void> =>
     store.recordProcessGroup(created.runId, pgid);
+
   const writeEvidence = (relativeName: string, contents: string): Promise<string> =>
     store.writeEvidenceFile(created.runId, relativeName, contents);
   // The BINARY twin (story 5.2). A Playwright trace is a `.zip` and a screenshot is a
@@ -392,6 +388,30 @@ async function verify(
   }
 
   async function execute(): Promise<ReturnType<typeof exitCodeForOutcome>> {
+  // Which Playwright this run's browser probes will drive — PROVISIONING ONE when the plan
+  // has a browser probe and the machine has none (story 7.0, defect D-5 of the first
+  // dogfooding run: `provisionPlaywright` was written in 5.1 and called from nowhere, so a
+  // browser probe could only ever exit 3 while two messages promised otherwise).
+  //
+  // THE DECISION COMES FROM THE PLAN, and that is the point: a run whose plan has no browser
+  // probe still only RESOLVES — read-only, offline, no spawn — and costs what it always did.
+  // Provisioning unconditionally would make every gates-only run pay for a browser it never
+  // opens. See `verify/playwright-provisioning.ts` for why this is eager rather than deferred
+  // to the first probe.
+  //
+  // ⚠️ INSIDE THE ARMED INTERRUPT WINDOW, AND THAT IS WHY IT IS HERE RATHER THAN BESIDE
+  // `recordProcessGroup`. This is the first thing in this command that can take MINUTES, it
+  // spawns process groups, and `armInterruptNotice` is what tells an operator who presses
+  // Ctrl+C which run directory to reap. Provisioning above the notice would put the longest
+  // window in the run outside the only thing that names it. `recordProcessGroup` is bound
+  // above and passed here, so every group reaches the manifest either way (AD-8).
+  const playwright = await resolveBrowserEnvironment({
+    projectRoot,
+    plan: planning.plan,
+    runner,
+    onProcessGroup: recordProcessGroup,
+  });
+
   const result = await runPipeline({
     runId: created.runId,
     epic,
@@ -470,13 +490,15 @@ async function verify(
                 writeEvidence,
                 writeEvidenceBytes,
                 resolveRunPath,
-                // Story 5.1's answer, resolved ONCE. Read-only, offline, no spawn - so it
-                // costs a run with no browser probes almost nothing, and it is `verify`
-                // that resolves rather than `doctor` because `doctor` REPORTS and hints
-                // while never downloading. An `absent` answer is passed through rather
-                // than thrown here: only a run that actually reaches a browser probe
-                // should fail on it, and the executor refuses in 5.1's own words - never
-                // a skip, because a criterion that checked nothing must not report PASS.
+                // Story 5.1's answer, settled ONCE above. A run whose plan has no browser
+                // probe only RESOLVED - read-only, offline, no spawn - so it costs almost
+                // nothing; a run whose plan HAS one was provisioned there (story 7.0) and
+                // this value is therefore ready. It is `verify` that provisions rather
+                // than `doctor` because `doctor` REPORTS and hints while never downloading
+                // (AD-12). An `absent` answer can still arrive here - only from a plan with
+                // no browser probe - and is passed through rather than thrown: the executor
+                // refuses in 5.1's own words, never a skip, because a criterion that
+                // checked nothing must not report PASS.
                 playwright,
                 onProcessGroup: recordProcessGroup,
               }),

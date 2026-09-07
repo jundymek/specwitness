@@ -142,7 +142,7 @@ if (!playwright.ready) {
     '\n[specwitness] surface conformance is running with THREE surfaces, not four: ' +
       `${playwright.source === 'absent' ? playwright.reason : 'no browsers are downloaded'}\n` +
       '[specwitness] this is a skipped TEST, not a skipped CRITERION - the browser executor ' +
-      'has no skip path. Run `specwitness doctor` to provision Playwright.\n',
+      'has no skip path. Run `pnpm provision:browser` to download one.\n',
   );
 }
 

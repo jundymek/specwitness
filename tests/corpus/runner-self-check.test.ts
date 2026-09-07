@@ -21,12 +21,14 @@ import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   CORPUS_ROOT,
   discoverFixtures,
   executeFixture,
+  materializeFixture,
   providerTripwireMarkers,
   type FixtureRun,
 } from './runner.js';
@@ -170,4 +172,40 @@ describe('the provider tripwires are real', () => {
 
     expect(await providerTripwireMarkers(run.materialized)).toEqual(['claude.invoked']);
   }, 180_000);
+});
+
+describe('the package-registry tripwires are real (story 7.0)', () => {
+  it.each(['npm', 'npx'])(
+    'shadows `%s` on the fixture PATH with something that fetches nothing and fails',
+    async (binary) => {
+      // ⚠️ THE GUARD THAT KEEPS THE CORPUS OFFLINE NOW THAT THE PRODUCT CAN FETCH. `verify`
+      // provisions Playwright when the compiled plan carries a browser probe, so the fixture
+      // `browser-probe-provisions` would download a package and a ~150MB browser on every CI
+      // run if this shadow were removed — and it would still be GREEN, because the fixture's
+      // own expectation would then be the only thing that noticed. Asserted here rather than
+      // read from the runner, because a guard is only a guard once you have seen it fire.
+      const { root } = await cloneFixture('runner-pass');
+      const [fixture] = await discoverFixtures(root);
+      if (fixture === undefined) {
+        throw new Error('self-check: the private corpus root discovered no fixture');
+      }
+      const materialized = await materializeFixture(fixture);
+      try {
+        const shadow = join(materialized.workspace, 'bin', binary);
+        // `install` is what provisioning actually asks for, and it must fetch nothing.
+        const result = await execa(shadow, ['install', '@playwright/test@1.62.1'], {
+          reject: false,
+        });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain(`corpus tripwire: ${binary} was invoked`);
+        // The provider tripwires leave a marker and this one must NOT: that directory means
+        // "a provider CLI ran", and a deliberate registry refusal is not that.
+        expect(await providerTripwireMarkers(materialized)).toEqual([]);
+      } finally {
+        await materialized.cleanup();
+      }
+    },
+    60_000,
+  );
 });
