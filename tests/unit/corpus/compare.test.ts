@@ -226,10 +226,46 @@ describe('a run that produced no document', () => {
     expect(problems.join('\n')).toContain('stderrContains');
   });
 
+  it('refuses a fixture that pins criterion statuses on a run that produced no document', () => {
+    // ⚠️ CRITERION STATUSES CAN ONLY COME FROM A DOCUMENT. Compared inside the branch that
+    // HAS one, so an expectation naming them against a run that produced none asserted
+    // nothing at all — silently, forever, while the fixture stayed green. That is the
+    // format's own rule ("silence must never be readable as a claim") arriving one level up.
+    //
+    // The case that made it concrete: story 7.0's `browser-provisioning-outranks-gate-failure`
+    // pins `E7-01: skipped` and exit 3, and would have passed just as happily against a
+    // mechanism that wrote no `result.json` at all — which is exactly the regression the
+    // supervisor asked it to catch.
+    const infra = expectation({
+      exitCode: 3,
+      outcome: { infraError: 'infra' },
+      criteria: { assertion: 'exact', statuses: { 'E1-01': 'skipped' } },
+      stderrContains: ['ERROR: something specific'],
+    });
+
+    const problems = compareOutcome(
+      infra,
+      observation({
+        exitCode: 3,
+        document: null,
+        documentSource: 'none',
+        runDirectory: null,
+        stderr: 'ERROR: something specific\n',
+      }),
+      normalizer,
+    );
+
+    expect(problems.join('\n')).toContain('criterion statuses');
+  });
+
   it('accepts an infraError expectation that pins the ERROR text', () => {
     const infra = expectation({
       exitCode: 3,
       outcome: { infraError: 'integrity' },
+      // EXACT-AND-EMPTY, because there is no document to read a status from. A refusal
+      // raised at the CLI edge writes no run document at all, so a fixture for one asserts
+      // the ERROR text and the absence of criteria — never a status it could not have seen.
+      criteria: { assertion: 'exact', statuses: {} },
       stderrContains: ['ERROR: the contract for epic-1 does not match its fingerprint'],
     });
 

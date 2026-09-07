@@ -1,0 +1,24 @@
+{
+  "expectedVersion": 1,
+  "fixture": "browser-provisioning-failure-survives-a-gate-failure",
+  "why": "TWO THINGS ARE TRUE AT ONCE AND THE RUN MUST REPORT BOTH. The plan carries a browser probe, the machine cannot provision a browser (the corpus shadows npm), and a declared gate says no. A gate failure makes the pipeline stop early and jump PAST the probes stage to aggregate (src/pipeline/run-pipeline.ts, the product-negative branch), so the browser executor -- the thing that names an unusable environment -- never runs. Before story 7.0 wired the diagnosis through, such a run printed the branch's verdict and NEVER MENTIONED the environment: the provisioning failure was invisible, not merely outranked. Measured, not supposed -- the tripwire line was absent from the entire output. THE VERDICT IS NOT THE THING THAT CHANGES. domain/verdict.ts:17-35 records the precedence and its reasons: a failing gate outranks everything (AD-6, ADR-003), and 'the reverse ordering would let a flaky probe upgrade a genuinely failing branch to rerun me' (PRD section 9). Exit 3 is the RETRYABLE classification, so promoting this run to it would tell repair automation to retry the environment instead of fixing a branch that demonstrably does not build. An earlier version of this branch did exactly that and was caught as a P1; this fixture was inverted to pin the recorded behaviour instead, and its name changed with it. So: exit 1, verdict FAIL carrying the failing gate, E7-01 skipped because nothing adjudicated it, and the provisioning failure PRESENT in the output -- in the aggregate stage's timeline detail, which lives inside result.json and so reaches a harness, and again as a WARNING for the operator. The fixture still catches the invisibility it was written for: delete either channel and stderrContains goes red. Pinning statuses also requires the run to have produced a document at all (tests/corpus/runner.ts), so this fixture fails if the result is never written, if it exists only in a pipe, if the verdict is wrong, or if the browser failure is silent.",
+  "proves": ["AC5", "FR-22", "AD-6", "AD-7", "ADR-002", "ADR-003", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-7", "--json"],
+  "exitCode": 1,
+  "outcome": { "verdict": "FAIL", "gateFailed": "build" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E7-01": "skipped"
+    }
+  },
+  "stderrContains": [
+    "corpus tripwire: npm was invoked",
+    "could NOT provision the browser its plan requires",
+    "WARNING: this run could not provision the browser its plan requires",
+    "gate build (fail, exit 1)"
+  ],
+  "stderrAbsent": [
+    "infra error: infra"
+  ]
+}

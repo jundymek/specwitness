@@ -290,6 +290,74 @@ describe('runPipeline — a stage that returns a product-negative result', () =>
     expect(result.outcome.infraError).toBeUndefined();
   });
 
+  it('keeps the gate failure as the verdict when a needed browser could not be provisioned', async () => {
+    // ⚠️ A RECORDED PRECEDENCE, AND THIS TEST EXISTS BECAUSE THIS BRANCH BROKE IT ONCE.
+    // `domain/verdict.ts:17-35`: "A failing gate outranks everything" (AD-6, ADR-003), and
+    // "the reverse ordering would let a flaky probe upgrade a genuinely failing branch to
+    // 'rerun me'" (PRD §9). An earlier version of this story threw here instead, turning a
+    // demonstrably broken branch into exit 3 — the RETRYABLE classification — which is the
+    // exact inversion that reasoning was written against. Caught as a P1 by codex.
+    //
+    // What the run must NOT do is stay silent about the browser: the pipeline jumped past
+    // the probes stage, so nothing else says the machine cannot run browser probes at all.
+    // The verdict is the gate's; the diagnosis rides in the timeline, which is inside
+    // `result.json` and therefore reaches a harness rather than only a terminal.
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: {
+        name: 'gates',
+        run: async (context) => {
+          ran.push('gates');
+          context.run.gates.push({ gateId: 'lint', status: 'fail', durationMs: 40 });
+          return stageProductNegative("gate 'lint' failed");
+        },
+      },
+      aggregate: instrumented(
+        createAggregateStage({
+          browserEnvironmentUnavailable:
+            '@playwright/test does not resolve and could not be installed',
+        }),
+        ran,
+      ),
+    });
+
+    const result = await run(stages);
+
+    // The branch does not build. That is true whatever the browser could or could not do.
+    expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+    expect(statusOf(result, 'aggregate')).toBe('ok');
+    // ...and the environment failure is on the record, in the document, not just on a screen.
+    const aggregateEntry = result.stages.find((entry) => entry.stage === 'aggregate');
+    expect(aggregateEntry?.detail).toContain('could NOT provision the browser');
+    expect(aggregateEntry?.detail).toContain('could not be installed');
+    expect(aggregateEntry?.detail).toContain('verdict: FAIL');
+  });
+
+  it('says nothing about a browser when none was needed', async () => {
+    // The dep is bound only when the plan required a browser the run could not get, so an
+    // ordinary gate failure must read exactly as it always has — no extra sentence, no
+    // change of outcome.
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: {
+        name: 'gates',
+        run: async (context) => {
+          ran.push('gates');
+          context.run.gates.push({ gateId: 'lint', status: 'fail', durationMs: 40 });
+          return stageProductNegative("gate 'lint' failed");
+        },
+      },
+      aggregate: instrumented(createAggregateStage(), ran),
+    });
+
+    const result = await run(stages);
+
+    expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+    expect(result.stages.find((entry) => entry.stage === 'aggregate')?.detail).toBe(
+      'verdict: FAIL',
+    );
+  });
+
   it('records the stage as `failed`, which is not the same as `error`', async () => {
     const ran: StageName[] = [];
     const stages = stagesWith(ran, {

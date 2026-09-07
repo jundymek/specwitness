@@ -1,0 +1,38 @@
+# SpecWitness Project Config for the corpus fixture
+# `browser-provisioning-failure-survives-a-gate-failure`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
+# is the one place in this repository where a config is committed with commands
+# intended to run, so adding or editing one is a SECURITY-RELEVANT change, not
+# test data. Both commands here are `node <relative path inside this fixture>`:
+# argv, never a shell line. Neither reaches the network, reads anything outside
+# this directory, or installs anything.
+#
+# THE GATE IS THE MECHANISM, NOT THE SUBJECT. It fails, which makes the pipeline
+# stop early and jump past the probes stage to `aggregate` — the one path on
+# which a browser environment that could not be provisioned would otherwise be
+# refused by nobody, leaving the run to report the branch as FAIL.
+#
+# ⚠️ THE SERVICE NEVER STARTS on a correct product: the gate fails first, and
+# before that the run has already failed to provision a browser its plan needs.
+# It is declared because the plan's `serviceId` must name something the project
+# actually declares — an undeclared id is a different refusal entirely.
+#
+# `{{PORT:app}}` is substituted by the corpus runner with a freshly allocated
+# ephemeral loopback port at materialisation time.
+
+version: 1
+
+project:
+  baseBranch: master
+
+gates:
+  - { id: build, run: node gates/build.cjs }
+
+services:
+  app:
+    run: node app/server.cjs {{PORT:app}}
+    port: {{PORT:app}}
+    ready:
+      url: http://127.0.0.1:{{PORT:app}}/health
+      timeoutSec: 30

@@ -165,6 +165,13 @@ export interface StageDependencies {
    * plainly that nothing was persisted, rather than reporting a clean `ok`.
    */
   readonly persist?: PersistDeps;
+  /**
+   * Why the browser environment this run's plan REQUIRES could not be established (story
+   * 7.0). Bound by the edge only when the plan carries a browser probe AND provisioning it
+   * failed; see `AggregateStageDeps.browserEnvironmentUnavailable` for why the aggregate
+   * stage is where it has to be seen, and what goes wrong when nothing sees it.
+   */
+  readonly browserEnvironmentUnavailable?: string;
 }
 
 /** The eleven stages, in the frozen spine order. */
@@ -186,6 +193,12 @@ export function createStages(deps: StageDependencies): Stage[] {
     createAggregateStage({
       criteria: deps.probes?.criteria,
       redaction: deps.probes?.redaction,
+      // Story 7.0. Spread, so a run that needs no browser (or got one) hands this stage NO
+      // key rather than an explicit `undefined` — the difference is what makes "this run
+      // could adjudicate everything its plan asked for" true of the object itself.
+      ...(deps.browserEnvironmentUnavailable === undefined
+        ? {}
+        : { browserEnvironmentUnavailable: deps.browserEnvironmentUnavailable }),
     }),
     createPersistStage(deps.persist ?? {}),
     createTeardownStage(deps.teardown ?? {}),

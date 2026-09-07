@@ -68,6 +68,31 @@ export interface AggregateStageDeps {
   readonly criteria?: readonly PlanCriterion[];
   /** Config-declared extra redaction patterns (AD-10), as the probes stage threads them. */
   readonly redaction?: RedactionOptions;
+  /**
+   * Why the browser environment this run's plan REQUIRES could not be established, when it
+   * could not. Bound by the edge (story 7.0) only when both halves are true: the compiled
+   * plan carries a browser probe, and provisioning it failed.
+   *
+   * ⚠️ IT EXISTS BECAUSE A GATE FAILURE JUMPS PAST THE PROBES STAGE. `run-pipeline.ts`'s
+   * product-negative branch stops early and resumes at THIS stage, by design — a branch that
+   * does not build should cost no AI or browser spend (ADR-003). But it means the browser
+   * executor, the one thing that names an unusable environment, never runs: before this dep
+   * existed, a run on a machine that could not provision a browser at all printed the
+   * branch's verdict and never mentioned the environment to anybody. Measured rather than
+   * supposed — the provisioning failure was absent from the entire output.
+   *
+   * ⚠️ IT DOES NOT CHANGE THE VERDICT, and that limit is a recorded decision rather than
+   * caution. `domain/verdict.ts:17-35`: *"A failing gate outranks everything"* (AD-6,
+   * ADR-003), and *"the reverse ordering would let a flaky probe upgrade a genuinely failing
+   * branch to 'rerun me'"* (PRD §9) — which is what promoting this to exit 3 would do, since
+   * exit 3 is the RETRYABLE classification. An earlier version of this branch did promote it,
+   * and the codex review caught it as a P1. Changing that precedence is an ADR in
+   * `docs/adr/`, not a stage edit.
+   *
+   * So the gate keeps its verdict and this carries the diagnosis, in the timeline — which
+   * lives inside `result.json`, so a harness reads it too, not only a terminal.
+   */
+  readonly browserEnvironmentUnavailable?: string;
 }
 
 export function createAggregateStage(deps: AggregateStageDeps = {}): Stage {
@@ -128,10 +153,33 @@ export function createAggregateStage(deps: AggregateStageDeps = {}): Stage {
       // The only write to `outcome` anywhere in the pipeline (AD-6).
       context.run.outcome = outcome;
 
-      return stageOk(
+      // ⚠️ REPORTED, NOT PROMOTED — and the difference is a recorded decision, not a
+      // preference. An earlier version of this branch THREW here, turning a run whose gate
+      // said no into exit 3. `domain/verdict.ts:17-35` had already ruled against exactly
+      // that: *"A failing gate outranks everything"* (AD-6, ADR-003) and *"the reverse
+      // ordering would let a flaky probe upgrade a genuinely failing branch to 'rerun me'"*
+      // (PRD §9) — which is precisely what an unprovisionable browser promoting a FAIL to a
+      // retryable infra error does. Overturning that is an ADR, not a stage edit. Raised as
+      // a P1 by the codex review of this branch, after the supervisor asked for the promotion
+      // and I had recorded the reservation in `DECISIONS.md` D9 without weighting it enough.
+      //
+      // What the defect actually was, and what this fixes: on the gate-failure path the
+      // provisioning failure was reported to NOBODY. The pipeline jumps past probes, so the
+      // browser executor — the only thing that names an unusable environment — never runs,
+      // and the run printed the branch's verdict with no mention that this machine cannot
+      // execute browser probes at all. The verdict is the gate's to decide; the diagnosis is
+      // this stage's to carry, and it travels in the timeline, which lives inside
+      // `result.json` and so reaches a harness rather than only a terminal.
+      const conclusion =
         outcome.verdict === undefined
           ? `infra error: ${outcome.infraError}`
-          : `verdict: ${outcome.verdict}`,
+          : `verdict: ${outcome.verdict}`;
+
+      return stageOk(
+        deps.browserEnvironmentUnavailable === undefined
+          ? conclusion
+          : `${conclusion} — and this run could NOT provision the browser its plan requires, so ` +
+            `every criterion only a browser can adjudicate went unchecked: ${deps.browserEnvironmentUnavailable}`,
       );
     },
   };

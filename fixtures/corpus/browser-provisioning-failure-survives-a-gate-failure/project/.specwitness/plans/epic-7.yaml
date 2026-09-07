@@ -1,0 +1,46 @@
+# Hand-written Verification Plan for the corpus fixture
+# `browser-provisioning-failure-survives-a-gate-failure`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18). The `contract.fingerprint` below must match the frozen contract
+# beside it; the runner does not patch it, so a re-freeze means this line is
+# re-copied by hand.
+#
+# ⚠️ THE `surface: browser` IS WHAT MAKES THE RUN NEED AN ENVIRONMENT IT CANNOT
+# GET. Together with the failing gate in `config.yaml` it produces the one
+# combination this fixture exists for: the pipeline stops early on the gate and
+# jumps past the probes stage, so nothing ever refuses the unusable browser
+# environment — and the run must still not conclude that the BRANCH is what is
+# wrong.
+plan:
+  epic: epic-7
+  contract:
+    version: 1
+    fingerprint: 07f7ef336c67527579ec94ef99b3a59eadcf3038b96de90a1a3f301054b7bb9b
+  data:
+    seed: corpusseed070002
+    bindings: []
+  criteria:
+    - criterionId: E7-01
+      disposition: automated
+      probes:
+        - id: orders-page
+          surface: browser
+          mechanics:
+            serviceId: app
+            path: /
+            scenario: Open the orders page and read its heading.
+          assertions:
+            - description: the page is headed Orders
+              target: { source: text, selector: "#heading" }
+              comparison: equals
+              expected: Orders
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-07T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

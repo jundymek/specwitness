@@ -106,7 +106,12 @@ import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
 import { armInterruptNotice } from '../verify/interrupt.js';
 import { explainVerifiedRun, publishExplainedRun } from '../verify/explain.js';
-import { resolveBrowserEnvironment } from '../verify/playwright-provisioning.js';
+import {
+  planRequiresBrowser,
+  resolveBrowserEnvironment,
+  shouldReportUnavailableBrowser,
+  unavailableBrowserWarning,
+} from '../verify/playwright-provisioning.js';
 import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
 
@@ -405,12 +410,32 @@ async function verify(
   // Ctrl+C which run directory to reap. Provisioning above the notice would put the longest
   // window in the run outside the only thing that names it. `recordProcessGroup` is bound
   // above and passed here, so every group reaches the manifest either way (AD-8).
+  // A browser probe naming a service this config no longer declares cannot run whatever
+  // provisioning produces — `resolveServiceBaseUrl` refuses it at dispatch — and a PERSISTED
+  // plan is never re-checked against the declared ids (that check applies to a draft, at
+  // compile time). Passing them in is what stops a stale plan from costing a download before
+  // the configuration error it really is surfaces. Raised by the codex auto-review of 7.0.
+  const declaredServiceIds = Object.keys(config.services);
   const playwright = await resolveBrowserEnvironment({
     projectRoot,
     plan: planning.plan,
+    declaredServiceIds,
     runner,
     onProcessGroup: recordProcessGroup,
   });
+
+  // ⚠️ THE RUN COULD NOT BUILD WHAT ITS PLAN REQUIRES, and the aggregate stage has to know.
+  // A gate that says no stops the pipeline and jumps PAST the probes stage, so the browser
+  // executor — the one thing that refuses an unusable environment — never runs, and the run
+  // would otherwise report the BRANCH as broken (exit 1) for what is an environment problem.
+  // Infra failures are never reported as product FAIL. Found by the supervisor on the commit
+  // that deferred the refusal; `browser-provisioning-outranks-gate-failure` pins it.
+  const browserEnvironmentUnavailable =
+    !playwright.ready && planRequiresBrowser(planning.plan, declaredServiceIds)
+      ? playwright.source === 'absent'
+        ? playwright.reason
+        : 'the resolved Playwright environment is not usable'
+      : undefined;
 
   const result = await runPipeline({
     runId: created.runId,
@@ -423,6 +448,9 @@ async function verify(
     providerUsage: planning.providerUsage,
     stages: createStages({
       assertVerifiableContract: () => assertVerifiableContract(loaded),
+      // Spread, so a run that needs no browser or got one hands the stage NO key rather
+      // than an explicit `undefined` (`exactOptionalPropertyTypes`).
+      ...(browserEnvironmentUnavailable === undefined ? {} : { browserEnvironmentUnavailable }),
       worktree: { vcs, recorder: store, root },
       // The declared `setup.install`, executed in the worktree BEFORE the gates
       // (story 6.11). Bound UNCONDITIONALLY, not only when the project declared
@@ -677,6 +705,32 @@ async function verify(
   // `result`, NOT `published`, and deliberately so: this reports the failing
   // STAGE that ended the run, and no stage can have been the explainer.
   reportInfraFailure(result);
+
+  // ⚠️ THE RUN CONCLUDED WITHOUT A BROWSER IT NEEDED, and the operator has to be told even
+  // though the verdict stands. A failing gate outranks everything (AD-6, ADR-003) and this
+  // does not touch that — `exitCodeForOutcome` below is unchanged — but the pipeline jumped
+  // past the probes stage, so nothing else on this path mentions that the machine cannot run
+  // browser probes at all. Before story 7.0 wired this, such a run printed its verdict and
+  // said nothing: the failure was invisible rather than merely outranked, which is the half
+  // of the supervisor's finding that survived the precedence question.
+  //
+  // ONLY when the run reached a verdict. When it did not, the InfraError above already names
+  // the same failure, and saying it twice would be noise on the one path that is already
+  // loud.
+  // NOT "did the run reach a verdict": provisioning can fail and then a stage BEFORE `probes`
+  // can throw, which skips `aggregate` too — so the timeline detail never happens either and
+  // the operator would hear about the browser from nobody. The question is whether the failure
+  // already being printed IS the browser refusal, which quotes this same reason.
+  if (
+    shouldReportUnavailableBrowser(
+      browserEnvironmentUnavailable,
+      result.stages.find((stage) => stage.status === 'error')?.detail,
+    )
+  ) {
+    printWarning(
+      unavailableBrowserWarning(browserEnvironmentUnavailable, result.outcome.verdict),
+    );
+  }
 
   // THE EXIT CODE COMES FROM THE PIPELINE'S OWN OUTCOME. `published.outcome`
   // is the same object — `attachExplanations` spreads it through untouched —
