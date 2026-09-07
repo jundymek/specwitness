@@ -829,6 +829,28 @@ export function compareOutcome(
           'is the only thing that distinguishes one classification from another here.',
       );
     }
+
+    // ⚠️ CRITERION STATUSES CAN ONLY COME FROM A DOCUMENT, and they are compared in the
+    // branch below — the one that HAS one. So an expectation naming them against a run that
+    // produced none asserted NOTHING, silently and forever, while the fixture stayed green.
+    // That is this format's own rule ("silence must never be readable as a claim") arriving
+    // one level up: the fixture believed it was pinning what the run concluded about each
+    // criterion, and was pinning a small integer instead.
+    //
+    // The case that made it concrete (story 7.0): a fixture pinning exit 3 and
+    // `E7-01: skipped` for a run whose browser could not be provisioned would have passed
+    // just as happily against a mechanism that wrote no `result.json` at all — which is the
+    // regression it exists to catch. An edge refusal that legitimately writes no document
+    // pins `statuses: {}` and its ERROR text, and is unaffected.
+    if (Object.keys(expected.criteria.statuses).length > 0) {
+      problems.push(
+        'criteria: this fixture pins criterion statuses and the run produced no result ' +
+          'document (neither on stdout nor in a run directory), so none of them was ' +
+          'compared to anything. A criterion status is read off the document; a fixture ' +
+          'that cannot read one must pin `statuses: {}` and say what it means in ' +
+          "'stderrContains', or the run has to produce a document.",
+      );
+    }
   } else {
     const observedOutcome = observed.document.outcome as Record<string, unknown>;
     const expectedOutcome = expected.outcome as Record<string, unknown>;
