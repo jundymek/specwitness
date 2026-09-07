@@ -65,7 +65,7 @@
  */
 
 import { InfraError } from '../../domain/errors.js';
-import { redactText } from '../../domain/evidence.js';
+import { redactText, type RedactionOptions } from '../../domain/evidence.js';
 import type { Plan } from '../../domain/plan.js';
 import type { ProcessRunner } from '../../domain/process-runner.js';
 import type { ParentEnvironment } from '../../infra/process-runner.js';
@@ -145,6 +145,22 @@ export interface BrowserEnvironmentInputs {
    * cannot run whatever this returns, so it is not worth a download.
    */
   readonly declaredServiceIds?: readonly string[];
+  /**
+   * AD-10's config-declared extra patterns, when the caller has them.
+   *
+   * The refusal this module carries quotes paths the operator chose, so it is redacted at
+   * capture — and a project's OWN secret shapes are the half no built-in rule can know. The
+   * browser executor takes the same options (`surfaces/browser.ts`), and the more durable
+   * sink must not be the less protected one: the reason reaches the aggregate stage's
+   * timeline detail, which is persisted inside `result.json`.
+   *
+   * NOTHING IN PRODUCTION SUPPLIES THIS YET, and that is not this story's to change: the
+   * Project Config schema has no key for extra patterns and `verify.ts` binds `redaction`
+   * nowhere, so the executor receives `undefined` too (`domain/evidence.ts:134-141`: *"Epic 3
+   * wires none"*, still true three epics later). Threaded here so the wiring is correct by
+   * construction the day that surface lands, rather than needing a second look then.
+   */
+  readonly redaction?: RedactionOptions;
   /** Overridable for tests. Defaults to `PROVISION_TIMEOUT_MS`. */
   readonly timeoutMs?: number;
   /** Defaults to `process.env`, as `playwright-env.ts` does. Injected so a test is not at its mercy. */
@@ -243,14 +259,17 @@ export async function resolveBrowserEnvironment(
     });
   } catch (failure) {
     if (recordingFailure !== undefined) {
-      // Rethrown whatever its shape: the run's own bookkeeping failed, and this module is not
-      // entitled to translate that into a statement about the operator's browser.
-      throw failure;
+      // `recordingFailure`, not `failure`: they are the same object today because
+      // `ProcessRunner` rethrows the hook's error unchanged, and writing the one the guard
+      // actually tested means this stays correct without depending on that. The run's own
+      // bookkeeping failed, and this module is not entitled to translate that into a
+      // statement about the operator's browser.
+      throw recordingFailure;
     }
     if (!(failure instanceof InfraError)) {
       throw failure;
     }
-    return await unusableAfterProvisioning(environment, failure);
+    return await unusableAfterProvisioning(environment, failure, inputs.redaction);
   }
 }
 
@@ -281,6 +300,7 @@ export async function resolveBrowserEnvironment(
 async function unusableAfterProvisioning(
   environment: PlaywrightEnvironmentInputs,
   failure: InfraError,
+  redaction: RedactionOptions | undefined,
 ): Promise<PlaywrightEnvironment> {
   const paths = await resolvePlaywrightEnvironment(environment);
   return {
@@ -295,6 +315,7 @@ async function unusableAfterProvisioning(
       failure.hint === undefined || failure.hint === ''
         ? failure.message
         : `${failure.message} — ${failure.hint}`,
+      redaction,
     ),
   };
 }

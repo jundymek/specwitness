@@ -460,6 +460,38 @@ describe('resolveBrowserEnvironment, when the operator points the cache inside t
     expect(refusal.reason).toContain('inside the target project');
   });
 
+  it('honours a project-declared redaction pattern, not only the built-in rules', async () => {
+    // ⚠️ AD-10's EXTRA PATTERNS ARE THE HALF A BUILT-IN RULE CANNOT COVER: a project knows
+    // the shape of its own secrets and the redactor does not. `redactText`'s second argument
+    // is where they live (`domain/evidence.ts:134`), and the browser executor passes it
+    // (`browser.ts:1148`). Capture-time redaction here has to take the same options, or the
+    // MORE durable sink — the aggregate timeline detail, persisted inside `result.json` —
+    // would be the less protected one.
+    //
+    // NOTE, and it is why this test supplies the pattern itself: nothing in production
+    // produces `extraPatterns` today. There is no key for them in the Project Config schema
+    // and `verify.ts` binds `redaction` nowhere, so the executor receives `undefined` as well.
+    // This pins that the parameter is HONOURED when it exists, which is what makes the wiring
+    // correct by construction the day that surface lands.
+    const project = await tempRoot();
+    const home = await tempRoot();
+    const { runner } = fakeRunner([ok()]);
+
+    const refusal = await unusable({
+      projectRoot: project,
+      plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
+      runner,
+      // A shape only this project could know about, matching nothing the built-ins look for.
+      redaction: { extraPatterns: [/wombat-[a-z0-9]+/g] },
+      env: { PLAYWRIGHT_BROWSERS_PATH: join(project, 'wombat-9fk2zz') },
+      platform: 'linux',
+      homeDir: home,
+    });
+
+    expect(refusal.reason).not.toContain('wombat-9fk2zz');
+    expect(refusal.reason).toContain('inside the target project');
+  });
+
   it('refuses when XDG_CACHE_HOME points into the project, for the same reason', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
