@@ -88,7 +88,7 @@ function announce(): void {
           : 'no browsers are downloaded'
       }\n` +
       '[specwitness] this is a skipped TEST, not a skipped CRITERION - the browser executor ' +
-      'has no skip path at all. Run `specwitness doctor` to provision Playwright.\n',
+      'has no skip path at all. Run `pnpm provision:browser` to download one.\n',
   );
 }
 

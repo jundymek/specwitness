@@ -187,6 +187,26 @@ describe('playwright-capability (optional)', () => {
     expect(result.detail).toContain(CACHE);
   });
 
+  it.each([
+    ['absent', ABSENT],
+    ['resolvable but with no browser bundle', projectReady({ browsersPresent: false })],
+  ])(
+    'names the command that actually provisions when Playwright is %s (story 7.0, AC6)',
+    async (_case, environment) => {
+      const result = await run(environment);
+
+      // ⚠️ THE MESSAGE MUST DESCRIBE WHAT THE PRODUCT DOES. Until story 7.0 both hints
+      // promised provisioning "on the first browser probe", and there was none — on the
+      // first probe or on any later one, because `provisionPlaywright` was called from
+      // nowhere in `src/` (D-5). Half of what made that defect invisible for two epics was
+      // that the messages said otherwise, so the wording is pinned rather than trusted.
+      expect(result.detail).toContain('specwitness verify');
+      expect(result.detail).not.toContain('on the first browser probe');
+      // `doctor` still never downloads (AD-12), so it must not read as the command to run.
+      expect(result.detail).toMatch(/plan (that )?carries a browser probe|browser probe in its plan/);
+    },
+  );
+
   it('reports an unknown version rather than pretending it read one', async () => {
     const result = await run(projectReady({ version: null }));
 

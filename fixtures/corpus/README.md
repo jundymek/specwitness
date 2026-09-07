@@ -112,6 +112,12 @@ Fixtures that exist only to prove the RUNNER works carry a **non-numeric**
 `runner-` prefix, so they cannot collide with an allocated class number. Story
 6.1 shipped exactly two of them and deliberately built none of the numbered ones.
 
+Fixtures that pin a PRODUCT capability rather than a defect class are named for
+the capability and carry no number either — `setup-install-runs`,
+`setup-install-fails`, `browser-probe-provisions`. Each exists because the
+capability was advertised somewhere (a config key, a `doctor` hint) and executed
+nowhere, which is a failure no defect-class fixture can see.
+
 ---
 
 ## `expected.json`, field by field
@@ -295,6 +301,17 @@ looking at twice.
 2. **No network beyond localhost.** Services bind `127.0.0.1` on a port
    allocated moments earlier. Nothing resolves a hostname, fetches a dependency
    or downloads a browser.
+
+   Since story 7.0 that last clause needs a guard rather than a promise, because
+   **the product itself can now fetch**: `verify` provisions Playwright when the
+   compiled plan carries a browser probe, which is a real `npm install` and a
+   ~150MB browser download. The static scan cannot see that — no fixture asked
+   for it in text. So `npm` and `npx` are **shadowed by tripwires** first on
+   `PATH`, which fetch nothing and exit non-zero. A fixture with a browser probe
+   therefore pins what the product does when provisioning is impossible (exit 3,
+   naming the install), and the corpus stays offline. That real provisioning
+   SUCCEEDS is proven elsewhere, by `tests/provisioning/playwright.provision.ts`
+   under `pnpm provision:browser`, which is opt-in and downloads for real.
 3. **No dependence on the developer's machine.** The binary runs with a
    *constructed* environment (`extendEnv: false`): `HOME` and `TMPDIR` point
    inside the fixture's own workspace, so `~/.claude/`, `~/.codex/` and every

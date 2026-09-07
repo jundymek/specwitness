@@ -1128,6 +1128,15 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
    * name the path it rejected. This is the row of the classification table that the
    * standing green-for-nothing hazard would otherwise reach — a criterion the plan mapped
    * to a browser check reporting PASS because no probe ran.
+   *
+   * THE HINT NAMES `verify`, NOT `doctor` (story 7.0, AC6). It used to say "run
+   * `specwitness doctor` to resolve or provision Playwright", and `doctor` deliberately
+   * never downloads (AD-12) — so an operator following it moved between two commands,
+   * neither of which provisioned, with nothing on screen saying the capability was simply
+   * absent (D-5). `verify` provisions from its own composition root when the compiled plan
+   * carries a browser probe, which means an environment that reaches HERE unusable is a
+   * state worth diagnosing rather than one worth retrying: hence `doctor` for what
+   * resolves, not for what downloads.
    */
   #requireRuntime(
     criterionId: string,
@@ -1137,8 +1146,11 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     const refuse = (why: string): never => {
       throw new InfraError(
         `browser probe for ${criterionId} cannot run: ${redactText(why, redaction)}`,
-        'run `specwitness doctor` to resolve or provision Playwright — a browser probe is ' +
-          'never skipped, because a criterion that checked nothing must not report PASS',
+        '`specwitness verify` provisions Playwright itself when the compiled plan carries a ' +
+          'browser probe, so this environment reached the executor unusable despite that — ' +
+          'run `specwitness doctor` to see which Playwright resolves and why, or install ' +
+          '@playwright/test in the project. A browser probe is never skipped, because a ' +
+          'criterion that checked nothing must not report PASS',
       );
     };
 

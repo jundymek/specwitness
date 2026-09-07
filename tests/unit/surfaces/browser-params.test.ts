@@ -307,6 +307,13 @@ describe('an unprovisioned Playwright is InfraError — NEVER a skip', () => {
     expect(error).toBeInstanceOf(InfraError);
     expect((error as InfraError).message).toContain(reason);
     expect((error as InfraError).hint).toContain('never skipped');
+    // ⚠️ STORY 7.0, AC6 — THE HINT MUST NOT NAME A COMMAND THAT CANNOT HONOUR IT. It used
+    // to read "run `specwitness doctor` to resolve or provision Playwright"; `doctor`
+    // deliberately never downloads (AD-12, `doctor/effects.ts:81-82`), so an operator
+    // following it moved between two commands, neither of which provisioned. `verify` is
+    // the command that provisions, and it now does.
+    expect((error as InfraError).hint).toContain('specwitness verify');
+    expect((error as InfraError).hint).not.toContain('doctor` to resolve or provision');
   });
 
   it.each([

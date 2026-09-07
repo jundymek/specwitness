@@ -1,0 +1,23 @@
+{
+  "expectedVersion": 1,
+  "fixture": "browser-probe-provisions",
+  "why": "Story 7.0: verify PROVISIONS Playwright when the compiled plan carries a browser probe. This embodies no defect class from brief section 7 -- it is the proof for a capability that was written in story 5.1, unit-tested, documented in two user-facing messages, and called from nowhere in src/ for the whole of Epics 5 and 6 (D-5 of the first dogfooding run, docs/findings/dogfooding-defects-2026-09-05.md). Structurally the same defect story 6.11 closed for setup.install, and it survived for the same reason: the only tests that exercised provisioning called it themselves. THE FIXTURE IS BUILT SO THAT THE CODE IT REPLACED WOULD FAIL IT. Before the change verify only RESOLVED the environment, found it absent, started the declared service, reached the probes stage and refused there with 'browser probe for E7-01 cannot run: @playwright/test does not resolve from ...' -- an accurate classification (exit 3, never FAIL) reached without one byte of provisioning ever being attempted, which is exactly what the corpus could not previously see. After the change the run never gets that far: it decides from the PLAN that a browser is needed, calls provisionPlaywright, and the corpus's own npm tripwire refuses the fetch -- so the run stops at exit 3 naming the install it could not complete. The stderrContains entries pin the three things that distinguish the two: that provisioning was ATTEMPTED at all, that what refused it was the harness rather than the product, and that the failure is classified as an environment problem with a network hint. The stderrAbsent entries pin that the old refusal is gone and that an unavailable browser is still never a product FAIL. WHY THE FIXTURE CANNOT SIMPLY LET IT DOWNLOAD: an npm install plus a chromium bundle is hundreds of megabytes from two public origins, and tooth 2 of the runner's hermeticity contract says no fixture fetches anything. The tripwire is how that promise survives a product that can now fetch on its own -- see writeRegistryTripwires in tests/corpus/runner.ts. What is NOT pinned here, because no hermetic fixture can pin it, is that a real provisioning SUCCEEDS; that is tests/provisioning/playwright.provision.ts, which runs against the real registry, opt-in, and is what story 6.9's chromium job exists to schedule.",
+  "proves": ["AC1", "AC2", "AC5", "FR-24", "AD-6", "AD-7", "AD-12", "NFR-10", "ADR-002"],
+  "command": ["verify", "epic-7", "--json"],
+  "exitCode": 3,
+  "outcome": { "infraError": "infra" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {}
+  },
+  "stderrContains": [
+    "ERROR: installing @playwright/test into",
+    "corpus tripwire: npm was invoked",
+    "HINT: this needs a working network connection"
+  ],
+  "stderrAbsent": [
+    "FAIL",
+    "cannot run",
+    "is not in the SpecWitness cache"
+  ]
+}

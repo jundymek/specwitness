@@ -24,6 +24,15 @@
  * command never calls it, and a diagnostic command that silently pulled
  * hundreds of megabytes would be a bad citizen.
  *
+ * WHICH COMMAND THE HINTS NAME, and why it changed (story 7.0, AC6). They used
+ * to promise provisioning "on the first browser probe" — and there was none, on
+ * the first probe or any later one, because `provisionPlaywright` was called
+ * from nowhere in `src/` for two epics (D-5). `verify` now provisions, from its
+ * own composition root, when the compiled plan carries a browser probe; the
+ * hints say that, in those words. A message that promises what the code does
+ * not do is half of what kept D-5 invisible, and `doctor` is the command an
+ * operator reads FIRST when something is missing.
+ *
  * THREE DISTINCT FACTS, all reported (AC2):
  *
  *   SOURCE   — project · SpecWitness cache · absent
@@ -128,8 +137,9 @@ export const playwrightCapabilityCheck: DoctorCheck = {
         detail:
           `source: absent, version: unknown, browsers: absent — ${environment.reason}. ` +
           `HINT: install ${PACKAGE} in the project to use your own pinned version, or let ` +
-          `SpecWitness provision one into ${environment.cacheDir} on the first browser probe ` +
-          '(not required for gate, HTTP, observation or shell verification)',
+          `\`specwitness verify\` provision one into ${environment.cacheDir} on the next run ` +
+          'whose plan carries a browser probe (this command never downloads; a browser is ' +
+          'not required for gate, HTTP, observation or shell verification)',
       };
     }
 
@@ -142,8 +152,8 @@ export const playwrightCapabilityCheck: DoctorCheck = {
         status: 'warn',
         detail:
           `${preamble}; no browser bundle downloaded in ${environment.browsersPath}. ` +
-          `HINT: ${manualInstallCommand(environment)}, or let SpecWitness download it on the ` +
-          'first browser probe',
+          `HINT: ${manualInstallCommand(environment)}, or let \`specwitness verify\` download ` +
+          'it on the next run whose plan carries a browser probe (this command never downloads)',
       };
     }
 

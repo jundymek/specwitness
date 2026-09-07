@@ -120,7 +120,14 @@ development_status:
   # completion: the harness integration it belongs to is the run that found it. Recorded as
   # D-5 in docs/findings/dogfooding-defects-2026-09-05.md. Spec in
   # docs/implementation-artifacts/epic-7-dogfooding-repairs/.
-  7-0-provision-playwright-on-first-browser-probe: ready-for-dev
+  # DONE 2026-09-07 as a solo cohort on story/7.0-provision-playwright-on-first-browser-probe.
+  # verify now provisions Playwright when the compiled plan carries a browser probe, and only
+  # then: a run with no browser probe still just resolves, offline and with no spawn. A failure
+  # to provision is an InfraError (exit 3), never a skip and never a product FAIL. The corpus
+  # fixture browser-probe-provisions pins that provisioning is REACHED at all, which is what no
+  # test could see before; doctor's two hints and the executor's refusal now name the command
+  # that actually provisions.
+  7-0-provision-playwright-on-first-browser-probe: done
   7-1-harness-integration-first-real-contract: backlog
   7-2-first-real-epic-verification-repair-loop: backlog
   7-3-hypothesis-verdict-report: backlog
@@ -168,7 +175,7 @@ action_items:
   - {id: d2, epic: 7, action: 'generation timeout was sized for the contract role and fired on a 40-criterion plan', owner: owner, status: 'done 2026-09-06 in 103ec20 - DEFAULT_INVOCATION_TIMEOUT_MS 300s -> 900s, above codex-cli.ts''s 600s because this adapter carries the schema in the PROMPT while codex has the API enforce it. 206 provider tests pass; no test pinned the old value. Carried question: there is still no configuration surface for it'}
   - {id: d3, epic: 7, action: 'plan refuses to recompile after new surfaces are declared and says "nothing needs recompiling", which is false: the staleness check reads the contract fingerprint only, while a plan references commandId/serviceId, so declaring an observation genuinely widens what can be planned. Include the declared ids in the check, or narrow the sentence', owner: owner, status: open}
   - {id: d4, epic: 7, action: 'a transient provider probe failure spends all three recorded attempts in ~15s (3 x PROBE_TIMEOUT_MS) with no backoff; claude answered in 15ms immediately afterwards. A retry with no delay cannot recover from the only failure class retries exist for', owner: owner, status: open}
-  - {id: d5, epic: 7, action: 'provisionPlaywright is exported and unit-tested but called from NOWHERE in src/, so a browser probe can never provision - structurally the same defect 6.11 closed for setup.install. Two user-facing messages promise provisioning that does not happen', owner: owner, status: 'scheduled as story 7.0, spec written 2026-09-06'}
+  - {id: d5, epic: 7, action: 'provisionPlaywright is exported and unit-tested but called from NOWHERE in src/, so a browser probe can never provision - structurally the same defect 6.11 closed for setup.install. Two user-facing messages promise provisioning that does not happen', owner: owner, status: 'done 2026-09-07 in story 7.0 - verify calls provisionPlaywright when the compiled plan carries a browser probe, decided from the plan so a gates-only run still spawns nothing. Both promising messages now name verify. Corpus fixture browser-probe-provisions pins that provisioning is attempted, seen red against the pre-change call site; the corpus runner shadows npm/npx so a browser-probe fixture cannot fetch. Carried: nothing in CI drives verify through a REAL provisioning end to end - the nearest is story 6.9''s non-blocking chromium job, which provisions for real but not through verify'}
   # From the epic/6-11-setup-stage retrospective (docs/findings/epic-6-11-retro-2026-09-05.md).
   - {id: e6.11-A, epic: 6.11, action: 'process: a SUPERVISOR-authored spec must cite path:line read in the authoring session for every claim about merged behaviour - the rule such specs already impose on their implementer (e5-B). Two claims in the 6.11 spec were wrong: AC3 required an infra error to reach aggregate/persist, which run-pipeline.ts:322-329 has never done for any stage, and the placeholder call-site count was seven against a real two', owner: owner-process, status: open}
   - {id: e6.11-B, epic: 6.11, action: 'decide URL-userinfo redaction: DATABASE_URL=postgres://admin:SECRET@db/app leaks whole, and so does a bare connection string in captured output with no assignment at all, which no name-based rule can reach. Needs a value-shaped rule in src/domain/evidence.ts (the single chokepoint before persistence), backtracking-free, idempotent against the marker pass, with its own corpus of URL shapes INCLUDING ones that must not change. Measured and reproduced by the supervisor; more consequential than the PGPASSWORD gap 6.11 closed', owner: owner, status: open}

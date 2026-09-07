@@ -1,0 +1,48 @@
+# Hand-written Verification Plan for the corpus fixture
+# `browser-probe-provisions`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18). The `contract.fingerprint` below must match the frozen contract
+# beside it; the runner does not patch it, so a re-freeze means this line is
+# re-copied by hand.
+#
+# ⚠️ THE `surface: browser` BELOW IS THE ENTIRE FIXTURE. It is the one bit of
+# data that makes `verify` need a browser, and until story 7.0 nothing in the
+# product read it early enough to do anything about that: `provisionPlaywright`
+# was exported, unit-tested and called from nowhere in `src/`, so a browser
+# probe on a machine without its own `@playwright/test` could only ever exit 3
+# with "cannot run" (defect D-5 of the first dogfooding run). The plan is
+# therefore correct and complete on purpose — what this fixture pins is what
+# happens on the way to executing it.
+plan:
+  epic: epic-7
+  contract:
+    version: 1
+    fingerprint: 07f7ef336c67527579ec94ef99b3a59eadcf3038b96de90a1a3f301054b7bb9b
+  data:
+    seed: corpusseed070001
+    bindings: []
+  criteria:
+    - criterionId: E7-01
+      disposition: automated
+      probes:
+        - id: orders-page
+          surface: browser
+          mechanics:
+            serviceId: app
+            path: /
+            scenario: Open the orders page and read its heading.
+          assertions:
+            - description: the page is headed Orders
+              target: { source: text, selector: "#heading" }
+              comparison: equals
+              expected: Orders
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-07T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null
