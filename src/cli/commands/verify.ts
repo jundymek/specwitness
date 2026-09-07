@@ -408,6 +408,13 @@ async function verify(
   const playwright = await resolveBrowserEnvironment({
     projectRoot,
     plan: planning.plan,
+    // A browser probe naming a service this config no longer declares cannot run whatever
+    // provisioning produces — `resolveServiceBaseUrl` refuses it at dispatch — and a
+    // PERSISTED plan is never re-checked against the declared ids (that check applies to a
+    // draft, at compile time). Passing them here is what stops a stale plan from costing a
+    // download before the configuration error it really is surfaces. Raised by the codex
+    // auto-review of story 7.0.
+    declaredServiceIds: Object.keys(config.services),
     runner,
     onProcessGroup: recordProcessGroup,
   });

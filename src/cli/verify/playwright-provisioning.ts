@@ -64,6 +64,7 @@
  * is READ for one discriminant and never for a command.
  */
 
+import { InfraError } from '../../domain/errors.js';
 import type { Plan } from '../../domain/plan.js';
 import type { ProcessRunner } from '../../domain/process-runner.js';
 import type { ParentEnvironment } from '../../infra/process-runner.js';
@@ -71,6 +72,7 @@ import {
   provisionPlaywright,
   resolvePlaywrightEnvironment,
   type PlaywrightEnvironment,
+  type PlaywrightEnvironmentInputs,
 } from '../../infra/playwright-env.js';
 
 /**
@@ -90,15 +92,37 @@ export const PROVISION_TIMEOUT_MS = 10 * 60_000;
  * Answered from the plan, which is the only artifact that knows. A `needs-human` criterion
  * has no `probes` key at all (see `PlanCriterion`), so the discrimination below is total
  * rather than a filter someone has to remember.
+ *
+ * `declaredServiceIds` NARROWS IT, and only when the caller passes one. A browser probe
+ * names a declared service (`BrowserProbeMechanics.serviceId`) and there is deliberately no
+ * `url` field, so a probe whose service the config no longer declares cannot execute
+ * whatever this function answers: `resolveServiceBaseUrl` refuses it at dispatch. A
+ * PERSISTED plan is never re-checked against the declared ids — `planDraftSchemaFor` applies
+ * that check to a DRAFT during compilation only (`src/schemas/plan.ts`) — so this state is
+ * reachable by editing `config.yaml` after a plan was compiled, and provisioning for it
+ * would download hundreds of megabytes to then reject the plan. On an offline machine it is
+ * worse than wasteful: the operator is shown a provisioning failure for what is really a
+ * configuration error. Raised by the codex auto-review of this branch.
+ *
+ * OMITTING the list means "I am not telling you which services exist" and changes nothing.
+ * Reading absence as "none exist" would silently stop every caller that does not pass it.
  */
-export function planRequiresBrowser(plan: Plan | undefined): boolean {
+export function planRequiresBrowser(
+  plan: Plan | undefined,
+  declaredServiceIds?: readonly string[],
+): boolean {
   if (plan === undefined) {
     return false;
   }
+  const declared = declaredServiceIds === undefined ? undefined : new Set(declaredServiceIds);
   return plan.plan.criteria.some(
     (criterion) =>
       criterion.disposition === 'automated' &&
-      criterion.probes.some((probe) => probe.surface === 'browser'),
+      criterion.probes.some(
+        (probe) =>
+          probe.surface === 'browser' &&
+          (declared === undefined || declared.has(probe.mechanics.serviceId)),
+      ),
   );
 }
 
@@ -114,6 +138,12 @@ export interface BrowserEnvironmentInputs {
    * and a process group nobody wrote down is a process group `specwitness clean` cannot reap.
    */
   readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
+  /**
+   * The service ids the project declares, when the caller knows them. See
+   * `planRequiresBrowser`: a browser probe naming a service the config no longer declares
+   * cannot run whatever this returns, so it is not worth a download.
+   */
+  readonly declaredServiceIds?: readonly string[];
   /** Overridable for tests. Defaults to `PROVISION_TIMEOUT_MS`. */
   readonly timeoutMs?: number;
   /** Defaults to `process.env`, as `playwright-env.ts` does. Injected so a test is not at its mercy. */
@@ -128,10 +158,39 @@ export interface BrowserEnvironmentInputs {
  * Which Playwright this run's browser probes will drive — provisioning one when the plan
  * needs a browser and the machine has none.
  *
- * THROWS `InfraError` (exit 3) when a needed environment cannot be provisioned, and returns
- * a possibly-`absent` environment when the plan needs no browser at all. Those two are not
- * inconsistent: an `absent` answer only ever reaches an executor that will refuse it, and a
- * run with no browser probe has no executor to reach.
+ * ============================================================================
+ * A FAILED PROVISIONING IS RETURNED, NOT THROWN — AND WHY THAT IS NOT A SKIP
+ * ============================================================================
+ *
+ * An environment that could not be provisioned comes back `absent`, carrying the failure and
+ * its hint as its `reason`. The refusal then happens where an unusable browser environment
+ * has ALWAYS been refused: `BrowserSurfaceExecutor.#requireRuntime`, which throws `InfraError`
+ * before any I/O and quotes this `reason` verbatim. Exit 3, classification `infra`, no
+ * criterion adjudicated — identical to what the operator saw before `verify` provisioned
+ * anything, and identical to what an `absent` resolution has always produced.
+ *
+ * THROWING HERE COST THE RUN ITS OWN RECORD. This function is called at the CLI edge, before
+ * `runPipeline`, so an exception ends the command before the pipeline's persist stage and
+ * `onComplete` ever run — no `result.json`, nothing on stdout under `--json`. On the one path
+ * where `verify` may spend provider quota (no plan on disk, so one is compiled first) that
+ * run had already printed *"its provider usage is recorded in the run document"*, and a
+ * provisioning failure — a missing network, the likeliest failure on a fresh machine — made
+ * that sentence false: quota spent, `providerUsage` recorded nowhere a harness can read.
+ * FR-18's auditability is the whole reason that recording exists. Raised as a P1 by the codex
+ * auto-review of this branch; the fix is to defer the refusal by one stage boundary, not to
+ * add a second writer of run documents.
+ *
+ * ⚠️ **IT CANNOT BECOME A GREEN-FOR-NOTHING.** The rule from `playwright-env.ts`'s header
+ * still holds in full: there is no `skipped`, no `pass`, and no silently absent probe on this
+ * path. What makes that structural rather than hopeful is that this branch is only reached
+ * when the plan HAS a browser probe — that is why provisioning was attempted — so a probe
+ * that must refuse always exists, the probes stage dispatches every criterion, and the
+ * executor's refusal aborts the run. `tests/unit/cli/verify-playwright-provisioning.test.ts`
+ * and the corpus fixture `browser-probe-provisions` pin both halves.
+ *
+ * Only an `InfraError` is downgraded this way: any other exception is a defect in THIS
+ * product and propagates untouched, rather than being buried inside a message about the
+ * operator's machine.
  */
 export async function resolveBrowserEnvironment(
   inputs: BrowserEnvironmentInputs,
@@ -146,16 +205,58 @@ export async function resolveBrowserEnvironment(
     ...(inputs.homeDir === undefined ? {} : { homeDir: inputs.homeDir }),
   };
 
-  if (!planRequiresBrowser(inputs.plan)) {
+  if (!planRequiresBrowser(inputs.plan, inputs.declaredServiceIds)) {
     // The merged behaviour, unchanged: read-only, offline, no spawn — so a run with no
     // browser probes costs what it always did.
     return await resolvePlaywrightEnvironment(environment);
   }
 
-  return await provisionPlaywright({
-    ...environment,
-    runner: inputs.runner,
-    timeoutMs: inputs.timeoutMs ?? PROVISION_TIMEOUT_MS,
-    ...(inputs.onProcessGroup === undefined ? {} : { onProcessGroup: inputs.onProcessGroup }),
-  });
+  try {
+    return await provisionPlaywright({
+      ...environment,
+      runner: inputs.runner,
+      timeoutMs: inputs.timeoutMs ?? PROVISION_TIMEOUT_MS,
+      ...(inputs.onProcessGroup === undefined ? {} : { onProcessGroup: inputs.onProcessGroup }),
+    });
+  } catch (failure) {
+    if (!(failure instanceof InfraError)) {
+      throw failure;
+    }
+    return await unusableAfterProvisioning(environment, failure);
+  }
+}
+
+/**
+ * The environment a run refuses on after provisioning could not produce one.
+ *
+ * `absent` is FORCED rather than re-read, and that is the fail-closed direction. Re-resolution
+ * could report a usable environment — a concurrent run finishing the install a moment later,
+ * or a package that landed while the browser download failed — and returning "ready" after
+ * this product could not establish the environment would run browser probes against something
+ * nobody verified. The paths come from resolution because they are the ones every message
+ * about this cache already names.
+ *
+ * BOTH HALVES OF THE FAILURE TRAVEL. `reason` carries the message AND the hint, because the
+ * executor's own refusal appends advice about `doctor` and has no way to reproduce "check
+ * connectivity, proxy and registry settings" or "PLAYWRIGHT_BROWSERS_PATH points inside the
+ * project" — which is the only actionable half of most of these failures.
+ */
+async function unusableAfterProvisioning(
+  environment: PlaywrightEnvironmentInputs,
+  failure: InfraError,
+): Promise<PlaywrightEnvironment> {
+  const paths = await resolvePlaywrightEnvironment(environment);
+  return {
+    source: 'absent',
+    version: null,
+    browsersPresent: false,
+    ready: false,
+    cacheDir: paths.cacheDir,
+    browsersPath: paths.browsersPath,
+    browsersPathFromEnv: paths.browsersPathFromEnv,
+    reason:
+      failure.hint === undefined || failure.hint === ''
+        ? failure.message
+        : `${failure.message} — ${failure.hint}`,
+  };
 }

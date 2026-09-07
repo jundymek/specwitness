@@ -31,7 +31,6 @@ import {
   planRequiresBrowser,
   resolveBrowserEnvironment,
 } from '../../../src/cli/verify/playwright-provisioning.js';
-import { InfraError } from '../../../src/domain/errors.js';
 import type { Plan, PlanCriterion, ProbeSpec } from '../../../src/domain/plan.js';
 import type { ProcessResult, ProcessRunOptions } from '../../../src/domain/process-runner.js';
 import { PLAYWRIGHT_PACKAGE } from '../../../src/infra/playwright-env.js';
@@ -374,15 +373,44 @@ describe('resolveBrowserEnvironment, when the project has its own Playwright', (
 
 /* ── AC3: nothing is written into the target project ───────────────────────────────── */
 
+/**
+ * Every case below asserts the SAME two things, and the second is the one review changed.
+ *
+ * A failed provisioning does not throw out of this module: it returns an environment that is
+ * NOT READY and carries the failure as its `reason`, so the run reaches the pipeline and the
+ * refusal comes from the browser executor — exactly where an unusable environment was always
+ * refused, and exactly as it was before `verify` provisioned anything. The auto-review's P1
+ * is why: throwing here ends the command BEFORE `runPipeline`, so a run that had just
+ * compiled a plan (a paid provider call, recorded in `planning.providerUsage`) wrote no
+ * `result.json` at all — while `verify` had already printed "its provider usage is recorded
+ * in the run document". Deferring the refusal by one stage boundary keeps that promise true.
+ *
+ * ⚠️ IT IS NOT A SKIP AND CANNOT BECOME ONE. `ready: false` reaches `#requireRuntime`, which
+ * throws `InfraError` before any I/O (exit 3) — see `tests/unit/surfaces/browser-params.test.ts`
+ * — and this environment is only ever built when the plan HAS a browser probe, so a probe
+ * that must refuse always exists. The corpus fixture `browser-probe-provisions` pins the
+ * whole chain through the real binary: exit 3, `infraError: infra`, no criterion reported.
+ */
+async function unusable(
+  inputs: Parameters<typeof resolveBrowserEnvironment>[0],
+): Promise<{ readonly reason: string }> {
+  const environment = await resolveBrowserEnvironment(inputs);
+  expect(
+    environment.ready,
+    'a failed provisioning must never hand back a usable environment',
+  ).toBe(false);
+  return { reason: environment.source === 'absent' ? environment.reason : '(not absent)' };
+}
+
 describe('resolveBrowserEnvironment, when the operator points the cache inside the project', () => {
-  it('refuses with an InfraError and leaves the project tree byte-for-byte as it was', async () => {
+  it('refuses, says why, and leaves the project tree byte-for-byte as it was', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
     await writeFile(join(project, 'README.md'), '# target\n', 'utf8');
     const before = await treeOf(project);
     const { runner, runs } = fakeRunner([ok()]);
 
-    const failure = await resolveBrowserEnvironment({
+    const refusal = await unusable({
       projectRoot: project,
       plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
       runner,
@@ -391,13 +419,13 @@ describe('resolveBrowserEnvironment, when the operator points the cache inside t
       env: { PLAYWRIGHT_BROWSERS_PATH: join(project, '.browsers') },
       platform: 'linux',
       homeDir: home,
-    }).then(
-      () => null,
-      (error: unknown) => error,
-    );
+    });
 
-    expect(failure).toBeInstanceOf(InfraError);
-    expect((failure as InfraError).message).toContain('inside the target project');
+    expect(refusal.reason).toContain('inside the target project');
+    // The HINT survives into the reason. It names the variable that chose the path, which is
+    // the only actionable half of this failure, and the executor's own refusal has no way to
+    // reproduce it.
+    expect(refusal.reason).toContain('PLAYWRIGHT_BROWSERS_PATH');
     // Refused BEFORE anything was spawned, and nothing landed under the project.
     expect(runs).toHaveLength(0);
     expect(await treeOf(project)).toEqual(before);
@@ -409,67 +437,176 @@ describe('resolveBrowserEnvironment, when the operator points the cache inside t
     const before = await treeOf(project);
     const { runner, runs } = fakeRunner([ok()]);
 
-    const failure = await resolveBrowserEnvironment({
+    const refusal = await unusable({
       projectRoot: project,
       plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
       runner,
       env: { XDG_CACHE_HOME: join(project, '.cache') },
       platform: 'linux',
       homeDir: home,
-    }).then(
-      () => null,
-      (error: unknown) => error,
-    );
+    });
 
-    expect(failure).toBeInstanceOf(InfraError);
+    expect(refusal.reason).toContain('inside the target project');
     expect(runs).toHaveLength(0);
     expect(await treeOf(project)).toEqual(before);
   });
 });
 
-/* ── AC5: provisioning failure is InfraError, never a skip and never a product FAIL ─── */
+/* ── AC5: a provisioning failure is exit 3, never a skip and never a product FAIL ───── */
 
 describe('resolveBrowserEnvironment, when provisioning fails', () => {
-  it('raises an InfraError naming what could not be done, rather than an unusable environment', async () => {
+  it('carries what could not be done, and its hint, into the environment the run refuses on', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
     const { runner } = fakeRunner([ok({ exitCode: 1, stderr: 'ENOTFOUND registry.npmjs.org' })]);
 
-    const failure = await resolveBrowserEnvironment({
+    const refusal = await unusable({
       projectRoot: project,
       plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
       runner,
       env: {},
       platform: 'linux',
       homeDir: home,
-    }).then(
-      () => null,
-      (error: unknown) => error,
-    );
+    });
 
-    expect(failure).toBeInstanceOf(InfraError);
-    expect((failure as InfraError).message).toContain(`installing ${PLAYWRIGHT_PACKAGE} into`);
-    expect((failure as InfraError).hint).toContain('network');
+    expect(refusal.reason).toContain(`installing ${PLAYWRIGHT_PACKAGE} into`);
+    // The most actionable sentence in the whole failure, and it would be lost if only the
+    // message survived: the executor's refusal quotes the reason and adds its own hint about
+    // `doctor`, which says nothing about a proxy or a registry.
+    expect(refusal.reason).toContain('network');
   });
 
-  it('raises an InfraError when npm is not on PATH, never a silently browser-free run', async () => {
+  it('carries an absent npm the same way, never a silently browser-free run', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
     const { runner } = fakeRunner([ok({ outcome: 'not-found', exitCode: null, pgid: null })]);
 
-    const failure = await resolveBrowserEnvironment({
+    const refusal = await unusable({
       projectRoot: project,
       plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
       runner,
       env: {},
       platform: 'linux',
       homeDir: home,
-    }).then(
-      () => null,
-      (error: unknown) => error,
-    );
+    });
 
-    expect(failure).toBeInstanceOf(InfraError);
-    expect((failure as InfraError).message).toContain('not on PATH');
+    expect(refusal.reason).toContain('not on PATH');
+  });
+
+  it('lets a non-InfraError through untouched, because only a diagnosed failure may be downgraded', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    const runner = {
+      run(): Promise<ProcessResult> {
+        // A programming error, not an environment one. Turning THIS into "the browser
+        // environment is unusable" would bury a defect in this product inside a message
+        // about the operator's machine.
+        return Promise.reject(new TypeError('runner exploded'));
+      },
+    };
+
+    await expect(
+      resolveBrowserEnvironment({
+        projectRoot: project,
+        plan: planWith([
+          { criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] },
+        ]),
+        runner,
+        env: {},
+        platform: 'linux',
+        homeDir: home,
+      }),
+    ).rejects.toThrow(TypeError);
+  });
+});
+
+/* ── the auto-review's P2: provisioning for a probe the config cannot serve ─────────── */
+
+describe('resolveBrowserEnvironment, when a browser probe names a service the config lost', () => {
+  it('does not provision for it — the run will fail on the config, and a download cannot help', async () => {
+    // A PERSISTED plan is checked against its contract but NOT against the declared config
+    // ids: `planDraftSchemaFor` applies that check to a DRAFT during compilation only
+    // (`src/schemas/plan.ts`), so a plan that was valid when compiled and whose service was
+    // later removed from `config.yaml` reaches execution intact. Provisioning for it would
+    // download hundreds of megabytes only to reject the plan at dispatch — and on an offline
+    // machine it would report a provisioning failure for what is really a config error.
+    // Raised by the codex auto-review of this branch.
+    const project = await tempRoot();
+    const home = await tempRoot();
+    const { runner, runs } = fakeRunner([ok()]);
+
+    const environment = await resolveBrowserEnvironment({
+      projectRoot: project,
+      plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
+      // `BROWSER_PROBE` names service `app`; this project declares none.
+      declaredServiceIds: [],
+      runner,
+      env: {},
+      platform: 'linux',
+      homeDir: home,
+    });
+
+    expect(runs).toHaveLength(0);
+    expect(environment.source).toBe('absent');
+    expect(await readdir(home)).toEqual([]);
+  });
+
+  it('still provisions when at least ONE browser probe names a declared service', async () => {
+    const project = await tempRoot();
+    const home = await tempRoot();
+    const cacheDir = join(home, '.cache', 'specwitness', 'playwright');
+    const { runner, runs } = fakeRunner([ok(), ok()], async (call, run) => {
+      if (call === 0) {
+        await installFakePlaywright(cacheDir, '1.62.1');
+      } else {
+        await installFakeChromium(String(run.env.set?.['PLAYWRIGHT_BROWSERS_PATH']));
+      }
+    });
+
+    const environment = await resolveBrowserEnvironment({
+      projectRoot: project,
+      plan: planWith([
+        {
+          criterionId: 'E1-01',
+          disposition: 'automated',
+          probes: [
+            {
+              ...BROWSER_PROBE,
+              id: 'P0',
+              mechanics: { ...BROWSER_PROBE.mechanics, serviceId: 'gone' },
+            },
+            BROWSER_PROBE,
+          ],
+        },
+      ]),
+      declaredServiceIds: ['app'],
+      runner,
+      env: {},
+      platform: 'linux',
+      homeDir: home,
+    });
+
+    expect(environment.ready).toBe(true);
+    expect(runs).toHaveLength(2);
+  });
+
+  it('provisions when the caller declares nothing about services, because absence is not a claim', async () => {
+    // `declaredServiceIds` is OPTIONAL. Omitting it means "I am not telling you which services
+    // exist", which must behave exactly as it did before rather than as "none exist" —
+    // otherwise every caller that does not pass it silently stops provisioning.
+    const project = await tempRoot();
+    const home = await tempRoot();
+    const { runner, runs } = fakeRunner([ok({ outcome: 'not-found', exitCode: null, pgid: null })]);
+
+    await unusable({
+      projectRoot: project,
+      plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
+      runner,
+      env: {},
+      platform: 'linux',
+      homeDir: home,
+    });
+
+    expect(runs).toHaveLength(1);
   });
 });
