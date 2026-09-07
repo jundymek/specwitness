@@ -351,27 +351,6 @@ async function verify(
   const recordProcessGroup = (pgid: number): Promise<void> =>
     store.recordProcessGroup(created.runId, pgid);
 
-  // Which Playwright this run's browser probes will drive — PROVISIONING ONE when the plan
-  // has a browser probe and the machine has none (story 7.0, defect D-5 of the first
-  // dogfooding run: `provisionPlaywright` was written in 5.1 and called from nowhere, so a
-  // browser probe could only ever exit 3 while two messages promised otherwise).
-  //
-  // THE DECISION COMES FROM THE PLAN, and that is the point: a run whose plan has no browser
-  // probe still only RESOLVES — read-only, offline, no spawn — and costs what it always did.
-  // Provisioning here unconditionally would make every gates-only run pay for a browser it
-  // never opens. See `verify/playwright-provisioning.ts` for why this is eager rather than
-  // deferred to the first probe.
-  //
-  // BELOW `recordProcessGroup` ON PURPOSE (AD-8): provisioning spawns `npm` and Playwright's
-  // own `cli.js`, a download is minutes long, and a group id nobody wrote down is a group
-  // `specwitness clean` cannot reap.
-  const playwright = await resolveBrowserEnvironment({
-    projectRoot,
-    plan: planning.plan,
-    runner,
-    onProcessGroup: recordProcessGroup,
-  });
-
   const writeEvidence = (relativeName: string, contents: string): Promise<string> =>
     store.writeEvidenceFile(created.runId, relativeName, contents);
   // The BINARY twin (story 5.2). A Playwright trace is a `.zip` and a screenshot is a
@@ -409,6 +388,30 @@ async function verify(
   }
 
   async function execute(): Promise<ReturnType<typeof exitCodeForOutcome>> {
+  // Which Playwright this run's browser probes will drive — PROVISIONING ONE when the plan
+  // has a browser probe and the machine has none (story 7.0, defect D-5 of the first
+  // dogfooding run: `provisionPlaywright` was written in 5.1 and called from nowhere, so a
+  // browser probe could only ever exit 3 while two messages promised otherwise).
+  //
+  // THE DECISION COMES FROM THE PLAN, and that is the point: a run whose plan has no browser
+  // probe still only RESOLVES — read-only, offline, no spawn — and costs what it always did.
+  // Provisioning unconditionally would make every gates-only run pay for a browser it never
+  // opens. See `verify/playwright-provisioning.ts` for why this is eager rather than deferred
+  // to the first probe.
+  //
+  // ⚠️ INSIDE THE ARMED INTERRUPT WINDOW, AND THAT IS WHY IT IS HERE RATHER THAN BESIDE
+  // `recordProcessGroup`. This is the first thing in this command that can take MINUTES, it
+  // spawns process groups, and `armInterruptNotice` is what tells an operator who presses
+  // Ctrl+C which run directory to reap. Provisioning above the notice would put the longest
+  // window in the run outside the only thing that names it. `recordProcessGroup` is bound
+  // above and passed here, so every group reaches the manifest either way (AD-8).
+  const playwright = await resolveBrowserEnvironment({
+    projectRoot,
+    plan: planning.plan,
+    runner,
+    onProcessGroup: recordProcessGroup,
+  });
+
   const result = await runPipeline({
     runId: created.runId,
     epic,
