@@ -1,5 +1,5 @@
 # SpecWitness Project Config for the corpus fixture
-# `browser-provisioning-outranks-gate-failure`.
+# `browser-provisioning-failure-survives-a-gate-failure`.
 #
 # ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). A corpus fixture
 # is the one place in this repository where a config is committed with commands

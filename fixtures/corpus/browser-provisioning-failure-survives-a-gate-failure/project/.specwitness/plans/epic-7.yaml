@@ -1,5 +1,5 @@
 # Hand-written Verification Plan for the corpus fixture
-# `browser-provisioning-outranks-gate-failure`.
+# `browser-provisioning-failure-survives-a-gate-failure`.
 #
 # PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
 # plan on disk `verify` compiles nothing, so no provider is ever in scope

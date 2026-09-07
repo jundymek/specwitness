@@ -704,6 +704,25 @@ async function verify(
   // STAGE that ended the run, and no stage can have been the explainer.
   reportInfraFailure(result);
 
+  // ⚠️ THE RUN CONCLUDED WITHOUT A BROWSER IT NEEDED, and the operator has to be told even
+  // though the verdict stands. A failing gate outranks everything (AD-6, ADR-003) and this
+  // does not touch that — `exitCodeForOutcome` below is unchanged — but the pipeline jumped
+  // past the probes stage, so nothing else on this path mentions that the machine cannot run
+  // browser probes at all. Before story 7.0 wired this, such a run printed its verdict and
+  // said nothing: the failure was invisible rather than merely outranked, which is the half
+  // of the supervisor's finding that survived the precedence question.
+  //
+  // ONLY when the run reached a verdict. When it did not, the InfraError above already names
+  // the same failure, and saying it twice would be noise on the one path that is already
+  // loud.
+  if (browserEnvironmentUnavailable !== undefined && result.outcome.verdict !== undefined) {
+    printWarning(
+      `this run could not provision the browser its plan requires, so every criterion only a ` +
+        `browser can adjudicate went unchecked: ${browserEnvironmentUnavailable}. The verdict ` +
+        'above is what the gates and the remaining criteria decided, and is unaffected',
+    );
+  }
+
   // THE EXIT CODE COMES FROM THE PIPELINE'S OWN OUTCOME. `published.outcome`
   // is the same object — `attachExplanations` spreads it through untouched —
   // but reading it from `result` says out loud that the explainer is not on

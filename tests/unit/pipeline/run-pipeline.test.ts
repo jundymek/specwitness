@@ -290,17 +290,18 @@ describe('runPipeline — a stage that returns a product-negative result', () =>
     expect(result.outcome.infraError).toBeUndefined();
   });
 
-  it('refuses a FAIL when the browser environment the plan needed could not be provisioned', async () => {
-    // ⚠️ THE PRODUCT'S FIRST NON-NEGOTIABLE RULE, on the one path story 7.0 could break it:
-    // infra failures are never reported as product FAIL. A gate that says no stops the
-    // pipeline and jumps PAST the probes stage to `aggregate`, so the browser executor —
-    // the one thing that refuses an unusable environment — never runs. Without this guard
-    // an unprovisionable machine reports the BRANCH as broken, exit 1, and the environment
-    // problem is never surfaced to anybody. Found by the supervisor reading the commit that
-    // deferred the refusal, before the PR opened.
+  it('keeps the gate failure as the verdict when a needed browser could not be provisioned', async () => {
+    // ⚠️ A RECORDED PRECEDENCE, AND THIS TEST EXISTS BECAUSE THIS BRANCH BROKE IT ONCE.
+    // `domain/verdict.ts:17-35`: "A failing gate outranks everything" (AD-6, ADR-003), and
+    // "the reverse ordering would let a flaky probe upgrade a genuinely failing branch to
+    // 'rerun me'" (PRD §9). An earlier version of this story threw here instead, turning a
+    // demonstrably broken branch into exit 3 — the RETRYABLE classification — which is the
+    // exact inversion that reasoning was written against. Caught as a P1 by codex.
     //
-    // The gate result itself is NOT thrown away: it stays in the timeline. What the run may
-    // not do is publish a conclusion about the branch that it did not reach.
+    // What the run must NOT do is stay silent about the browser: the pipeline jumped past
+    // the probes stage, so nothing else says the machine cannot run browser probes at all.
+    // The verdict is the gate's; the diagnosis rides in the timeline, which is inside
+    // `result.json` and therefore reaches a harness rather than only a terminal.
     const ran: StageName[] = [];
     const stages = stagesWith(ran, {
       gates: {
@@ -322,21 +323,20 @@ describe('runPipeline — a stage that returns a product-negative result', () =>
 
     const result = await run(stages);
 
-    // Exit 3, not exit 1. `outcome.verdict` is never set, so nothing downstream can read a
-    // conclusion off a run that reached none.
-    expect(result.outcome.verdict).toBeUndefined();
-    expect(result.outcome.infraError).toBe('infra');
-    expect(statusOf(result, 'gates')).toBe('failed');
-    expect(statusOf(result, 'aggregate')).toBe('error');
-    // The gate's own result survives into the report: the run says both what it found and
-    // what it could not do.
-    expect(result.gates).toEqual([{ gateId: 'lint', status: 'fail', durationMs: 40 }]);
+    // The branch does not build. That is true whatever the browser could or could not do.
+    expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+    expect(statusOf(result, 'aggregate')).toBe('ok');
+    // ...and the environment failure is on the record, in the document, not just on a screen.
+    const aggregateEntry = result.stages.find((entry) => entry.stage === 'aggregate');
+    expect(aggregateEntry?.detail).toContain('could NOT provision the browser');
+    expect(aggregateEntry?.detail).toContain('could not be installed');
+    expect(aggregateEntry?.detail).toContain('verdict: FAIL');
   });
 
-  it('still ends in FAIL when no browser environment was ever needed', async () => {
-    // The guard is bound ONLY when the plan requires a browser the run could not get. A gate
-    // failure on an ordinary run is still a product answer, and turning every gate failure
-    // into exit 3 would be a far worse defect than the one being fixed.
+  it('says nothing about a browser when none was needed', async () => {
+    // The dep is bound only when the plan required a browser the run could not get, so an
+    // ordinary gate failure must read exactly as it always has — no extra sentence, no
+    // change of outcome.
     const ran: StageName[] = [];
     const stages = stagesWith(ran, {
       gates: {
@@ -353,6 +353,9 @@ describe('runPipeline — a stage that returns a product-negative result', () =>
     const result = await run(stages);
 
     expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+    expect(result.stages.find((entry) => entry.stage === 'aggregate')?.detail).toBe(
+      'verdict: FAIL',
+    );
   });
 
   it('records the stage as `failed`, which is not the same as `error`', async () => {

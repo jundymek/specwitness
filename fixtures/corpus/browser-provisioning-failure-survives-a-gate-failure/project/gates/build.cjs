@@ -1,4 +1,4 @@
-// Fixture `browser-provisioning-outranks-gate-failure` — a gate that says no.
+// Fixture `browser-provisioning-failure-survives-a-gate-failure` — a gate that says no.
 //
 // ⚠️ IT IS NOT THE SUBJECT OF THE FIXTURE. It exists to make the pipeline stop early and
 // jump PAST the probes stage to `aggregate` (`src/pipeline/run-pipeline.ts`, the

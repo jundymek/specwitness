@@ -1,5 +1,5 @@
 # Hand-written Verification Contract for the corpus fixture
-# `browser-provisioning-outranks-gate-failure`.
+# `browser-provisioning-failure-survives-a-gate-failure`.
 #
 # The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
 # `meta.frozenAt` were produced ONCE, at authoring time, by the shipped
