@@ -109,6 +109,7 @@ import { explainVerifiedRun, publishExplainedRun } from '../verify/explain.js';
 import {
   planRequiresBrowser,
   resolveBrowserEnvironment,
+  shouldReportUnavailableBrowser,
 } from '../verify/playwright-provisioning.js';
 import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
@@ -715,7 +716,16 @@ async function verify(
   // ONLY when the run reached a verdict. When it did not, the InfraError above already names
   // the same failure, and saying it twice would be noise on the one path that is already
   // loud.
-  if (browserEnvironmentUnavailable !== undefined && result.outcome.verdict !== undefined) {
+  // NOT "did the run reach a verdict": provisioning can fail and then a stage BEFORE `probes`
+  // can throw, which skips `aggregate` too — so the timeline detail never happens either and
+  // the operator would hear about the browser from nobody. The question is whether the failure
+  // already being printed IS the browser refusal, which quotes this same reason.
+  if (
+    shouldReportUnavailableBrowser(
+      browserEnvironmentUnavailable,
+      result.stages.find((stage) => stage.status === 'error')?.detail,
+    )
+  ) {
     printWarning(
       `this run could not provision the browser its plan requires, so every criterion only a ` +
         `browser can adjudicate went unchecked: ${browserEnvironmentUnavailable}. The verdict ` +

@@ -237,14 +237,25 @@ export async function resolveBrowserEnvironment(
   // the pipeline carry on and, behind a failing gate, exit 1 with a durability failure nobody
   // ever hears about. So it is remembered here and rethrown below: only a failure this module
   // asked for and can explain may be downgraded. Raised as a P2 by the codex review.
+  //
+  // ⚠️ AND IT NEED NOT REJECT TO HAVE FAILED. If the hook never SETTLES, `ProcessRunner` does
+  // not throw at all: its per-command timeout fires, it terminates the group, and it returns a
+  // `timed-out` result, which `provisionPlaywright` classifies as an ordinary `InfraError` —
+  // indistinguishable from "the registry was unreachable". So a hook that started and has not
+  // finished is tracked as well as one that threw, and both are fatal. Raised as a P2 by the
+  // codex review, one notch finer than the rejected-hook case.
   let recordingFailure: unknown;
+  let recordingInFlight = false;
   const onProcessGroup =
     inputs.onProcessGroup === undefined
       ? undefined
       : async (pgid: number): Promise<void> => {
+          recordingInFlight = true;
           try {
             await inputs.onProcessGroup?.(pgid);
+            recordingInFlight = false;
           } catch (failure) {
+            recordingInFlight = false;
             recordingFailure = failure;
             throw failure;
           }
@@ -258,13 +269,13 @@ export async function resolveBrowserEnvironment(
       ...(onProcessGroup === undefined ? {} : { onProcessGroup }),
     });
   } catch (failure) {
-    if (recordingFailure !== undefined) {
-      // `recordingFailure`, not `failure`: they are the same object today because
-      // `ProcessRunner` rethrows the hook's error unchanged, and writing the one the guard
-      // actually tested means this stays correct without depending on that. The run's own
-      // bookkeeping failed, and this module is not entitled to translate that into a
-      // statement about the operator's browser.
-      throw recordingFailure;
+    if (recordingFailure !== undefined || recordingInFlight) {
+      // The run's own bookkeeping failed, and this module is not entitled to translate that
+      // into a statement about the operator's browser. `recordingFailure` when the hook threw
+      // — the object the guard actually tested, which `ProcessRunner` rethrows unchanged —
+      // and `failure` when it merely hung, because then the only error that exists is the
+      // timeout `provisionPlaywright` raised.
+      throw recordingFailure ?? failure;
     }
     if (!(failure instanceof InfraError)) {
       throw failure;
@@ -318,4 +329,34 @@ async function unusableAfterProvisioning(
       redaction,
     ),
   };
+}
+
+/**
+ * Must the edge SAY OUT LOUD that this run could not get the browser its plan required?
+ *
+ * Yes, unless the failure the run already reported is the browser refusal itself, which quotes
+ * this same reason verbatim — repeating it there would be noise on the one path that is already
+ * loud.
+ *
+ * ⚠️ IT IS NOT "did the run reach a verdict", WHICH IS WHAT THIS FIRST ASKED. Provisioning can
+ * fail and then a stage BEFORE `probes` can throw — the worktree, `setup.install`, a service
+ * that never becomes ready. `runPipeline` then skips both `probes` and `aggregate`, so the
+ * timeline detail that carries this diagnosis never happens either, and a warning gated on a
+ * verdict is suppressed as well: the provisioning failure disappears from BOTH channels, on a
+ * run that had already discovered it. Raised as a P2 by the codex review of this branch.
+ *
+ * So the question is about the REPORTED TEXT rather than the outcome shape, and it fails open:
+ * when in doubt the operator hears it twice, which is the harmless direction.
+ *
+ * @param reason        why the browser environment could not be established, when it could not
+ * @param reportedFailure the detail `reportInfraFailure` is about to print, if any
+ */
+export function shouldReportUnavailableBrowser(
+  reason: string | undefined,
+  reportedFailure: string | undefined,
+): boolean {
+  if (reason === undefined) {
+    return false;
+  }
+  return reportedFailure === undefined || !reportedFailure.includes(reason);
 }

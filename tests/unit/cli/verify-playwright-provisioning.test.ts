@@ -30,6 +30,7 @@ import {
   PROVISION_TIMEOUT_MS,
   planRequiresBrowser,
   resolveBrowserEnvironment,
+  shouldReportUnavailableBrowser,
 } from '../../../src/cli/verify/playwright-provisioning.js';
 import { InfraError } from '../../../src/domain/errors.js';
 import type { Plan, PlanCriterion, ProbeSpec } from '../../../src/domain/plan.js';
@@ -588,6 +589,42 @@ describe('resolveBrowserEnvironment, when provisioning fails', () => {
     expect((failure as InfraError).message).toContain('could not record process group');
   });
 
+  it('treats a STALLED recording hook as fatal too, not only a rejected one', async () => {
+    // ⚠️ THE HOOK NEED NOT REJECT TO HAVE FAILED. If `onProcessGroup` never settles,
+    // `ProcessRunner` does not throw — its per-command timeout fires, it terminates the group,
+    // and it RETURNS a `timed-out` result. `provisionPlaywright` then classifies that as an
+    // ordinary `InfraError`, indistinguishable from "the registry was unreachable", and the
+    // catch below would downgrade it to an absent browser: behind a failing gate the run would
+    // exit 1 while the durability hook that `specwitness clean` depends on had hung. Raised as
+    // a P2 by the codex review of this branch, one notch finer than the rejected-hook case.
+    const project = await tempRoot();
+    const home = await tempRoot();
+    const runner = {
+      async run(options: ProcessRunOptions): Promise<ProcessResult> {
+        // Started and never settled — exactly what a wedged `RunStore` write looks like from
+        // here — and then the command times out, as the real runner would report it.
+        void options.onProcessGroup?.(4242);
+        await Promise.resolve();
+        return ok({ outcome: 'timed-out', exitCode: null });
+      },
+    };
+
+    const failure = await resolveBrowserEnvironment({
+      projectRoot: project,
+      plan: planWith([{ criterionId: 'E1-01', disposition: 'automated', probes: [BROWSER_PROBE] }]),
+      runner,
+      onProcessGroup: () => new Promise<void>(() => {}),
+      env: {},
+      platform: 'linux',
+      homeDir: home,
+    }).then(
+      () => 'RESOLVED',
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(InfraError);
+  });
+
   it('lets a non-InfraError through untouched, because only a diagnosed failure may be downgraded', async () => {
     const project = await tempRoot();
     const home = await tempRoot();
@@ -703,5 +740,41 @@ describe('resolveBrowserEnvironment, when a browser probe names a service the co
     });
 
     expect(runs).toHaveLength(1);
+  });
+});
+
+/* ── which failures the edge still has to SAY out loud ─────────────────────────────── */
+
+describe('shouldReportUnavailableBrowser', () => {
+  const reason = 'installing @playwright/test into /cache failed (exit 1): no network';
+
+  it('is false when no browser was needed, or one was obtained', () => {
+    expect(shouldReportUnavailableBrowser(undefined, undefined)).toBe(false);
+    expect(shouldReportUnavailableBrowser(undefined, 'infra: services stage failed')).toBe(false);
+  });
+
+  it('is true when the run reached a verdict, because nothing else mentions the browser', () => {
+    // The gate-failure path: `aggregate` ran, the verdict is the gate's, and the operator has
+    // to be told that this machine cannot run browser probes at all.
+    expect(shouldReportUnavailableBrowser(reason, undefined)).toBe(true);
+  });
+
+  it('is true when ANOTHER infra stage ended the run first', () => {
+    // ⚠️ THE CASE THE FIRST VERSION MISSED. Provisioning fails, then the worktree, setup or
+    // services stage throws — `runPipeline` skips both `probes` and `aggregate`, so the
+    // timeline detail that carries the diagnosis never happens, and gating the warning on
+    // "the run reached a verdict" suppressed it as well. The provisioning failure then
+    // disappeared from BOTH channels. Raised as a P2 by the codex review of this branch.
+    expect(
+      shouldReportUnavailableBrowser(reason, "infra: service 'app' exited before it became ready"),
+    ).toBe(true);
+  });
+
+  it('is false when the reported failure IS the browser refusal, which already quotes it', () => {
+    // The executor's own `InfraError` names the reason verbatim, and `reportInfraFailure`
+    // prints it. Saying it again would be noise on the one path that is already loud.
+    expect(
+      shouldReportUnavailableBrowser(reason, `infra: browser probe for E7-01 cannot run: ${reason}`),
+    ).toBe(false);
   });
 });
