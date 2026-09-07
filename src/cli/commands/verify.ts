@@ -106,7 +106,10 @@ import { exitCodeForOutcome, recordExitCode } from '../exit.js';
 import { printError, printWarning } from '../print-error.js';
 import { armInterruptNotice } from '../verify/interrupt.js';
 import { explainVerifiedRun, publishExplainedRun } from '../verify/explain.js';
-import { resolveBrowserEnvironment } from '../verify/playwright-provisioning.js';
+import {
+  planRequiresBrowser,
+  resolveBrowserEnvironment,
+} from '../verify/playwright-provisioning.js';
 import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
 
@@ -405,19 +408,32 @@ async function verify(
   // Ctrl+C which run directory to reap. Provisioning above the notice would put the longest
   // window in the run outside the only thing that names it. `recordProcessGroup` is bound
   // above and passed here, so every group reaches the manifest either way (AD-8).
+  // A browser probe naming a service this config no longer declares cannot run whatever
+  // provisioning produces — `resolveServiceBaseUrl` refuses it at dispatch — and a PERSISTED
+  // plan is never re-checked against the declared ids (that check applies to a draft, at
+  // compile time). Passing them in is what stops a stale plan from costing a download before
+  // the configuration error it really is surfaces. Raised by the codex auto-review of 7.0.
+  const declaredServiceIds = Object.keys(config.services);
   const playwright = await resolveBrowserEnvironment({
     projectRoot,
     plan: planning.plan,
-    // A browser probe naming a service this config no longer declares cannot run whatever
-    // provisioning produces — `resolveServiceBaseUrl` refuses it at dispatch — and a
-    // PERSISTED plan is never re-checked against the declared ids (that check applies to a
-    // draft, at compile time). Passing them here is what stops a stale plan from costing a
-    // download before the configuration error it really is surfaces. Raised by the codex
-    // auto-review of story 7.0.
-    declaredServiceIds: Object.keys(config.services),
+    declaredServiceIds,
     runner,
     onProcessGroup: recordProcessGroup,
   });
+
+  // ⚠️ THE RUN COULD NOT BUILD WHAT ITS PLAN REQUIRES, and the aggregate stage has to know.
+  // A gate that says no stops the pipeline and jumps PAST the probes stage, so the browser
+  // executor — the one thing that refuses an unusable environment — never runs, and the run
+  // would otherwise report the BRANCH as broken (exit 1) for what is an environment problem.
+  // Infra failures are never reported as product FAIL. Found by the supervisor on the commit
+  // that deferred the refusal; `browser-provisioning-outranks-gate-failure` pins it.
+  const browserEnvironmentUnavailable =
+    !playwright.ready && planRequiresBrowser(planning.plan, declaredServiceIds)
+      ? playwright.source === 'absent'
+        ? playwright.reason
+        : 'the resolved Playwright environment is not usable'
+      : undefined;
 
   const result = await runPipeline({
     runId: created.runId,
@@ -430,6 +446,9 @@ async function verify(
     providerUsage: planning.providerUsage,
     stages: createStages({
       assertVerifiableContract: () => assertVerifiableContract(loaded),
+      // Spread, so a run that needs no browser or got one hands the stage NO key rather
+      // than an explicit `undefined` (`exactOptionalPropertyTypes`).
+      ...(browserEnvironmentUnavailable === undefined ? {} : { browserEnvironmentUnavailable }),
       worktree: { vcs, recorder: store, root },
       // The declared `setup.install`, executed in the worktree BEFORE the gates
       // (story 6.11). Bound UNCONDITIONALLY, not only when the project declared

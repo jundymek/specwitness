@@ -290,6 +290,71 @@ describe('runPipeline — a stage that returns a product-negative result', () =>
     expect(result.outcome.infraError).toBeUndefined();
   });
 
+  it('refuses a FAIL when the browser environment the plan needed could not be provisioned', async () => {
+    // ⚠️ THE PRODUCT'S FIRST NON-NEGOTIABLE RULE, on the one path story 7.0 could break it:
+    // infra failures are never reported as product FAIL. A gate that says no stops the
+    // pipeline and jumps PAST the probes stage to `aggregate`, so the browser executor —
+    // the one thing that refuses an unusable environment — never runs. Without this guard
+    // an unprovisionable machine reports the BRANCH as broken, exit 1, and the environment
+    // problem is never surfaced to anybody. Found by the supervisor reading the commit that
+    // deferred the refusal, before the PR opened.
+    //
+    // The gate result itself is NOT thrown away: it stays in the timeline. What the run may
+    // not do is publish a conclusion about the branch that it did not reach.
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: {
+        name: 'gates',
+        run: async (context) => {
+          ran.push('gates');
+          context.run.gates.push({ gateId: 'lint', status: 'fail', durationMs: 40 });
+          return stageProductNegative("gate 'lint' failed");
+        },
+      },
+      aggregate: instrumented(
+        createAggregateStage({
+          browserEnvironmentUnavailable:
+            '@playwright/test does not resolve and could not be installed',
+        }),
+        ran,
+      ),
+    });
+
+    const result = await run(stages);
+
+    // Exit 3, not exit 1. `outcome.verdict` is never set, so nothing downstream can read a
+    // conclusion off a run that reached none.
+    expect(result.outcome.verdict).toBeUndefined();
+    expect(result.outcome.infraError).toBe('infra');
+    expect(statusOf(result, 'gates')).toBe('failed');
+    expect(statusOf(result, 'aggregate')).toBe('error');
+    // The gate's own result survives into the report: the run says both what it found and
+    // what it could not do.
+    expect(result.gates).toEqual([{ gateId: 'lint', status: 'fail', durationMs: 40 }]);
+  });
+
+  it('still ends in FAIL when no browser environment was ever needed', async () => {
+    // The guard is bound ONLY when the plan requires a browser the run could not get. A gate
+    // failure on an ordinary run is still a product answer, and turning every gate failure
+    // into exit 3 would be a far worse defect than the one being fixed.
+    const ran: StageName[] = [];
+    const stages = stagesWith(ran, {
+      gates: {
+        name: 'gates',
+        run: async (context) => {
+          ran.push('gates');
+          context.run.gates.push({ gateId: 'lint', status: 'fail', durationMs: 40 });
+          return stageProductNegative("gate 'lint' failed");
+        },
+      },
+      aggregate: instrumented(createAggregateStage(), ran),
+    });
+
+    const result = await run(stages);
+
+    expect(result.outcome).toEqual({ verdict: 'FAIL', gateFailed: 'lint' });
+  });
+
   it('records the stage as `failed`, which is not the same as `error`', async () => {
     const ran: StageName[] = [];
     const stages = stagesWith(ran, {

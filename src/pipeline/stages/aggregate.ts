@@ -33,6 +33,7 @@
 
 import { deriveCriterionResult } from '../../domain/criterion-result.js';
 import type { DerivationOptions, DerivedCriterionResult } from '../../domain/criterion-result.js';
+import { InfraError } from '../../domain/errors.js';
 import type { RedactionOptions } from '../../domain/evidence.js';
 import type { PlanCriterion } from '../../domain/plan.js';
 import { aggregate } from '../../domain/verdict.js';
@@ -68,6 +69,30 @@ export interface AggregateStageDeps {
   readonly criteria?: readonly PlanCriterion[];
   /** Config-declared extra redaction patterns (AD-10), as the probes stage threads them. */
   readonly redaction?: RedactionOptions;
+  /**
+   * Why the browser environment this run's plan REQUIRES could not be established, when it
+   * could not. Bound by the edge (story 7.0) only when both halves are true: the compiled
+   * plan carries a browser probe, and provisioning it failed.
+   *
+   * ⚠️ IT EXISTS BECAUSE A GATE FAILURE JUMPS PAST THE PROBES STAGE. `run-pipeline.ts`'s
+   * product-negative branch stops early and resumes at THIS stage, by design — a branch that
+   * does not build should cost no AI or browser spend (ADR-003). But it means the browser
+   * executor, the one thing that refuses an unusable environment, never runs. Without this
+   * dep an unprovisionable machine whose gates fail reports the BRANCH as broken, exit 1
+   * FAIL, and the environment problem is never surfaced to anyone: an infra failure wearing
+   * a verdict's clothes, which is the first non-negotiable rule in `CLAUDE.md` (AD-6, AD-7,
+   * ADR-002) and the inversion that gets a verification gate switched off inside a week.
+   *
+   * A run that could not adjudicate what only a browser can adjudicate does not get to
+   * conclude anything ABOUT THE BRANCH. It still reports everything it did learn — the
+   * failing gate keeps its timeline entry and its result — it simply may not publish a
+   * verdict it never reached.
+   *
+   * Found by the supervisor reading the commit that deferred this refusal, before its PR
+   * opened; the corpus fixture `browser-provisioning-outranks-gate-failure` was written
+   * first and seen red at exit 1 FAIL.
+   */
+  readonly browserEnvironmentUnavailable?: string;
 }
 
 export function createAggregateStage(deps: AggregateStageDeps = {}): Stage {
@@ -123,6 +148,22 @@ export function createAggregateStage(deps: AggregateStageDeps = {}): Stage {
       );
 
       context.run.criteria = [...complete, ...undeclared];
+
+      // ⚠️ AFTER the criterion set is completed and BEFORE any outcome exists. The report
+      // then still shows every criterion the contract declares, exactly as a gate-failed run
+      // does (ADR-003) — the reader sees what was never adjudicated — while `outcome` is
+      // never written, so nothing downstream can read a conclusion off a run that reached
+      // none. `aggregate()` is not called at all: it is a pure function over gates and
+      // criteria and would happily answer FAIL, which is the answer this run may not give.
+      if (deps.browserEnvironmentUnavailable !== undefined) {
+        throw new InfraError(
+          'the browser environment this run needs could not be provisioned, so a criterion ' +
+            `only a browser can adjudicate was never checked: ${deps.browserEnvironmentUnavailable}`,
+          'fix the browser environment and run the command again — any gate result above is ' +
+            'still reported, but a run that could not adjudicate part of its plan does not ' +
+            'conclude that the branch is what is wrong',
+        );
+      }
 
       const outcome = aggregate(context.run.gates, context.run.criteria);
       // The only write to `outcome` anywhere in the pipeline (AD-6).
