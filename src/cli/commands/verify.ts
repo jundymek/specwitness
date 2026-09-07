@@ -110,6 +110,7 @@ import {
   planRequiresBrowser,
   resolveBrowserEnvironment,
   shouldReportUnavailableBrowser,
+  unavailableBrowserWarning,
 } from '../verify/playwright-provisioning.js';
 import { createProbeDispatcher, createRetryPolicy } from '../verify/probe-dispatch.js';
 import { releaseRun } from '../verify/teardown.js';
@@ -727,9 +728,7 @@ async function verify(
     )
   ) {
     printWarning(
-      `this run could not provision the browser its plan requires, so every criterion only a ` +
-        `browser can adjudicate went unchecked: ${browserEnvironmentUnavailable}. The verdict ` +
-        'above is what the gates and the remaining criteria decided, and is unaffected',
+      unavailableBrowserWarning(browserEnvironmentUnavailable, result.outcome.verdict),
     );
   }
 

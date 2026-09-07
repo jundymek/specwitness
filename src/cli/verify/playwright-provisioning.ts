@@ -354,9 +354,35 @@ async function unusableAfterProvisioning(
 export function shouldReportUnavailableBrowser(
   reason: string | undefined,
   reportedFailure: string | undefined,
-): boolean {
+): reason is string {
   if (reason === undefined) {
     return false;
   }
   return reportedFailure === undefined || !reportedFailure.includes(reason);
+}
+
+/**
+ * What the edge SAYS when this run could not get the browser its plan required.
+ *
+ * ⚠️ THE LAST SENTENCE DEPENDS ON WHETHER THERE IS A VERDICT AT ALL, and getting that wrong
+ * was a review finding rather than a nicety. On the gate-failure path the run really did
+ * conclude — the branch does not build, whatever the browser could have shown — and saying so
+ * is what stops this warning reading like a retraction of the verdict printed above it. But
+ * the same warning is now reached when ANOTHER infrastructure stage ended the run, where the
+ * report reads `VERDICT: (none) — infra error`; claiming "the verdict above" there contradicts
+ * the line next to it and implies the gates and criteria concluded something they did not.
+ *
+ * @param reason  why the browser environment could not be established
+ * @param verdict the run's verdict, or `undefined` when it reached none
+ */
+export function unavailableBrowserWarning(reason: string, verdict: string | undefined): string {
+  const preamble =
+    'this run could not provision the browser its plan requires, so every criterion only a ' +
+    `browser can adjudicate went unchecked: ${reason}`;
+
+  return verdict === undefined
+    ? `${preamble}. This run reached no conclusion about the branch for another reason, ` +
+        'reported above'
+    : `${preamble}. The verdict above is what the gates and the remaining criteria decided, ` +
+        'and is unaffected';
 }

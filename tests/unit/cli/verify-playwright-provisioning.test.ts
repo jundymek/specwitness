@@ -31,6 +31,7 @@ import {
   planRequiresBrowser,
   resolveBrowserEnvironment,
   shouldReportUnavailableBrowser,
+  unavailableBrowserWarning,
 } from '../../../src/cli/verify/playwright-provisioning.js';
 import { InfraError } from '../../../src/domain/errors.js';
 import type { Plan, PlanCriterion, ProbeSpec } from '../../../src/domain/plan.js';
@@ -776,5 +777,32 @@ describe('shouldReportUnavailableBrowser', () => {
     expect(
       shouldReportUnavailableBrowser(reason, `infra: browser probe for E7-01 cannot run: ${reason}`),
     ).toBe(false);
+  });
+});
+
+describe('unavailableBrowserWarning', () => {
+  const reason = 'installing @playwright/test into /cache failed (exit 1): no network';
+
+  it('says the verdict stands when there IS one', () => {
+    // The gate-failure path: the branch really does not build, and that conclusion is
+    // untouched by the browser. Saying so is what stops the warning reading like a retraction.
+    const warning = unavailableBrowserWarning(reason, 'FAIL');
+
+    expect(warning).toContain(reason);
+    expect(warning).toContain('verdict');
+    expect(warning).toContain('unaffected');
+  });
+
+  it('claims no verdict when the run reached none', () => {
+    // ⚠️ THE RUN ENDED ON ANOTHER INFRA FAILURE — a worktree, an install, a service — so the
+    // report above reads `VERDICT: (none) — infra error`. A warning that then spoke of "the
+    // verdict above" would contradict the line right next to it and imply the gates and
+    // criteria had concluded something. Raised as a P2 by the codex review of this branch,
+    // against the fix that made this path reachable at all.
+    const warning = unavailableBrowserWarning(reason, undefined);
+
+    expect(warning).toContain(reason);
+    expect(warning).not.toContain('verdict');
+    expect(warning).toContain('reached no conclusion');
   });
 });
