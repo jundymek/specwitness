@@ -148,6 +148,14 @@ development_status:
   # in production since Epic 3. Recorded as finding 17 in 7.0's Dev Agent Record. Unassigned:
   # writing the spec schedules nothing, and which wave it lands in is the owner's call.
   7-4-redaction-extra-patterns-config-surface: ready-for-dev
+  # Written 2026-09-09 by the SUPERVISOR of epic/7-dogfooding-repairs, with the owner's
+  # agreement, from evidence found while reviewing story 7.5 (PR #86, e039add): the doctor
+  # integration test asserting a playwright-capability WARNING fails on any machine that has
+  # ever provisioned SpecWitness's own Playwright cache -- which, from this epic onward, is the
+  # owner's. Reproduced on the epic base 6767a50, where 7.5's diff does not exist, so it is
+  # neither hers nor 7.5's. CI stays green because a fresh runner has no cache. Unassigned:
+  # writing the spec schedules nothing, and which wave it lands in is the owner's call.
+  7-7-doctor-optional-check-test-is-machine-dependent: ready-for-dev
   epic-7-retrospective: optional
 
 # Appended per the workflow note above; established at the Epic 3 retrospective
