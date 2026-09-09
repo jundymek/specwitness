@@ -370,6 +370,98 @@ describeWithBrowser('the browser surface reads what the page actually shows', ()
     TEST_TIMEOUT_MS,
   );
 
+  /* ── story 7.5: the ONE source for which an absence is itself the answer ─────────────── */
+
+  it(
+    'a missing element SATISFIES visible == false — the strongest evidence it is not showing',
+    async () => {
+      // ⚠️ THE MIRROR IMAGE of the `it.each` above, and the reason it is an exception rather
+      // than an inconsistency. `text` compares a VALUE the element carries, and a value that
+      // does not exist cannot meet an expectation about it. `visible` compares a claim about
+      // the RENDERED PAGE, and "not in the DOM at all" is not a missing answer to that claim
+      // — it is the answer, in its strongest form. Reporting it as an unsatisfied assertion
+      // reported four correct behaviours as product FAIL in the second dogfooding run
+      // (gitnebula E6-10, E6-11, E6-12, E6-14 at c5a10cb), one of them `critical`.
+      const { attempt } = await execute({
+        assertions: [
+          {
+            description: 'no error screen replaced the viewer',
+            target: { source: 'visible', selector: '#no-such-element' },
+            comparison: 'equals',
+            expected: 'false',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeUndefined();
+      expect(attempt.assertionEvaluations[0]?.satisfied).toBe(true);
+      expect(deriveCriterionResult(CRITERION, [attempt]).status).toBe('pass');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a missing element still FAILS visible == true — the demanded element is not there',
+    async () => {
+      // ⚠️ THE ACCEPTANCE CRITERION MOST LIKELY TO BE BROKEN BY A CARELESS FIX (7.5 AC2). A
+      // change that made an absence satisfy every `visible` assertion would turn "the thing
+      // I demanded is missing" into a PASS — minting a pass out of an absence, which is the
+      // one direction this product must never fail in. The absence maps to the VALUE
+      // `false`, and `false` does not equal `true`.
+      const { attempt } = await execute({
+        assertions: [
+          {
+            description: 'the viewer chrome is showing',
+            target: { source: 'visible', selector: '#no-such-element' },
+            comparison: 'equals',
+            expected: 'true',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeUndefined();
+      expect(attempt.assertionEvaluations[0]?.satisfied).toBe(false);
+      const derived = deriveCriterionResult(CRITERION, [attempt]);
+      expect(derived.status).toBe('fail');
+      expect(derived.status).not.toBe('error');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'absent and present-but-hidden stay TELLABLE APART in the evidence, though both are false',
+    async () => {
+      // Both are honest `false`s and both satisfy the same assertion, but they are different
+      // facts about the page: one element was rendered and hidden, the other was never
+      // built. A reader deciding whether the page is right has to be able to see which.
+      const { attempt } = await execute({
+        assertions: [
+          {
+            description: 'the hidden banner is not showing',
+            target: { source: 'visible', selector: '#banner' },
+            comparison: 'equals',
+            expected: 'false',
+          },
+          {
+            description: 'the missing banner is not showing',
+            target: { source: 'visible', selector: '#no-such-element' },
+            comparison: 'equals',
+            expected: 'false',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeUndefined();
+      expect(attempt.assertionEvaluations.every((e) => e.satisfied)).toBe(true);
+      // The element that exists reports the bare value it was read as.
+      expect(attempt.assertionEvaluations[0]?.actual).toBe('false');
+      // The element that does not exist reports the value AND how it was arrived at.
+      expect(attempt.assertionEvaluations[1]?.actual).toContain('false');
+      expect(attempt.assertionEvaluations[1]?.actual).toContain('no element matches');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
   it(
     'the scenario really drives the page — fill and click change what is asserted on',
     async () => {
@@ -515,6 +607,37 @@ describeWithBrowser('AD-6/AD-7: could not look is ERROR, and never FAIL', () => 
       const derived = deriveCriterionResult(CRITERION, [attempt]);
       expect(derived.status).toBe('error');
       expect(derived.status).not.toBe('fail');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'a VISIBLE read that throws is execError too — an absence is not what an exception means',
+    async () => {
+      // ⚠️ STORY 7.5's OWN TRAPDOOR. 7.5 makes an absent element satisfy `visible == false`,
+      // and the careless form of that change is "a visible read that produced no value means
+      // not visible" — which would swallow a crashed, closed or timed-out page into a
+      // satisfied assertion and mint a PASS from an infrastructure failure. The ABSENCE is a
+      // fact the page reported; an EXCEPTION means the page could not be read at all. The
+      // same unparseable selector as the test above, on the one source whose absence handling
+      // changed.
+      const { attempt } = await execute({
+        assertions: [
+          {
+            description: 'a selector this executor cannot evaluate, read as visibility',
+            target: { source: 'visible', selector: 'h1:::not-a-selector[' },
+            comparison: 'equals',
+            expected: 'false',
+          },
+        ],
+      });
+
+      expect(attempt.execError).toBeDefined();
+      expect(attempt.assertionEvaluations).toHaveLength(0);
+
+      const derived = deriveCriterionResult(CRITERION, [attempt]);
+      expect(derived.status).toBe('error');
+      expect(derived.status).not.toBe('pass');
     },
     TEST_TIMEOUT_MS,
   );
