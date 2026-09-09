@@ -7,6 +7,12 @@ import { join } from 'node:path';
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import {
+  hermeticHome,
+  hermeticHomeEnv,
+  specwitnessPlaywrightCache,
+} from './helpers/hermetic-home.js';
+
 /**
  * `specwitness doctor` end to end, against the BUILT binary.
  *
@@ -24,26 +30,40 @@ afterEach(async () => {
   await Promise.all(created.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
+/**
+ * Runs git in `cwd` with a hermetic identity AND NO USER CONFIG.
+ *
+ * ⚠️ STORY 7.7, AC4 — the second thing in this file that read state outside the
+ * tree under test. The identity was already pinned; the CONFIG was not, so a
+ * developer with `commit.gpgsign = true` in `~/.gitconfig` had every fixture
+ * here fail at `git commit` with `gpg failed to sign the data` — 16 of 17 tests
+ * red, for a reason that is a fact about their machine rather than about
+ * `doctor`. `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are the same guard
+ * `tests/integration/helpers/{probe,verify}-fixture.ts` already carry; this file
+ * simply did not have it.
+ */
+function git(cwd: string, ...args: string[]) {
+  return execa('git', args, {
+    cwd,
+    env: {
+      GIT_AUTHOR_NAME: 'Doctor Fixture',
+      GIT_AUTHOR_EMAIL: 'doctor@example.test',
+      GIT_COMMITTER_NAME: 'Doctor Fixture',
+      GIT_COMMITTER_EMAIL: 'doctor@example.test',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+    },
+    extendEnv: true,
+  });
+}
+
 async function project(config?: string, options: { git?: boolean } = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'specwitness-doctor-it-'));
   created.push(root);
 
   if (options.git !== false) {
-    await execa('git', ['init', '-b', 'master'], { cwd: root });
-    await execa(
-      'git',
-      [
-        '-c',
-        'user.email=doctor@example.test',
-        '-c',
-        'user.name=Doctor Fixture',
-        'commit',
-        '--allow-empty',
-        '-m',
-        'root commit',
-      ],
-      { cwd: root },
-    );
+    await git(root, 'init', '-b', 'master');
+    await git(root, 'commit', '--allow-empty', '-m', 'root commit');
   }
 
   if (config !== undefined) {
@@ -90,16 +110,6 @@ async function tryListen(): Promise<HeldPort | undefined> {
 }
 
 /**
- * Runs the built CLI. `input: ''` means the child gets no TTY, which is how the
- * harness invokes it.
- *
- * Story 2.7 note on `env`: the billing-risk variables are UNSET by default, so a
- * developer who happens to export `OPENAI_API_KEY` gets the same results as CI.
- * Without this the `billing-risk-env` check would report differently on
- * different machines and the failure would look like a flake rather than an
- * inherited environment.
- */
-/**
  * A PATH containing git and nothing else.
  *
  * Emptying PATH outright would also hide `git`, which is a REQUIRED check — the
@@ -116,6 +126,40 @@ async function gitOnlyPath(): Promise<string> {
   return dir;
 }
 
+/**
+ * A constructed, empty home directory, cleaned up with the rest of the fixtures.
+ *
+ * Story 7.7: every child below gets one by default. See `doctor` for why.
+ */
+async function emptyHome(): Promise<string> {
+  const home = await hermeticHome();
+  created.push(home);
+  return home;
+}
+
+/**
+ * Runs the built CLI. `input: ''` means the child gets no TTY, which is how the
+ * harness invokes it.
+ *
+ * Story 2.7 note on `env`: the billing-risk variables are UNSET by default, so a
+ * developer who happens to export `OPENAI_API_KEY` gets the same results as CI.
+ * Without this the `billing-risk-env` check would report differently on
+ * different machines and the failure would look like a flake rather than an
+ * inherited environment.
+ *
+ * ⚠️ STORY 7.7 — `HOME` IS THE SAME KIND OF INHERITANCE, and it was the one that
+ * got through. `playwright-capability` resolves `@playwright/test` from the
+ * project *or from SpecWitness's own cache under the home directory*
+ * (`src/infra/playwright-env.ts`), and story 7.0 made `verify` fill that cache.
+ * So from Epic 7 onward this suite reported `⚠ playwright-capability` on a
+ * machine that had never run the product and `✓ ... from the SpecWitness cache`
+ * on one that had — and the second is every machine this dogfooding epic is
+ * carried out on. Each child therefore gets its OWN empty home (and the
+ * `XDG_CACHE_HOME` / `LOCALAPPDATA` / `USERPROFILE` spellings of it), so the
+ * capability the check reports is one this file put there or deliberately left
+ * out. A caller that wants a populated one passes `hermeticHomeEnv(home)` in
+ * `env`, which overrides this.
+ */
 async function doctor(
   cwd: string,
   args: string[] = [],
@@ -125,10 +169,95 @@ async function doctor(
     cwd,
     reject: false,
     input: '',
-    env: { ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined, ...env },
+    env: {
+      ANTHROPIC_API_KEY: undefined,
+      OPENAI_API_KEY: undefined,
+      ...hermeticHomeEnv(await emptyHome()),
+      ...env,
+    },
     extendEnv: true,
   });
   return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** The version the cache fixture below declares. Asserted on, so it is named. */
+const FIXTURE_PLAYWRIGHT_VERSION = '1.62.1';
+
+/** The chromium revision that fixture requires and provides. */
+const FIXTURE_CHROMIUM_REVISION = '1234';
+
+/**
+ * Writes a COMPLETE SpecWitness Playwright cache at `cacheDir`: the layout
+ * `provisionPlaywright` leaves behind on a machine that has run a browser probe.
+ *
+ * A REAL PACKAGE LAYOUT, not a stub the resolver is taught to accept. The check
+ * runs in a child process against the built binary, which uses Node's own
+ * `require.resolve` for `@playwright/test` and reads `playwright-core`'s
+ * `browsers.json` for the revision table exactly as `playwright install` does —
+ * so anything less than a resolvable pair, plus Playwright's own
+ * `INSTALLATION_COMPLETE` marker in every bundle that table requires, would
+ * report `absent` or `browsers: absent` and prove nothing.
+ *
+ * `tests/unit/infra/playwright-env.test.ts` builds the same shape for the
+ * resolver's own unit tests; this is the end-to-end half, through the binary.
+ */
+async function installCachedPlaywright(cacheDir: string): Promise<void> {
+  const modules = join(cacheDir, 'node_modules');
+
+  const packageDir = join(modules, '@playwright', 'test');
+  await mkdir(packageDir, { recursive: true });
+  await writeFile(
+    join(packageDir, 'package.json'),
+    JSON.stringify({
+      name: '@playwright/test',
+      version: FIXTURE_PLAYWRIGHT_VERSION,
+      main: 'index.js',
+      // npm's map form, which is the shape `@playwright/test` actually uses.
+      bin: { playwright: 'cli.js' },
+    }),
+    'utf8',
+  );
+  await writeFile(join(packageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+
+  const coreDir = join(modules, 'playwright-core');
+  await mkdir(coreDir, { recursive: true });
+  await writeFile(
+    join(coreDir, 'package.json'),
+    JSON.stringify({
+      name: 'playwright-core',
+      version: FIXTURE_PLAYWRIGHT_VERSION,
+      main: 'index.js',
+    }),
+    'utf8',
+  );
+  await writeFile(join(coreDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+  await writeFile(
+    join(coreDir, 'browsers.json'),
+    JSON.stringify({
+      browsers: [
+        { name: 'chromium', revision: FIXTURE_CHROMIUM_REVISION, installByDefault: true },
+        {
+          name: 'chromium-headless-shell',
+          revision: FIXTURE_CHROMIUM_REVISION,
+          installByDefault: true,
+        },
+      ],
+    }),
+    'utf8',
+  );
+
+  // Both bundles a default headless launch needs, each carrying the marker
+  // Playwright writes only when a download finished. A fixture that made
+  // directories alone would assert that the check reads names, which is a bug
+  // the resolver already had and fixed.
+  for (const bundle of [
+    `chromium-${FIXTURE_CHROMIUM_REVISION}`,
+    `chromium_headless_shell-${FIXTURE_CHROMIUM_REVISION}`,
+  ]) {
+    const bundleDir = join(cacheDir, 'browsers', bundle);
+    await mkdir(bundleDir, { recursive: true });
+    await writeFile(join(bundleDir, 'INSTALLATION_COMPLETE'), '', 'utf8');
+  }
 }
 
 const HEALTHY = ['version: 1', 'project:', '  baseBranch: master', ''].join('\n');
@@ -154,15 +283,45 @@ describe('doctor on a healthy project', () => {
   });
 
   it('stays at 0 when an optional check warns', async () => {
-    // The fixture has no @playwright/test, so playwright-capability warns.
+    // THE WARNING IS CONSTRUCTED, not assumed (story 7.7). It takes BOTH halves:
+    // the fixture has no `@playwright/test`, AND `doctor` runs against an empty
+    // home, so SpecWitness's own cache — the check's second source — is empty
+    // too. The comment this replaces named only the first half and was wrong
+    // from the moment story 7.0 taught `verify` to fill that cache: on a machine
+    // that had dogfooded, the check PASSED and this test failed.
+    //
     // An optional check must never move the exit code — that rule is what keeps
-    // a missing agent CLI (story 2.7) or an unprovisioned browser non-fatal.
+    // a missing agent CLI (story 2.7) or an unprovisioned browser non-fatal, and
+    // it is the half of this test worth keeping.
     const root = await project(HEALTHY);
 
     const { exitCode, stdout } = await doctor(root);
 
     expect(exitCode).toBe(0);
     expect(stdout).toMatch(/⚠ playwright-capability/);
+  });
+
+  it('passes playwright-capability, from the cache, when SpecWitness provisioned one', async () => {
+    // THE OTHER BRANCH, and the state of every machine that has actually run
+    // this product (story 7.7 / AC3). Nothing covered it, which is how the
+    // sibling test above could depend on the absence of a cache without anyone
+    // noticing that the presence of one was a real and unpinned state.
+    //
+    // The cache is BUILT HERE — under a constructed home, never the developer's
+    // — so this assertion is a fact about a layout this test wrote rather than
+    // about whether whoever ran `vitest` happens to have dogfooded.
+    const root = await project(HEALTHY);
+    const home = await emptyHome();
+    await installCachedPlaywright(specwitnessPlaywrightCache(home));
+
+    const { exitCode, stdout } = await doctor(root, [], hermeticHomeEnv(home));
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toMatch(/✓ playwright-capability/);
+    // The SOURCE, not merely a pass: a project-local resolution and a cached one
+    // are different facts, and only one of them is what this fixture built.
+    expect(stdout).toContain('from the SpecWitness cache');
+    expect(stdout).toContain(FIXTURE_PLAYWRIGHT_VERSION);
   });
 
   it('warns, and still exits 0, when a declared port is occupied', async (context) => {

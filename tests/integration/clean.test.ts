@@ -340,7 +340,18 @@ async function specwitnessWorktreePath(): Promise<string> {
   return join(container, 'worktree');
 }
 
-/** Runs git in `repo` with a fixed identity, so no test depends on the operator's. */
+/**
+ * Runs git in `repo` with a fixed identity AND NO USER CONFIG, so no test
+ * depends on the operator's.
+ *
+ * ⚠️ STORY 7.7, AC4 — the identity was pinned; the CONFIG was not, which is only
+ * half the guarantee this comment claimed. With `commit.gpgsign = true` in
+ * `~/.gitconfig` — an ordinary setting — `seedRepo` failed at `git commit` with
+ * `gpg failed to sign the data` and five tests in this file went red for a
+ * reason that has nothing to do with `clean`. `GIT_CONFIG_GLOBAL` and
+ * `GIT_CONFIG_SYSTEM` are the guard `tests/integration/helpers/{probe,verify}-
+ * fixture.ts` and `tests/corpus/runner.ts` already carry.
+ */
 function gitIn(repo: string, args: string[]) {
   return execa('git', args, {
     cwd: repo,
@@ -349,6 +360,8 @@ function gitIn(repo: string, args: string[]) {
       GIT_AUTHOR_EMAIL: 'test@example.invalid',
       GIT_COMMITTER_NAME: 'SpecWitness Test',
       GIT_COMMITTER_EMAIL: 'test@example.invalid',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
     },
     extendEnv: true,
   });

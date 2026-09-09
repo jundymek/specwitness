@@ -155,7 +155,7 @@ development_status:
   # owner's. Reproduced on the epic base 6767a50, where 7.5's diff does not exist, so it is
   # neither hers nor 7.5's. CI stays green because a fresh runner has no cache. Unassigned:
   # writing the spec schedules nothing, and which wave it lands in is the owner's call.
-  7-7-doctor-optional-check-test-is-machine-dependent: ready-for-dev
+  7-7-doctor-optional-check-test-is-machine-dependent: done
   epic-7-retrospective: optional
 
 # Appended per the workflow note above; established at the Epic 3 retrospective

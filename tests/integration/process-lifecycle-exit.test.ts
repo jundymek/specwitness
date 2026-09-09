@@ -7,6 +7,7 @@ import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { installCodexShim, type InstalledShim } from '../fixtures/bin/install-shim.js';
+import { hermeticHome, hermeticHomeEnv } from './helpers/hermetic-home.js';
 
 /**
  * A spawn that is still in flight must keep the process ALIVE — story 3.2.
@@ -66,18 +67,28 @@ const WITH_CODEX = [
 ].join('\n');
 
 let projectRoot: string;
+let home: string;
 let shim: InstalledShim | undefined;
 
 beforeEach(async () => {
   projectRoot = await mkdtemp(join(tmpdir(), 'specwitness-lifecycle-'));
   await mkdir(join(projectRoot, '.specwitness'), { recursive: true });
   await writeFile(join(projectRoot, '.specwitness', 'config.yaml'), WITH_CODEX);
+  // STORY 7.7, AC4. This file runs `doctor`, and `doctor` reads SpecWitness's
+  // own Playwright cache under the home directory — which story 7.0 taught the
+  // product to write. No assertion below reads the line that varies, so nothing
+  // here has ever been red for it; the inheritance is removed anyway, because
+  // "the developer's home is in scope but we happen not to look" is one added
+  // assertion away from the defect 7.7 exists to remove, and this is the only
+  // other suite in `tests/integration/` that spawns that command.
+  home = await hermeticHome();
 });
 
 afterEach(async () => {
   await shim?.cleanup();
   shim = undefined;
   await rm(projectRoot, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true });
 });
 
 describe('a hanging child never turns into an off-table exit code', () => {
@@ -96,6 +107,7 @@ describe('a hanging child never turns into an off-table exit code', () => {
         PATH: shim.pathPrefixedWith(process.env.PATH),
         ANTHROPIC_API_KEY: undefined,
         OPENAI_API_KEY: undefined,
+        ...hermeticHomeEnv(home),
       },
       extendEnv: true,
     });
@@ -121,6 +133,7 @@ describe('a hanging child never turns into an off-table exit code', () => {
         PATH: shim.pathPrefixedWith(process.env.PATH),
         ANTHROPIC_API_KEY: undefined,
         OPENAI_API_KEY: undefined,
+        ...hermeticHomeEnv(home),
       },
       extendEnv: true,
     });
