@@ -137,7 +137,7 @@ development_status:
   # possible evidence that it is not showing. All four are critical, and they are the
   # difference between that epic passing and failing. Spec in
   # docs/implementation-artifacts/epic-7-dogfooding-repairs/.
-  7-5-absent-element-is-not-a-product-failure: ready-for-dev
+  7-5-absent-element-is-not-a-product-failure: done
   7-1-harness-integration-first-real-contract: backlog
   7-2-first-real-epic-verification-repair-loop: backlog
   7-3-hypothesis-verdict-report: backlog

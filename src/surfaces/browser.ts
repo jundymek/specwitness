@@ -592,6 +592,12 @@ const payload = JSON.parse(readFileSync(process.env.SPECWITNESS_BROWSER_PAYLOAD,
 // An unparseable selector escapes here too, and that is correct rather than merely
 // tolerable: SpecWitness could not perform the read, so nothing was adjudicated. Exit 3 is
 // honest and can never mint a pass.
+//
+// WHAT AN ABSENCE MEANS is decided by \`evaluate\` in the TypeScript below, never here: this
+// function reports that no element matched, and \`evaluate\` reads that fact as the value
+// \`false\` for a \`visible\` assertion and as an unsatisfied assertion for every other source
+// (story 7.5). Keeping the decision out of the driver is what leaves \`present:false\` and its
+// \`why\` in the result file for a human to read, whichever way the assertion went.
 async function readOne(page, read) {
   if (read.source === 'url') {
     return { present: true, value: page.url() };
@@ -2044,12 +2050,24 @@ function compare(comparison: AssertionComparison, actual: string, expected: stri
 }
 
 /**
+ * What an element that is not in the DOM reads as, for the `visible` source only (story 7.5).
+ *
+ * Named rather than inlined so the one place this product decides that "absent" means "not
+ * visible" is greppable, and so the comparison and the evidence string can never drift apart
+ * into a satisfied assertion whose `actual` says something else.
+ */
+const ELEMENT_ABSENT_IS_NOT_VISIBLE = 'false';
+
+/**
  * Evaluates one declared assertion against what the driver read, satisfied or not.
  *
  * EVERY assertion produces an evaluation, including the satisfied ones — see the module
- * header. A read the driver could not perform is UNSATISFIED, for every comparison including
- * the negative ones, and never an `execError`: the page answered, and the answer was that
- * nothing matched.
+ * header. A read the driver could not perform is never an `execError`: the page answered,
+ * and the answer was that nothing matched.
+ *
+ * For every source but one, an absent read is UNSATISFIED for every comparison including the
+ * negative ones — an expectation about a value cannot be met by a value that does not exist.
+ * The exception is `visible`, where the absence IS the value: see the branch below.
  */
 function evaluate(
   assertion: Assertion<BrowserAssertionTarget>,
@@ -2078,6 +2096,51 @@ function evaluate(
   }
 
   if (!read.present) {
+    // ⚠️ ONE SOURCE FOR WHICH THE ABSENCE IS ITSELF THE ANSWER (story 7.5).
+    //
+    // `visible` asks a question about the RENDERED PAGE, and an element that is not in the
+    // DOM at all is not visible — that is a true statement about the page, not a
+    // convenience. `expected: "false"` on a `visible` target is the standard way a contract
+    // says "this must not be showing", and the strongest possible evidence for that claim is
+    // that the element was never built. Before this branch existed, the four such assertions
+    // in gitnebula's Epic 6 (E6-10, E6-11, E6-12, E6-14 at c5a10cb) reported CORRECT product
+    // behaviour as product FAIL, one of them on a `critical` criterion.
+    //
+    // WHY THE ADJUDICATION IS HERE AND NOT IN `readOne`. The driver's rule (its own ⚠️
+    // comment) is that it reports FACTS about the page and never decides what they mean:
+    // "no element matches" is the fact, "therefore it is not visible" is the interpretation.
+    // Keeping the driver unchanged also keeps the raw `present:false, why:…` in its result
+    // file, so the absence survives in the evidence even though the assertion is satisfied.
+    //
+    // WHY THIS IS NOT A PASS MINTED FROM AN ABSENCE, which the branch below refuses for
+    // every other source: this maps the absence onto the VALUE `false` and then compares it
+    // like any other value. `expected: "true"` on a missing element therefore still FAILS —
+    // the element was required to show and it is not there. And an EXCEPTION never reaches
+    // here at all: a read that throws escapes `readOne` and becomes an `execError`, because
+    // a page that could not be read has reported no fact of any kind.
+    //
+    // `text` is deliberately NOT extended this way. There is no text to compare, and no
+    // expected value makes "the text is not there" into a satisfied assertion.
+    if (assertion.target.source === 'visible') {
+      const why = read.why ?? 'the element was not there';
+      return {
+        description,
+        satisfied: compare(
+          assertion.comparison,
+          ELEMENT_ABSENT_IS_NOT_VISIBLE,
+          assertion.expected,
+        ),
+        expected,
+        // The value AND how it was arrived at: an element that was rendered and hidden and
+        // an element that was never built are both honestly `false`, and they are different
+        // facts about the page. A reader must be able to tell them apart.
+        actual: redactText(
+          `${ELEMENT_ABSENT_IS_NOT_VISIBLE} <${why}: ${describeTarget}>`,
+          redaction,
+        ),
+      };
+    }
+
     return {
       description,
       satisfied: false,
