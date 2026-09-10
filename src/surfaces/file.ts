@@ -72,7 +72,7 @@
 
 import { createHash } from 'node:crypto';
 import { constants, type Dirent, type Stats } from 'node:fs';
-import { lstat, open, readdir, readlink, realpath, type FileHandle } from 'node:fs/promises';
+import { lstat, open, readdir, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 
 import type {
@@ -138,6 +138,13 @@ export interface FileExecutorDeps {
   readonly redaction?: RedactionOptions;
   /** Tests narrow these; production uses `FILE_READ_LIMITS`. */
   readonly limits?: Partial<FileReadLimits>;
+  /**
+   * A TEST SEAM, and nothing else: runs after a path has been resolved and confined and
+   * before it is opened. That is the window in which a process running beside verification
+   * (a declared service is one) could swap a checked directory for a symlink, and a test
+   * uses this to put a real swap there deterministically. Production never sets it.
+   */
+  readonly beforeOpen?: (absolutePath: string) => Promise<void>;
 }
 
 const EVIDENCE_DIR = 'evidence';
@@ -547,12 +554,19 @@ class TreeReader {
   readonly #limits: FileReadLimits;
   readonly #listings = new Map<string, readonly Dirent[] | undefined>();
   readonly #texts = new Map<string, string>();
+  readonly #beforeOpen: ((absolutePath: string) => Promise<void>) | undefined;
   #visited = 0;
 
-  constructor(root: string, probeId: string, limits: FileReadLimits) {
+  constructor(
+    root: string,
+    probeId: string,
+    limits: FileReadLimits,
+    beforeOpen?: (absolutePath: string) => Promise<void>,
+  ) {
     this.#root = root;
     this.#probeId = probeId;
     this.#limits = limits;
+    this.#beforeOpen = beforeOpen;
   }
 
   #inside(candidate: string): boolean {
@@ -768,6 +782,44 @@ class TreeReader {
     }
   }
 
+  /**
+   * The opened descriptor is still the confined file its path names. A swap still in place
+   * fails the containment check; a swap that was undone fails the identity check. Either is
+   * an `InfraError`: SpecWitness refused to read, so nothing was adjudicated.
+   *
+   * What this cannot close, stated rather than hidden: Node has no `openat`, so a DIRECTORY
+   * LISTING taken during such a swap may name files outside the tree. Any file so named is
+   * still opened through here, so its content is never read.
+   */
+  async #confirmOpened(entry: Entry, opened: Stats): Promise<void> {
+    let resolved: string;
+    let current: Stats;
+    try {
+      resolved = await realpath(entry.real);
+      current = await stat(resolved);
+    } catch {
+      throw this.#raced(entry.rel, 'changed while it was being read');
+    }
+    if (!this.#inside(resolved)) {
+      throw this.#raced(
+        entry.rel,
+        'changed while it was being read and now resolves outside the verification worktree',
+      );
+    }
+    if (current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw this.#raced(entry.rel, 'changed while it was being read');
+    }
+  }
+
+  #raced(rel: string, what: string): InfraError {
+    return new InfraError(
+      `file probe '${this.#probeId}': ${JSON.stringify(rel)} ${what}, so it was not read`,
+      'something in the branch under verification — often a declared service — is rewriting ' +
+        'the tree while it is read. Nothing was adjudicated; stop the process that changes the ' +
+        'tree during verification, or point the probe at files it does not touch',
+    );
+  }
+
   #collect(found: Map<string, Entry>, entry: Entry, pattern: string): void {
     found.set(entry.rel, entry);
     if (found.size > this.#limits.maxFiles) {
@@ -796,6 +848,8 @@ class TreeReader {
       throw notRegular(entry.rel);
     }
 
+    await this.#beforeOpen?.(entry.real);
+
     let handle: FileHandle;
     try {
       // O_NOFOLLOW: the path was confined when it was resolved, and the last component
@@ -816,6 +870,13 @@ class TreeReader {
       if (!stats.isFile()) {
         throw notRegular(entry.rel);
       }
+      // RE-VALIDATE THE DESCRIPTOR, NOT THE PATH. Raised as a P1 by the codex review of
+      // this branch, and right: `O_NOFOLLOW` guards only the LAST component. Between
+      // resolution and `open`, a process running beside verification (a declared service
+      // is one) can rename a checked parent directory and put a symlink in its place, and
+      // `open` follows it. So the file actually opened is identified by device and inode and
+      // must be the file its path resolves to NOW, inside the root — before a byte is read.
+      await this.#confirmOpened(entry, stats);
       const tooLarge = (): Unreadable =>
         new Unreadable(
           `'${entry.rel}' is larger than ${this.#limits.maxFileBytes} bytes, so it was not read`,
@@ -1153,7 +1214,7 @@ export class FileSurfaceExecutor implements SurfaceExecutor {
 
     const root = await this.#root(params);
     const limits = { ...FILE_READ_LIMITS, ...this.#deps.limits };
-    const reader = new TreeReader(root, params.probeId, limits);
+    const reader = new TreeReader(root, params.probeId, limits, this.#deps.beforeOpen);
 
     let selection: Selection;
     const outcomes: ReadOutcome[] = [];

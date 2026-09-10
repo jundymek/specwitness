@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -195,6 +195,25 @@ describe('AC2 — every read stays inside the worktree, or nothing is read at al
     await expect(
       run(probe({ path: 'docs/*.md', exclude: ['../x.md'] }, { target: { source: 'fileCount' }, expected: '1' })),
     ).rejects.toThrow(InfraError);
+  });
+
+  it('refuses a parent directory swapped for a symlink between resolution and open (a race)', async () => {
+    // Raised as a P1 by the codex review: O_NOFOLLOW guards only the last component. A process
+    // running beside verification can rename a checked directory and put a symlink in its
+    // place, and open() then follows it. The seam puts a REAL swap in exactly that window.
+    await tree({ 'docs/notes.md': 'inside\n' });
+    await writeFile(join(outside, 'notes.md'), 'a secret outside the worktree\n');
+    const beforeOpen = async (): Promise<void> => {
+      await rename(join(root, 'docs'), join(root, 'docs-old'));
+      await symlink(outside, join(root, 'docs'));
+    };
+
+    await expect(
+      run(
+        probe({ path: 'docs/notes.md' }, { target: { source: 'content' }, comparison: 'contains', expected: 'inside' }),
+        { beforeOpen },
+      ),
+    ).rejects.toThrow(/outside the verification worktree/);
   });
 
   it('follows a symlink that stays inside the worktree', async () => {
