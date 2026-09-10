@@ -355,6 +355,120 @@ export interface ShellProbe {
   readonly assertions: readonly Assertion<ShellAssertionTarget>[];
 }
 
+/* ── file (story 7.8, ADR-009) ───────────────────────────────────────────────────────── */
+
+/**
+ * The comment syntaxes a `file` text read can skip. CLOSED, and deliberately one entry.
+ *
+ * `c-like` is `//` to end of line and `/* ... *\/`, string- and regex-literal aware:
+ * JavaScript, TypeScript, Java, C, C++, C#, Go, Rust, Swift, Kotlin. A `#` syntax is NOT
+ * offered, because the obvious reading of it is wrong for Python, where `//` is floor
+ * division and a shared "strip comments" flag would delete code. A syntax a later project
+ * needs arrives as its own entry with its own tests, never as a widening of this one.
+ *
+ * It exists for the third defect ADR-009 measured: a census that counted a forbidden
+ * spelling inside a COMMENT reported 2 where the criterion required 0.
+ */
+export const FILE_COMMENT_SYNTAXES = Object.freeze(['c-like'] as const);
+
+export type FileCommentSyntax = (typeof FILE_COMMENT_SYNTAXES)[number];
+
+/**
+ * What a `file` assertion reads from the tree. Two families, and the family decides what
+ * an absence MEANS (ADR-009 §5, the rule story 7.5 established for the browser surface):
+ *
+ * EXISTENCE READS — absence is a value, compared like any other.
+ * - `exists`    — `"true"` when the path names an existing entry (a literal path may name a
+ *   directory) or when a glob matches at least one regular file; otherwise `"false"`.
+ * - `fileCount` — how many regular files the path or glob matched, as a decimal string.
+ *   `"0"` is an answer, so `fileCount equals "2"` can pin that an enumeration is complete.
+ *
+ * CONTENT READS — a missing path is UNSATISFIED for every comparison, including the
+ * negative ones: an expectation about text cannot be met by text that does not exist, so
+ * `notContains "TODO"` on a file that is not there does not pass.
+ * - `content`         — the text of ONE file (a literal path; the schema refuses a glob).
+ * - `jsonPath`        — one value out of ONE JSON file, by the observation surface's own
+ *   deliberately tiny accessor, so a plan's `jsonPath` means one thing on every surface.
+ * - `occurrences`     — non-overlapping occurrences of a LITERAL `text`, summed across every
+ *   matched file.
+ * - `filesContaining` — how many matched files contain EVERY one of `texts`. "A document
+ *   that mentions both X and Y" is one file satisfying two conditions, which two separate
+ *   assertions over a glob cannot express.
+ *
+ * `ignoreCase` folds both sides before matching; `ignoreComments` blanks comments before
+ * matching. Both change WHAT is counted, so they sit on the target, beside the text they
+ * qualify — never in `mechanics`, which a mechanics adaptation may rewrite.
+ *
+ * THERE IS NO PATTERN MATCHING, for the reason `ASSERTION_COMPARISONS` records: a pattern
+ * is an interpreter a provider could hand a hostile input. Every text here is a literal.
+ */
+export type FileAssertionTarget =
+  | { readonly source: 'exists' }
+  | { readonly source: 'fileCount' }
+  | {
+      readonly source: 'content';
+      readonly ignoreCase?: boolean;
+      readonly ignoreComments?: FileCommentSyntax;
+    }
+  | { readonly source: 'jsonPath'; readonly path: string }
+  | {
+      readonly source: 'occurrences';
+      readonly text: string;
+      readonly ignoreCase?: boolean;
+      readonly ignoreComments?: FileCommentSyntax;
+    }
+  | {
+      readonly source: 'filesContaining';
+      readonly texts: readonly string[];
+      readonly ignoreCase?: boolean;
+      readonly ignoreComments?: FileCommentSyntax;
+    };
+
+/**
+ * Which part of the checked-out tree to read (story 7.8 executes this).
+ *
+ * **THERE IS NO COMMAND HERE AND NO ID TO RESOLVE ONE.** The inputs are data, which is why
+ * this surface needs no `observations:` entry and does not widen the AD-3 command surface
+ * (ADR-009 §2). The one way the data could still reach outside the tree is the path, and
+ * `domain/tree-path.ts` plus the executor's symlink check close that door from both sides.
+ */
+/**
+ * Every read a `file` assertion can make, as data — for the template test that proves each
+ * one is taught, and for anything else that must enumerate them. Pinned to the union above
+ * at compile time below, so a seventh read added to one and not the other stops compiling.
+ */
+export const FILE_PROBE_SOURCES = Object.freeze([
+  'exists',
+  'fileCount',
+  'content',
+  'jsonPath',
+  'occurrences',
+  'filesContaining',
+] as const);
+
+type FileProbeSourcesAgree = FileAssertionTarget['source'] extends (typeof FILE_PROBE_SOURCES)[number]
+  ? (typeof FILE_PROBE_SOURCES)[number] extends FileAssertionTarget['source']
+    ? true
+    : never
+  : never;
+
+/** `true` only when the list above and `FileAssertionTarget` name the same reads. */
+export const FILE_PROBE_SOURCES_AGREE: FileProbeSourcesAgree = true;
+
+export interface FileProbeMechanics {
+  /** Repository-relative path or glob, `/`-separated. See `domain/tree-path.ts`. */
+  readonly path: string;
+  /** Globs removed from what `path` matched. Only meaningful when `path` is a glob. */
+  readonly exclude?: readonly string[];
+}
+
+export interface FileProbe {
+  readonly id: string;
+  readonly surface: 'file';
+  readonly mechanics: FileProbeMechanics;
+  readonly assertions: readonly Assertion<FileAssertionTarget>[];
+}
+
 /**
  * The CLOSED probe union (AD-3, AD-13), discriminated by `surface`.
  *
@@ -365,8 +479,10 @@ export interface ShellProbe {
  *
  * `browser` is in the union and the schema accepts it; Epic 5 implements the executor.
  * A plan may name it this epic; nothing executes it.
+ *
+ * `file` is the fifth, added by ADR-009 (story 7.8) — the ADR this sentence always required.
  */
-export type ProbeSpec = HttpProbe | BrowserProbe | ObservationProbe | ShellProbe;
+export type ProbeSpec = HttpProbe | BrowserProbe | ObservationProbe | ShellProbe | FileProbe;
 
 /** The `surface` discriminant of the probe union. */
 export type ProbeSpecSurface = ProbeSpec['surface'];

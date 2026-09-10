@@ -1,0 +1,50 @@
+# Hand-written Verification Contract for the corpus fixture `file-surface-verdicts`.
+#
+# Five criteria about the repository's own files. The application beside this
+# file is what carries the defects: it has a README that documents installation,
+# no changelog, no migration guide, and no legacy configuration.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE by the shipped `specwitness contract epic-1
+# --freeze` (see `fixtures/corpus/README.md`). `expected.json` is hand-written.
+spec:
+  epic: epic-1
+  version: 1
+  criteria:
+    - id: E1-01
+      statement: The repository has a README.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E1-02
+      statement: The repository has a changelog.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E1-03
+      statement: The README documents installation.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E1-04
+      statement: The migration guide contains no unfinished TODO markers.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E1-05
+      statement: The retired legacy configuration file has been removed.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: 408ffed27fbb0faccb3fe50a69938f336ebc5ab73face154d5261f79e4ea84b1
+  createdAt: 2026-09-10T09:00:00.000Z
+  frozenAt: 2026-09-10T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-10T09:00:00.000Z
+  history: []

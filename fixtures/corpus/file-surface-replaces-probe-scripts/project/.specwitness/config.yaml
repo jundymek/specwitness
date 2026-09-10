@@ -1,0 +1,15 @@
+# SpecWitness Project Config for the corpus fixture
+# `file-surface-replaces-probe-scripts`.
+#
+# ⚠️ THIS CONFIG DECLARES NOTHING THAT RUNS — AND THAT IS THE FIXTURE. The project
+# it describes is shaped like the first client project (gitnebula, Epic 6), which
+# needed seven hand-written observation scripts before a plan had anything to
+# probe. Here there are no gates, no services, no observations and no scripts at
+# all: every probe in the plan is a `file` probe, and the product reads the tree
+# itself (story 7.8, ADR-009). A config that declared a command would weaken the
+# claim this fixture makes, so none is declared.
+
+version: 1
+
+project:
+  baseBranch: master

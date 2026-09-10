@@ -1,0 +1,12 @@
+{
+  "name": "@gitnebula/viz",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "ui": "playwright test -c ui/playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0",
+    "vitest": "4.0.0"
+  }
+}

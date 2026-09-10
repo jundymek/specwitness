@@ -114,7 +114,8 @@ Fixtures that exist only to prove the RUNNER works carry a **non-numeric**
 
 Fixtures that pin a PRODUCT capability rather than a defect class are named for
 the capability and carry no number either — `setup-install-runs`,
-`setup-install-fails`, `browser-probe-provisions`. Each exists because the
+`setup-install-fails`, `browser-probe-provisions`, and story 7.8's three
+`file-surface-*` fixtures. Each exists because the
 capability was advertised somewhere (a config key, a `doctor` hint) and executed
 nowhere, which is a failure no defect-class fixture can see.
 
@@ -200,7 +201,9 @@ story 6.9 found at the CI level, one floor down.
 - **The surface chooses the kind**, which is the thing to know before writing one:
   a `gates:` entry in `config.yaml` produces `gate`; a plan probe with
   `surface: observation` produces `observation`; `surface: shell` produces `command`;
-  `surface: http` produces `http`. A fixture that declares no service can never produce
+  `surface: http` produces `http`; `surface: file` (story 7.8) produces `observation`,
+  because a read of the tree is an observation of it and ADR-009 does not widen the closed
+  union. A fixture that declares no service can never produce
   `http` or `browser`, and **no** corpus fixture can produce `provider`, because every
   fixture ships a precompiled plan and no provider is ever in scope (FR-18).
 - **`assertion` is required**, for the same reason `criteria.assertion` is: a defaulted

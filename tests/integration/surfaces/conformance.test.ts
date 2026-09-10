@@ -104,6 +104,7 @@ import { resolvePlaywrightEnvironment } from '../../../src/infra/playwright-env.
 import type { PlaywrightEnvironment } from '../../../src/infra/playwright-env.js';
 import {
   BrowserSurfaceExecutor,
+  FileSurfaceExecutor,
   HttpSurfaceExecutor,
   ObservationSurfaceExecutor,
   ShellSurfaceExecutor,
@@ -139,16 +140,17 @@ const playwright: PlaywrightEnvironment = await resolvePlaywrightEnvironment({
 
 if (!playwright.ready) {
   process.stderr.write(
-    '\n[specwitness] surface conformance is running with THREE surfaces, not four: ' +
+    '\n[specwitness] surface conformance is running with FOUR surfaces, not five: ' +
       `${playwright.source === 'absent' ? playwright.reason : 'no browsers are downloaded'}\n` +
       '[specwitness] this is a skipped TEST, not a skipped CRITERION - the browser executor ' +
       'has no skip path. Run `pnpm provision:browser` to download one.\n',
   );
 }
 
+// Story 7.8 adds `file` unconditionally: it needs nothing installed, only a directory.
 const SURFACES: readonly ProbeSurface[] = playwright.ready
-  ? ['http', 'observation', 'shell', 'browser']
-  : ['http', 'observation', 'shell'];
+  ? ['http', 'observation', 'shell', 'file', 'browser']
+  : ['http', 'observation', 'shell', 'file'];
 
 /** What one execution produced: the attempts, and every evidence member recorded. */
 interface Executed {
@@ -420,6 +422,44 @@ async function executeOnce(
     });
   }
 
+  if (surface === 'file') {
+    // THE FIFTH SURFACE (story 7.8). Its world is one file in a worktree of its own, and the
+    // situation decides what the file says. The retry situation flips it between attempts,
+    // exactly as the flag files flip the observation and shell commands' answers. Its
+    // exec-error is a DIRECTORY where the probe names a file: the operating system refuses
+    // the read, which is this surface's "could not look", never a product fail.
+    const worktree = join(scratch, 'file-worktree');
+    const state = join(worktree, 'state.txt');
+    await mkdir(worktree, { recursive: true });
+    await rm(state, { recursive: true, force: true });
+    if (situation === 'exec-error') {
+      await mkdir(state);
+    } else {
+      const flipped = situation === 'retry-then-pass' && attempt === 1;
+      await writeFile(state, situation === 'unsatisfied' || flipped ? 'bad' : 'ok', 'utf8');
+    }
+
+    const executor = new FileSurfaceExecutor({ clock, root: worktree, ...evidence });
+    return await executor.execute({
+      criterionId: CRITERION.criterionId,
+      surface: 'file',
+      params: {
+        id: 'probe',
+        surface: 'file',
+        mechanics: { path: 'state.txt' },
+        assertions: [
+          {
+            description: 'the state reads ok',
+            target: { source: 'content' },
+            comparison: 'equals',
+            expected: 'ok',
+          },
+        ],
+        attempt,
+      },
+    });
+  }
+
   const argument = situation === 'satisfied' ? '0' : situation === 'unsatisfied' ? '9' : '--flaky';
   const executor = new ShellSurfaceExecutor({
     runner,
@@ -566,6 +606,14 @@ describe('surface conformance — recorded evidence members', () => {
     expect(observation.members).toHaveLength(0);
     expect(observation.attempts[0]?.evidence.length ?? 0).toBeGreaterThan(0);
 
+    // file (story 7.8) — observation's side, for observation's reason, and it records the
+    // same KIND of member: its snapshot is a report of what was READ, and a read that could
+    // not happen has nothing to report. No member, then — a reference to a record of what was
+    // attempted, which is FR-28's channel.
+    const file = await execute('file', 'exec-error');
+    expect(file.members).toHaveLength(0);
+    expect(file.attempts[0]?.evidence.length ?? 0).toBeGreaterThan(0);
+
     // browser (story 5.2) — a member IS recorded, which is shell's side of the divergence
     // reached by shell's reasoning: `BrowserEvidence.url` is a bare `string` the CALLER
     // resolved before anything was spawned, so it states what was ATTEMPTED rather than
@@ -607,6 +655,13 @@ describe('surface conformance — recorded evidence members', () => {
     const observation = await execute('observation', 'satisfied');
     const observationMember = observation.members[0] as { snapshot?: unknown };
     expect(observationMember.snapshot).toBeDefined();
+
+    // file (story 7.8) borrows the observation member rather than widening the closed union,
+    // so if that member ever loses its snapshot, the file surface's divergence above stops
+    // being forced by the union and becomes a preference.
+    const file = await execute('file', 'satisfied');
+    expect(file.members[0]?.kind).toBe('observation');
+    expect((file.members[0] as { snapshot?: unknown }).snapshot).toBeDefined();
 
     // And the half that makes browser's divergence legitimate rather than a preference:
     // `url` is required and both artifact fields are optional. If a later story makes

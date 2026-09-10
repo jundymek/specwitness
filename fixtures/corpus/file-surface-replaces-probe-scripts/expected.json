@@ -1,0 +1,52 @@
+{
+  "expectedVersion": 1,
+  "fixture": "file-surface-replaces-probe-scripts",
+  "why": "Story 7.8 / ADR-009, AC5: the file surface covers what a real project actually needed. The project is shaped like gitnebula at the end of its Epic 6 and its contract carries eight of gitnebula's own criterion ids, each of which the client decided with a hand-written observation script: E6-03 and E6-04 with pkg-scripts.mjs, E6-06, E6-17, E6-23, E6-28 and E6-32 with docs-presence.mjs, E6-09 with ui-source-census.mjs. Here the config declares NOTHING that runs -- no gate, no service, no observation, no script -- and every probe is a file probe, so a PASS at exit 0 can only have come from the product reading the tree itself. The tree is built to reproduce the three defects ADR-009 measured in those scripts, so the fixture goes red if the surface repeats any of them. (1) The validator and layout reports live at docs/dev/epic-6/<story>/README.md, two directories deeper than findReport's non-recursive search looked, and a decoy report sits beside them; a surface without ** recursion reports E6-23 and E6-28 missing. (2) The validator report is worded as the real one was -- 'the seam between two validators', 'Widening' -- and matches none of the script's hand-picked patterns; it is found by case-folded literal stems ('validator', 'unchanged', 'future') required to occur in ONE file. (3) The UI spec spells \"__gitnebula\" only inside comments, beside a URL whose // is not a comment; the handle-key test that enforces the convention and the module that defines the constant both spell it legitimately and are excluded by name. A census that counts comments, or either of those files, reports a non-zero count and E6-09 fails. E6-04 also pins its own enumeration: the probe asserts exactly two workspace package manifests, so a package added without a matching probe breaks the criterion rather than escaping it. evidence is exact ['observation'] because a file probe records the observation member (the closed evidence union is not widened), and nothing else in this run records anything.",
+  "proves": [
+    "AC5",
+    "AC7",
+    "ADR-009",
+    "AD-3",
+    "AD-13",
+    "FR-18",
+    "NFR-10",
+    "AD-12"
+  ],
+  "command": [
+    "verify",
+    "epic-6",
+    "--json"
+  ],
+  "exitCode": 0,
+  "outcome": {
+    "verdict": "PASS"
+  },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E6-03": "pass",
+      "E6-04": "pass",
+      "E6-06": "pass",
+      "E6-09": "pass",
+      "E6-17": "pass",
+      "E6-23": "pass",
+      "E6-28": "pass",
+      "E6-32": "pass"
+    }
+  },
+  "evidence": {
+    "assertion": "exact",
+    "kinds": [
+      "observation"
+    ]
+  },
+  "stderrContains": [
+    "  observation file:validator-report",
+    "  observation file:handle-key-census"
+  ],
+  "stderrAbsent": [
+    "FAIL",
+    "could not be read",
+    "outside the verification worktree"
+  ]
+}

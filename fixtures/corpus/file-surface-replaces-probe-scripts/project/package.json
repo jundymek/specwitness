@@ -1,0 +1,8 @@
+{
+  "name": "gitnebula-shaped",
+  "private": true,
+  "scripts": {
+    "test": "pnpm -r test",
+    "lint": "eslint ."
+  }
+}

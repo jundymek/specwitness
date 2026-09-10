@@ -10,7 +10,8 @@
  *
  * `browser` WAS declared in `PROBE_SURFACES` with no executor throughout Epic 4 — "Epic 5
  * owns it, and nothing in Epic 4 adds `@playwright/test`". Story 5.2 filled the last
- * reserved slot, so this barrel now names all FOUR surfaces and the sentence that said
+ * reserved slot, so this barrel named all FOUR surfaces — and story 7.8 adds the fifth, `file`
+ * (ADR-009), so it names all FIVE. The sentence that said
  * otherwise is corrected here rather than left standing: a barrel naming three surfaces of
  * four reads as a complete list, which is worse than no barrel at all (see 4.7's note
  * below, which learned exactly that).
@@ -81,3 +82,11 @@ export {
   type ShellExecutorDeps,
   type ShellProbeParams,
 } from './shell.js';
+
+// Story 7.8 (ADR-009): the fifth surface, and the only one that runs nothing.
+export {
+  FILE_READ_LIMITS,
+  FileSurfaceExecutor,
+  type FileExecutorDeps,
+  type FileReadLimits,
+} from './file.js';

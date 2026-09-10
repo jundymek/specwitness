@@ -29,8 +29,13 @@ import { boundedText, redactText } from './evidence.js';
 import type { BoundedText, EvidenceRef, RedactionOptions } from './evidence.js';
 import type { CriterionResult, CriterionStatus, NeedsHumanReason } from './result.js';
 
-/** The four probe surfaces (AD-13). All implement the same executor interface. */
-export const PROBE_SURFACES = ['http', 'browser', 'observation', 'shell'] as const;
+/**
+ * The five probe surfaces (AD-13). All implement the same executor interface.
+ *
+ * `file` joined with ADR-009 (story 7.8): a reader of the checked-out tree that runs no
+ * command. It is a new READER, not a second adjudicator — nothing below changes for it.
+ */
+export const PROBE_SURFACES = ['http', 'browser', 'observation', 'shell', 'file'] as const;
 
 export type ProbeSurface = (typeof PROBE_SURFACES)[number];
 

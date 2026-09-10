@@ -1,0 +1,69 @@
+# Hand-written Verification Contract for the corpus fixture
+# `file-surface-replaces-probe-scripts`.
+#
+# The criterion ids are gitnebula's own Epic 6 ids, so each can be traced to the
+# hand-written script it replaces: E6-03/E6-04 were `pkg-scripts.mjs`; E6-06,
+# E6-17, E6-23, E6-28 and E6-32 were `docs-presence.mjs`; E6-09 was
+# `ui-source-census.mjs`. The statements are narrowed to what a reading of the
+# tree can decide — that a document exists and MENTIONS a subject, never that it
+# explains it well — because that is the honest limit of this surface.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE by the shipped `specwitness contract epic-6
+# --freeze` (see `fixtures/corpus/README.md`). `expected.json` is hand-written.
+spec:
+  epic: epic-6
+  version: 1
+  criteria:
+    - id: E6-03
+      statement: The UI package declares an on-demand `ui` script that runs Playwright, separate from its `test` script, which does not.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E6-04
+      statement: The root `test` script fans out to every workspace package, and no package's `test` script invokes Playwright.
+      kind: structural
+      severity: critical
+      verifiability: automated
+    - id: E6-06
+      statement: The UI suite README exists and records that the suite runs on demand, separately from `pnpm test`.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E6-09
+      statement: Outside the one module that defines HARNESS_HANDLE_KEY and the test that enforces the convention, no UI suite source spells the handle key "__gitnebula" in code, and the suite imports the constant.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E6-17
+      statement: The UI suite README mentions `boot()` and the jsdom fake canvas.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E6-23
+      statement: A story report records that the validator was left unchanged and names the future work on aligning it.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E6-28
+      statement: A layout report covers content length, the viewport heights tested and the controls that were unreachable.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E6-32
+      statement: A house-format ADR (Context, Decision, Consequences) records the fifth legend hue.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: d83b98c20305a7b4e525008df3edbd0debd7a14af8d24a19f076b2c784fe4d73
+  createdAt: 2026-09-10T09:00:00.000Z
+  frozenAt: 2026-09-10T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-10T09:00:00.000Z
+  history: []

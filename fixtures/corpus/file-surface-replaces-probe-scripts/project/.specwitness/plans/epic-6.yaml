@@ -1,0 +1,188 @@
+# Hand-written Verification Plan for the corpus fixture
+# `file-surface-replaces-probe-scripts`.
+#
+# EVERY PROBE IS A `file` PROBE, and each names the gitnebula script it replaces.
+# No probe references a declared id, because the config declares none: the tree
+# is read by the product itself (story 7.8, ADR-009).
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free (FR-18).
+# `contract.fingerprint` repeats the frozen contract's; a re-freeze means this
+# line is re-copied by hand.
+plan:
+  epic: epic-6
+  contract:
+    version: 1
+    fingerprint: d83b98c20305a7b4e525008df3edbd0debd7a14af8d24a19f076b2c784fe4d73
+  data:
+    seed: corpusseed000078
+    bindings: []
+  criteria:
+    # ── was pkg-scripts.mjs ─────────────────────────────────────────────────────
+    - criterionId: E6-03
+      disposition: automated
+      probes:
+        - id: viz-ui-script
+          surface: file
+          mechanics:
+            path: packages/viz/package.json
+          assertions:
+            - description: the UI package's ui script runs Playwright
+              target: { source: jsonPath, path: $.scripts.ui }
+              comparison: contains
+              expected: playwright
+            - description: its test script does not
+              target: { source: jsonPath, path: $.scripts.test }
+              comparison: notContains
+              expected: playwright
+    - criterionId: E6-04
+      disposition: automated
+      probes:
+        - id: root-test-fans-out
+          surface: file
+          mechanics:
+            path: package.json
+          assertions:
+            - description: the root test script fans out to every workspace package
+              target: { source: jsonPath, path: $.scripts.test }
+              comparison: contains
+              expected: "-r test"
+            - description: and does not invoke Playwright itself
+              target: { source: jsonPath, path: $.scripts.test }
+              comparison: notContains
+              expected: playwright
+        # The script discovered packages at run time. A static probe names them, so
+        # this one pins that the list below is complete: a third package breaks the
+        # criterion instead of escaping it.
+        - id: package-enumeration
+          surface: file
+          mechanics:
+            path: packages/*/package.json
+          assertions:
+            - description: exactly the two workspace packages probed below exist
+              target: { source: fileCount }
+              comparison: equals
+              expected: "2"
+        - id: viz-test-script
+          surface: file
+          mechanics:
+            path: packages/viz/package.json
+          assertions:
+            - description: the viz package's test script does not invoke Playwright
+              target: { source: jsonPath, path: $.scripts.test }
+              comparison: notContains
+              expected: playwright
+        - id: cli-test-script
+          surface: file
+          mechanics:
+            path: packages/cli/package.json
+          assertions:
+            - description: the cli package's test script does not invoke Playwright
+              target: { source: jsonPath, path: $.scripts.test }
+              comparison: notContains
+              expected: playwright
+    # ── was docs-presence.mjs ───────────────────────────────────────────────────
+    - criterionId: E6-06
+      disposition: automated
+      probes:
+        - id: ui-readme-on-demand
+          surface: file
+          mechanics:
+            path: packages/viz/ui/README.md
+          assertions:
+            - description: the UI suite README exists
+              target: { source: exists }
+              comparison: equals
+              expected: "true"
+            - description: it says the suite runs on demand
+              target: { source: content, ignoreCase: true }
+              comparison: contains
+              expected: on-demand
+            - description: and that it is not part of the default test command
+              target: { source: content }
+              comparison: contains
+              expected: "not part of `pnpm test`"
+    # ── was ui-source-census.mjs ────────────────────────────────────────────────
+    - criterionId: E6-09
+      disposition: automated
+      probes:
+        - id: handle-key-census
+          surface: file
+          mechanics:
+            path: packages/viz/ui/**/*.ts
+            # The module that DEFINES the constant, and the test that ENFORCES the
+            # convention, both have to spell it. Excluded by name, not by pattern.
+            exclude:
+              - packages/viz/ui/support/handle.ts
+              - packages/viz/ui/handle-key.test.ts
+          assertions:
+            - description: no remaining UI source spells the handle key in code
+              target: { source: occurrences, text: '"__gitnebula"', ignoreComments: c-like }
+              comparison: equals
+              expected: "0"
+            - description: the suite imports the constant instead
+              target: { source: filesContaining, texts: [HARNESS_HANDLE_KEY] }
+              comparison: greaterThan
+              expected: "0"
+    # ── was docs-presence.mjs ───────────────────────────────────────────────────
+    - criterionId: E6-17
+      disposition: automated
+      probes:
+        - id: ui-readme-boot-and-jsdom
+          surface: file
+          mechanics:
+            path: packages/viz/ui/README.md
+          assertions:
+            - description: the README mentions boot()
+              target: { source: content }
+              comparison: contains
+              expected: boot()
+            - description: and the jsdom fake canvas
+              target: { source: content, ignoreCase: true }
+              comparison: contains
+              expected: jsdom fake canvas
+    - criterionId: E6-23
+      disposition: automated
+      probes:
+        # findReport looked one level deep in three directories and for two hand-
+        # picked phrases. The report is two levels deeper and uses neither phrase.
+        - id: validator-report
+          surface: file
+          mechanics:
+            path: docs/**/*.md
+          assertions:
+            - description: one report mentions the validator, that it was left unchanged, and future work
+              target: { source: filesContaining, texts: [validator, unchanged, future], ignoreCase: true }
+              comparison: greaterThan
+              expected: "0"
+    - criterionId: E6-28
+      disposition: automated
+      probes:
+        - id: layout-report
+          surface: file
+          mechanics:
+            path: docs/**/*.md
+          assertions:
+            - description: one report covers content length, viewport heights and unreachable controls
+              target: { source: filesContaining, texts: [content length, viewport height, unreachable], ignoreCase: true }
+              comparison: greaterThan
+              expected: "0"
+    - criterionId: E6-32
+      disposition: automated
+      probes:
+        - id: legend-adr
+          surface: file
+          mechanics:
+            path: docs/adr/*.md
+          assertions:
+            - description: one house-format ADR records the legend hue
+              target: { source: filesContaining, texts: [legend, hue, "## Context", "## Decision", "## Consequences"], ignoreCase: true }
+              comparison: greaterThan
+              expected: "0"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-10T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

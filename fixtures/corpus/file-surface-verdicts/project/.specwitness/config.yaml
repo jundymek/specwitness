@@ -1,0 +1,11 @@
+# SpecWitness Project Config for the corpus fixture `file-surface-verdicts`.
+#
+# Declares nothing that runs. Every probe in the plan is a `file` probe (story
+# 7.8, ADR-009), so the whole verdict is decided by reading the tree — which is
+# what lets this fixture pin the surface's FAIL direction with nothing else in
+# the way: no gate that could fail first, no service that could fail to start.
+
+version: 1
+
+project:
+  baseBranch: master

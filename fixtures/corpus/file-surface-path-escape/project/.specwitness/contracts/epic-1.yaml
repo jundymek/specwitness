@@ -1,0 +1,31 @@
+# Hand-written Verification Contract for the corpus fixture `file-surface-path-escape`.
+#
+# One criterion, whose probe the branch under verification subverts: the file
+# it names is a symbolic link out of the repository. The correct outcome is not
+# PASS and not FAIL — SpecWitness must refuse to read, and say it reached no
+# conclusion.
+#
+# The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
+# `meta.frozenAt` were produced ONCE by the shipped `specwitness contract epic-1
+# --freeze` (see `fixtures/corpus/README.md`). `expected.json` is hand-written.
+spec:
+  epic: epic-1
+  version: 1
+  criteria:
+    - id: E1-01
+      statement: The operator handbook is published in the repository.
+      kind: structural
+      severity: normal
+      verifiability: automated
+meta:
+  schemaVersion: 1
+  frozen: true
+  fingerprint: da03abd9400bf61eca0946e9947f30239de1e2042df781982368e5aa80a0300d
+  createdAt: 2026-09-10T09:00:00.000Z
+  frozenAt: 2026-09-10T09:15:00.000Z
+  provenance:
+    provider: fake
+    model: null
+    providerCliVersion: null
+    generatedAt: 2026-09-10T09:00:00.000Z
+  history: []
