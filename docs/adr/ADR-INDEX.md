@@ -16,7 +16,7 @@ Maps every required decision topic (brief §71) to its explicit home. AD-n = ARC
 | 10 | Provider abstraction | AD-2 (envelope + shared invoke gate); FR-11 (roles, fake) |
 | 11 | Worktree isolation | ADR-004; AD-8 |
 | 12 | Standard Playwright integration | AD (spine Stack: @playwright/test runner over ephemeral generated specs); FR-24; questions doc Q30–32 |
-| 13 | Generic project commands/adapters | AD-3 (trusted-command boundary); FR-25/26 (observation + shell-by-config-id) |
+| 13 | Generic project commands/adapters | AD-3 (trusted-command boundary); FR-25/26 (observation + shell-by-config-id); ADR-009 (declarative `file` surface for static facts, so a new project needs no bespoke probe scripts) |
 | 14 | Evidence-first result model | AD-10, AD-11; FR-28 |
 | 15 | PASS/FAIL/NEEDS_HUMAN semantics | AD-6; questions doc Q39–46; ADR-003 (gate failure → FAIL, pending author confirmation) |
 | 16 | Infrastructure error separation | AD-6/AD-7; ADR-002 (exit 3); corpus fixture 8 |
@@ -25,4 +25,4 @@ Maps every required decision topic (brief §71) to its explicit home. AD-n = ARC
 | 19 | Differential verification deferred but architecturally supported | spine Deferred; AR-3 (base+head recorded per run); questions doc Q67 |
 | 20 | Mutation testing deferred | spine Deferred; questions doc Q68 |
 
-Supporting decisions not on the §71 list: ADR-007 (Node runtime floor >=22.13, set by the pinned package manager), ADR-008 (persisted-envelope strictness vs additive evolution — an unknown key is a version skew, not corruption; binds story 6.5's scorecard.jsonl), ADR-002 (exit codes 0/1/2/3/64), AD-13 (probe execution contract), AD-1 (pure domain core), questions doc Q26/27 (explicit ports), Q38 (unplannable criterion ⇒ needs_human), Q65 (provider/model provenance in meta).
+Supporting decisions not on the §71 list: ADR-009 (a fifth, declarative `file` probe surface — widens the closed union of ADR/AD-13 by one, measured from 645 lines of hand-written probe scripts and three defects in the first client project), ADR-007 (Node runtime floor >=22.13, set by the pinned package manager), ADR-008 (persisted-envelope strictness vs additive evolution — an unknown key is a version skew, not corruption; binds story 6.5's scorecard.jsonl), ADR-002 (exit codes 0/1/2/3/64), AD-13 (probe execution contract), AD-1 (pure domain core), questions doc Q26/27 (explicit ports), Q38 (unplannable criterion ⇒ needs_human), Q65 (provider/model provenance in meta).
