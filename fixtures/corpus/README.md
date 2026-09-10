@@ -114,8 +114,9 @@ Fixtures that exist only to prove the RUNNER works carry a **non-numeric**
 
 Fixtures that pin a PRODUCT capability rather than a defect class are named for
 the capability and carry no number either — `setup-install-runs`,
-`setup-install-fails`, `browser-probe-provisions`, and story 7.8's three
-`file-surface-*` fixtures. Each exists because the
+`setup-install-fails`, `browser-probe-provisions`, story 7.8's three
+`file-surface-*` fixtures, and story 7.4's `redaction-extra-patterns`. Each exists
+because the
 capability was advertised somewhere (a config key, a `doctor` hint) and executed
 nowhere, which is a failure no defect-class fixture can see.
 
@@ -159,6 +160,7 @@ nowhere, which is a failure no defect-class fixture can see.
 | `evidence` | no | the **kinds** of evidence the run produced. Optional and additive — omitting it asserts nothing about evidence, which is what every fixture merged before story 6.10 means. See below. |
 | `stderrContains` | no | substrings that must appear in **normalised** stderr. |
 | `stderrAbsent` | no | substrings that must not. Assert a secret is ABSENT; never assert that `[REDACTED]` is present (Epic 3 retro §7). |
+| `persistedAbsent` | no | substrings that must not appear in anything the run **persisted**: every file under its run directory (`result.json`, the manifest, every evidence file), the scorecard ledger, and the `--json` document on stdout. Compared raw, never normalised. A run that persisted no `result.json` fails it rather than passing vacuously (story 7.4). |
 
 The file is validated strictly on load: an unknown key is an error, not a
 silently ignored typo. A misspelled `exitcode` that parsed as "no exit-code

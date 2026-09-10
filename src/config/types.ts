@@ -32,6 +32,12 @@ export type AiConfig = SpecwitnessConfig['ai'];
  * would mean an undefined retry count reaching an attempt loop.
  */
 export type RetriesConfig = SpecwitnessConfig['retries'];
+/**
+ * The config-declared extra redaction patterns (story 7.4, AD-10), compiled at load. Always
+ * present, `extraPatterns: []` when the project declared none. Structurally a
+ * `RedactionOptions`, which is what lets the edge pass it down unchanged.
+ */
+export type RedactionConfig = SpecwitnessConfig['redaction'];
 export type ProviderConfig = NonNullable<NonNullable<AiConfig['providers']>[string]>;
 
 /** The AI roles a project may assign; kebab-case per the spec and addendum section D. */

@@ -611,6 +611,46 @@ export interface ObservedOutcome {
    * byte sequence (Q53), and a parsed-then-reserialised comparison would not test that.
    */
   readonly storedResult: string | null;
+  /**
+   * Every file the run persisted under `.specwitness/` — each file in its run directory and the
+   * scorecard ledger — as text, for `expected.persistedAbsent` (story 7.4). Paths are relative
+   * to the project root. `undefined` means nothing was read, which that comparison refuses to
+   * treat as "nothing leaked".
+   */
+  readonly persisted?: readonly PersistedArtifact[];
+}
+
+/** One file a run left behind, read whole. */
+export interface PersistedArtifact {
+  readonly path: string;
+  readonly contents: string;
+}
+
+/**
+ * Everything a run persisted: its run directory, walked whole, and the scorecard ledger.
+ *
+ * Read as UTF-8 even where a file is binary (a browser trace): a substring search over lossily
+ * decoded bytes still finds an uncompressed secret, and never invents one. A compressed archive
+ * can hide one, which is a stated limit rather than a claim — no hermetic fixture has a browser.
+ */
+async function persistedArtifacts(
+  projectRoot: string,
+  runDirectory: string | null,
+): Promise<PersistedArtifact[]> {
+  const scorecard = join(projectRoot, '.specwitness', 'scorecard.jsonl');
+  const paths = [
+    ...(runDirectory === null ? [] : await listFiles(runDirectory)),
+    ...(await stat(scorecard).then(
+      () => [scorecard],
+      () => [],
+    )),
+  ];
+  return await Promise.all(
+    paths.map(async (path) => ({
+      path: relative(projectRoot, path),
+      contents: await readFile(path, 'utf8'),
+    })),
+  );
 }
 
 /** The newest `.specwitness/runs/run-*` directory, or `null` when the run created none. */
@@ -707,6 +747,7 @@ export async function runFixture(
     documentSource,
     runDirectory,
     storedResult,
+    persisted: await persistedArtifacts(materialized.projectRoot, runDirectory),
   };
 }
 
@@ -1021,6 +1062,35 @@ export function compareOutcome(
   for (const needle of expected.stderrAbsent ?? []) {
     if (stderr.includes(needle)) {
       problems.push(`stderr: expected it NOT to contain ${JSON.stringify(needle)}`);
+    }
+  }
+
+  // ── what the run PERSISTED (story 7.4) ───────────────────────────────────────────────
+  //
+  // RAW, not normalised: a needle here is a secret, and a normaliser is exactly the kind of
+  // rewriting that could make one disappear from the comparison without disappearing from
+  // disk. The message names the FILE and the needle — both already in the fixture — and never
+  // quotes the file's contents.
+  const persistedAbsent = expected.persistedAbsent ?? [];
+  if (persistedAbsent.length > 0) {
+    const artifacts = observed.persisted ?? [];
+    if (!artifacts.some((artifact) => artifact.path.endsWith('result.json'))) {
+      // A run that stored nothing trivially stores no secret. That is the vacuous pass this
+      // field would otherwise hand to a refusal, so it fails instead.
+      problems.push(
+        'persistedAbsent: this fixture pins text as absent from what the run persisted, but ' +
+          'no result.json was persisted, so the absence proves nothing',
+      );
+    }
+    for (const needle of persistedAbsent) {
+      for (const artifact of artifacts) {
+        if (artifact.contents.includes(needle)) {
+          problems.push(`persistedAbsent: ${artifact.path} contains ${JSON.stringify(needle)}`);
+        }
+      }
+      if (observed.stdout.includes(needle)) {
+        problems.push(`persistedAbsent: the --json document on stdout contains ${JSON.stringify(needle)}`);
+      }
     }
   }
 

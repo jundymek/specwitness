@@ -267,6 +267,20 @@ export const ExpectedOutcomeFileSchema = z
      * still beside it survives review in a way a raw leak does not.
      */
     stderrAbsent: z.array(z.string().min(1)).optional(),
+    /**
+     * Substrings that must NOT appear in anything the run PERSISTED (story 7.4): every file
+     * under its run directory — `result.json`, the manifest, every evidence file — the
+     * scorecard ledger, and the `--json` document on stdout. OPTIONAL and additive, like
+     * `evidence`: absent asserts nothing, so `EXPECTED_VERSION` does not move.
+     *
+     * It exists because `stderrAbsent` can only say a secret was not PRINTED, and the durable
+     * artifact is the one that matters (AD-10: redaction happens before any persistence).
+     * Compared RAW, never normalised — a needle is a secret, not an incidental value. The same
+     * idiom as `stderrAbsent`: assert the secret ABSENT, never `[REDACTED]` present.
+     *
+     * A run that persisted no `result.json` cannot satisfy it vacuously: the comparison fails.
+     */
+    persistedAbsent: z.array(z.string().min(1)).optional(),
   })
   .strict();
 

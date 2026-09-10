@@ -86,6 +86,7 @@ import {
   gateEvidence,
   redactText,
   type Evidence,
+  type RedactionOptions,
 } from '../../domain/evidence.js';
 import type {
   ProcessResult,
@@ -142,6 +143,12 @@ export interface GatesStageDeps {
   readonly timeoutMs?: number;
   /** Passed straight to the runner so a gate's process group is recorded durably. */
   readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
+  /**
+   * The run's config-declared extra redaction patterns (AD-10, story 7.4), applied with the
+   * built-ins to every string this stage captures: evidence, full-output files and messages.
+   * `createStages` binds it from `StageDependencies.redaction`.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /** A gate result without the `durationMs` key when the gate never ran. */
@@ -173,7 +180,10 @@ async function persistStream(
   if (raw === '') {
     return undefined;
   }
-  return deps.writeEvidence(gateEvidenceRelativePath(gateId, index, stream), redactText(raw));
+  return deps.writeEvidence(
+    gateEvidenceRelativePath(gateId, index, stream),
+    redactText(raw, deps.redaction),
+  );
 }
 
 /** The relative paths of whichever full-output files were written. */
@@ -280,7 +290,7 @@ async function recordAttempt(
     stderr: result.stderr,
     durationMs: result.durationMs,
     ...paths,
-  });
+  }, deps.redaction);
 
   context.run.evidence.push(evidence);
 }
@@ -308,7 +318,11 @@ async function recordAttempt(
  * The hint says exactly that, because the useful instruction is "commit it",
  * not "install it".
  */
-function notFoundError(gate: GateConfig, binary: string): InfraError {
+function notFoundError(
+  gate: GateConfig,
+  binary: string,
+  redaction: RedactionOptions | undefined,
+): InfraError {
   // The same test doctor's resolver applies, and for the same reason.
   const namesAFile = binary.includes('/') || binary.includes('\\');
 
@@ -326,7 +340,7 @@ function notFoundError(gate: GateConfig, binary: string): InfraError {
   // Found during story 6.11, whose own `setup.ts` closed the identical hole first; fixed
   // here as owner-authorised follow-up work rather than silently, because this file
   // belongs to story 3.4.
-  const shown = redactText(binary, { shellCommand: true });
+  const shown = redactText(binary, { ...redaction, shellCommand: true });
 
   if (namesAFile) {
     return new InfraError(
@@ -364,7 +378,7 @@ async function classify(
 
     case 'not-found':
       await recordAttempt(deps, context, gate, index, result);
-      throw notFoundError(gate, binary);
+      throw notFoundError(gate, binary, deps.redaction);
 
     case 'spawn-failed':
       await recordAttempt(deps, context, gate, index, result);
@@ -379,7 +393,7 @@ async function classify(
         // hole, arriving through the error path instead of the evidence path.
         // Redacting at the point untrusted text enters the message closes it
         // wherever the message is later printed.
-        `gate '${gate.id}' could not be spawned: ${redactText(result.stderr).trim() || 'the process did not start'}`,
+        `gate '${gate.id}' could not be spawned: ${redactText(result.stderr, deps.redaction).trim() || 'the process did not start'}`,
         'check that the verification worktree exists and is readable, then rerun',
       );
 
@@ -488,7 +502,7 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
             // and this message reaches `printError`, which writes it to stderr
             // verbatim. Same leak the spawn-failed diagnosis already closes.
             `gate '${gate.id}' uses backslash-escaped quotes, which are not supported: ` +
-              `'${redactText(declared)}'`,
+              `'${redactText(declared, deps.redaction)}'`,
             'declared commands are executed without a shell, so a backslash before a quote is ' +
               'ambiguous and is refused rather than guessed at. Use the other quote style, as in ' +
               '-e \'console.log("ok")\', or write a path with forward slashes, which Node accepts ' +
@@ -504,7 +518,7 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
         // naming the cause is the honest answer.
         if (hasUnterminatedQuote(declared)) {
           throw new InfraError(
-            `gate '${gate.id}' has an unterminated quote: '${redactText(declared)}'`,
+            `gate '${gate.id}' has an unterminated quote: '${redactText(declared, deps.redaction)}'`,
             `close the quote in gates[${gate.id}].run in .specwitness/config.yaml — ` +
               'declared commands are split into a binary and arguments without a shell, so an ' +
               'unclosed quote would silently become several arguments rather than one',
@@ -518,7 +532,7 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
         // the binary the operator declared at all.
         if (hasGluedExecutableSuffix(declared)) {
           throw new InfraError(
-            `gate '${gate.id}' has text attached to its quoted executable: '${redactText(declared)}'`,
+            `gate '${gate.id}' has text attached to its quoted executable: '${redactText(declared, deps.redaction)}'`,
             `separate them with a space in gates[${gate.id}].run, or quote the whole path — ` +
               'as written this would run the quoted binary and pass the rest as an argument, ' +
               'which may not be the command you intended',
@@ -528,7 +542,7 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
         const { binary, args } = splitCommandLine(declared);
         if (binary === '') {
           throw new InfraError(
-            `gate '${gate.id}' declares a command with no executable: '${redactText(declared)}'`,
+            `gate '${gate.id}' declares a command with no executable: '${redactText(declared, deps.redaction)}'`,
             `set gates[${gate.id}].run in .specwitness/config.yaml to a command starting with a binary`,
           );
         }
@@ -612,7 +626,7 @@ export function createGatesStage(deps: GatesStageDeps): Stage {
             stderr: result.stderr,
             durationMs: result.durationMs,
             ...paths,
-          }),
+          }, deps.redaction),
         );
 
         if (status === 'fail') {

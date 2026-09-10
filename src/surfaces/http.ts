@@ -990,8 +990,8 @@ function validateParams(
   // this parameter exists. These messages quote a PATH and a BASE URL — strings the caller
   // supplied — and they reach stderr through `printError` verbatim. A bare
   // `redactText(value)` applies only the BUILT-IN rules, so a secret shaped like nothing the
-  // built-ins recognise (precisely the case a project declares `extraPatterns` for) would be
-  // printed in full. Every other call in this module already threaded the options; these two
+  // built-ins recognise (precisely the case a project declares `redaction.extraPatterns` for,
+  // and since story 7.4 can) would be printed in full. Every other call in this module already threaded the options; these two
   // were the outliers, found in review. The guard for them uses a token that matches NO
   // built-in rule, so it cannot pass by accident on the built-ins alone.
   const redact = (value: string): string => redactText(value, redaction);

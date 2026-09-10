@@ -81,7 +81,7 @@
 
 import { commandText, type DeclaredCommand } from '../../config/index.js';
 import { InfraError } from '../../domain/errors.js';
-import { commandEvidence, redactText } from '../../domain/evidence.js';
+import { commandEvidence, redactText, type RedactionOptions } from '../../domain/evidence.js';
 import type {
   ProcessResult,
   ProcessRunner,
@@ -177,6 +177,12 @@ export interface SetupStageDeps {
    * interesting is on screen.
    */
   readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
+  /**
+   * The run's config-declared extra redaction patterns (AD-10, story 7.4), applied with the
+   * built-ins to the install's evidence, its full-output files and every message quoting the
+   * command or its output. `createStages` binds it from `StageDependencies.redaction`.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /**
@@ -194,9 +200,12 @@ export interface SetupStageDeps {
  * `{shellCommand: true}` — and only here — because this string IS a declared command line, which
  * is precisely the context that option is reserved for.
  */
-function splitDeclared(command: DeclaredCommand): { binary: string; args: string[] } {
+function splitDeclared(
+  command: DeclaredCommand,
+  redaction: RedactionOptions | undefined,
+): { binary: string; args: string[] } {
   const declared = commandText(command);
-  const shown = (): string => redactText(declared, { shellCommand: true });
+  const shown = (): string => redactText(declared, { ...redaction, shellCommand: true });
 
   if (usesUnsupportedEscaping(declared)) {
     throw new InfraError(
@@ -262,7 +271,10 @@ async function persistStream(
   if (raw === '' || deps.writeEvidence === undefined) {
     return undefined;
   }
-  return await deps.writeEvidence(setupEvidenceRelativePath(stream), redactText(raw));
+  return await deps.writeEvidence(
+    setupEvidenceRelativePath(stream),
+    redactText(raw, deps.redaction),
+  );
 }
 
 /** The relative paths of whichever full-output files were written. */
@@ -338,7 +350,7 @@ async function record(
       stderr: result.stderr,
       durationMs: result.durationMs,
       ...paths,
-    }),
+    }, deps.redaction),
   );
 }
 
@@ -376,9 +388,9 @@ async function record(
  * is reported to the owner in this story's PR body instead — the precedent `data.ts` set when it
  * found the identical ordering defect in `services.ts`.
  */
-function notFoundError(binary: string): InfraError {
+function notFoundError(binary: string, redaction: RedactionOptions | undefined): InfraError {
   const namesAFile = binary.includes('/') || binary.includes('\\');
-  const shown = redactText(binary, { shellCommand: true });
+  const shown = redactText(binary, { ...redaction, shellCommand: true });
 
   return namesAFile
     ? new InfraError(
@@ -429,7 +441,7 @@ async function classify(
   // private-registry credential. Every message below reaches `printError`, which writes
   // ERROR:/HINT: to stderr verbatim, so redacting where the text enters the message closes the
   // leak wherever the message is later printed.
-  const shown = redactText(commandText(command), { shellCommand: true });
+  const shown = redactText(commandText(command), { ...deps.redaction, shellCommand: true });
   /** The remedy every arm ends with: the one line an operator has to look at. */
   const inspect = `check ${SETUP_INSTALL_ID} in .specwitness/config.yaml`;
 
@@ -448,7 +460,7 @@ async function classify(
       );
 
     case 'not-found':
-      throw notFoundError(binary);
+      throw notFoundError(binary, deps.redaction);
 
     case 'timed-out':
       throw new InfraError(
@@ -468,7 +480,7 @@ async function classify(
         // error also reaches `printError` at the CLI edge, which writes ERROR:/HINT: to stderr
         // verbatim. So the persisted copy would be clean while the terminal showed the secret.
         `the install command '${shown}' could not be spawned: ` +
-          `${redactText(result.stderr).trim() || 'the process did not start'}`,
+          `${redactText(result.stderr, deps.redaction).trim() || 'the process did not start'}`,
         `check that the verification worktree exists and is readable, and ${inspect}, then rerun`,
       );
 
@@ -513,7 +525,7 @@ export function createSetupStage(deps?: SetupStageDeps): Stage {
 
       // Refused BEFORE the worktree check and before anything is spawned: a malformed declaration
       // is a config problem this stage must not attempt to execute at all.
-      const { binary, args } = splitDeclared(command);
+      const { binary, args } = splitDeclared(command, deps.redaction);
 
       const cwd = context.run.environment.worktreePath;
       if (cwd === null) {
@@ -556,7 +568,7 @@ export function createSetupStage(deps?: SetupStageDeps): Stage {
       // Clock (AD-9) — deliberately not the stage's own duration, which the timeline column
       // already carries and which includes writing the evidence files.
       return stageOk(
-        `installed with '${redactText(commandText(command), { shellCommand: true })}' ` +
+        `installed with '${redactText(commandText(command), { ...deps.redaction, shellCommand: true })}' ` +
           `(exit code ${String(result.exitCode)} in ${String(result.durationMs)}ms)`,
       );
     },

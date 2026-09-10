@@ -1,0 +1,23 @@
+{
+  "expectedVersion": 1,
+  "fixture": "redaction-extra-patterns",
+  "why": "Story 7.4: a project can declare its OWN redaction patterns, and they reach every sink that redacts. AD-10 has always named config-declared extra patterns as part of the redaction rule, and RedactionOptions.extraPatterns was threaded through the domain, the surfaces and the authoring path from Epic 3 on -- but the Project Config had no key for them and no edge built one, so every path received undefined in production for four epics. This embodies no defect class from brief section 7; it pins a capability that was advertised in comments and executed nowhere, the same shape as D-5 and story 6.11. THE SECRET IS SHAPED SO THAT NO BUILT-IN RULE CAN MATCH IT: wombat-7x3k9q2m4p is printed bare, with no assignment name, no header name and no vendor shape around it, by the setup install, the gate, the data reset, the shell probe's command and the HTTP service's response header and body, and it is the NAME of the one file the file probe's glob matches (a passing file read persists the paths it matched, not the content it read, so a path is what the file surface captures). Only the pattern declared under redaction.extraPatterns in this fixture's config can redact it. So the fixture fails the way the code it replaced would fail: with the edge binding reverted, the run still passes, and persistedAbsent names every evidence file and result.json that holds the secret. The verification itself is unaffected by redaction -- every assertion targets text that is not the secret -- so the verdict is PASS and exit 0 either way; what this fixture pins is what the run PERSISTED.",
+  "proves": ["AC1", "AC2", "AC3", "AC4", "AC6", "AD-10", "FR-28", "NFR-10"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 0,
+  "outcome": { "verdict": "PASS" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {
+      "E1-01": "pass",
+      "E1-02": "pass",
+      "E1-03": "pass"
+    }
+  },
+  "evidence": {
+    "assertion": "exact",
+    "kinds": ["gate", "command", "http", "observation"]
+  },
+  "stderrAbsent": ["wombat-7x3k9q2m4p"],
+  "persistedAbsent": ["wombat-7x3k9q2m4p"]
+}

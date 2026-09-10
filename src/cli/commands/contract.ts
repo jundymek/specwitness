@@ -422,6 +422,9 @@ async function generateContract(
     providerName: resolved.name,
     model: provenance.model,
     providerCliVersion: provenance.providerCliVersion,
+    // Story 7.4. A standalone edge: without this, a project's declared extra patterns would
+    // reach the `verify` prompts and never this one.
+    redaction: config.redaction,
   });
 
   await writeContractFileAtomically(projectRoot, epic, serializeContract(contract), {

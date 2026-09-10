@@ -52,6 +52,17 @@ export const SECRET = 'zzTOPSECRETzz-4f2a9c1b';
 /** The assignment forms each capture path emits the secret in. */
 export const SECRET_ASSIGNMENT = `AWS_SECRET_ACCESS_KEY=${SECRET}`;
 
+/**
+ * Story 7.4. A secret NO built-in rule recognises — no assignment name, no header, no vendor
+ * shape — planted RAW, so only a config-declared extra pattern (AD-10) can redact it. A run
+ * without `PROJECT_PATTERN` declared must therefore leak it, which is what makes a run WITH it
+ * declared a proof of the declared pattern rather than of the built-ins.
+ */
+export const PROJECT_SECRET = 'wombat-7x3k9q2m4p';
+
+/** The pattern a project declares for it, exactly as written in `.specwitness/config.yaml`. */
+export const PROJECT_PATTERN = 'wombat-[a-z0-9]+';
+
 export interface ProbeFixtureOptions {
   /** Canonical epic id. Default `epic-1`. */
   readonly epic?: string;
@@ -79,6 +90,10 @@ export interface ProbeFixtureOptions {
   readonly plan?: boolean;
   /** Seed `SECRET` into every capture path. Default false. */
   readonly seedSecret?: boolean;
+  /** Story 7.4. Plant `PROJECT_SECRET`, raw, into every capture path. Default false. */
+  readonly seedProjectSecret?: boolean;
+  /** Story 7.4. Declare `redaction.extraPatterns: [PROJECT_PATTERN]`. Default false. */
+  readonly declareProjectPattern?: boolean;
   /** Make the observation command emit non-JSON, so the criterion errors. Default false. */
   readonly brokenObservation?: boolean;
   /** Configure the shipped `fake` provider for the `plan-author` role. Default false. */
@@ -177,7 +192,12 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
  * directory inside the worktree, so an observation command can read it — which is what makes
  * a before/after `delta` assertion meaningful rather than a comparison of two zeros.
  */
-function serviceScript(port: number, statusCode: number, seedSecret: boolean): string {
+function serviceScript(
+  port: number,
+  statusCode: number,
+  seedSecret: boolean,
+  projectSecret: boolean,
+): string {
   return `const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -189,26 +209,31 @@ function read() {
 
 // Seeded into a RESPONSE HEADER and the BODY, both of which the http executor captures.
 const secret = ${JSON.stringify(seedSecret ? SECRET_ASSIGNMENT : '')};
+// Story 7.4: a project-shaped secret, raw, in a header and in the body.
+const handle = ${JSON.stringify(projectSecret ? PROJECT_SECRET : '')};
 
 const server = http.createServer((request, response) => {
   const headers = { 'content-type': 'application/json' };
   if (secret !== '') {
     headers['x-debug-credentials'] = 'Authorization: Bearer ' + ${JSON.stringify(SECRET)};
   }
+  if (handle !== '') {
+    headers['x-release-handle'] = handle;
+  }
   if (request.url === '/health') {
     response.writeHead(200, headers);
-    response.end(JSON.stringify({ status: 'ok', note: secret }));
+    response.end(JSON.stringify({ status: 'ok', note: secret, ...(handle === '' ? {} : { handle }) }));
     return;
   }
   if (request.url === '/status') {
     response.writeHead(${statusCode}, headers);
-    response.end(JSON.stringify({ status: ${statusCode}, note: secret }));
+    response.end(JSON.stringify({ status: ${statusCode}, note: secret, ...(handle === '' ? {} : { handle }) }));
     return;
   }
   if (request.url === '/rows') {
     fs.writeFileSync(counter, String(read() + 1));
     response.writeHead(201, headers);
-    response.end(JSON.stringify({ created: true, note: secret }));
+    response.end(JSON.stringify({ created: true, note: secret, ...(handle === '' ? {} : { handle }) }));
     return;
   }
   response.writeHead(404, headers);
@@ -224,7 +249,7 @@ server.listen(${port}, '127.0.0.1', () => {
 }
 
 /** Prints the counter as JSON on stdout and exits 0 — the observation contract (Q35). */
-function observationScript(broken: boolean, seedSecret: boolean): string {
+function observationScript(broken: boolean, seedSecret: boolean, projectSecret: boolean): string {
   if (broken) {
     // A command that emits NON-JSON is criterion `error` (infra), never a product fail.
     return "process.stdout.write('not json at all\\n');\nprocess.exit(0);\n";
@@ -234,32 +259,34 @@ const path = require('node:path');
 const counter = path.join(__dirname, '..', 'app', 'counter.txt');
 let value = 0;
 try { value = Number(fs.readFileSync(counter, 'utf8').trim()) || 0; } catch {}
-${seedSecret ? `process.stderr.write('observation env: ${SECRET_ASSIGNMENT}\\n');\n` : ''}process.stdout.write(JSON.stringify({ count: value }) + '\\n');
+${seedSecret ? `process.stderr.write('observation env: ${SECRET_ASSIGNMENT}\\n');\n` : ''}${projectSecret ? `process.stderr.write('observation issued ${PROJECT_SECRET}\\n');\n` : ''}process.stdout.write(JSON.stringify({ count: value }) + '\\n');
 process.exit(0);
 `;
 }
 
 /** Echoes its own argv and exits 0 — the AD-3 no-shell witness, plus a shell assertion. */
-function shellScript(seedSecret: boolean): string {
-  return `${seedSecret ? `process.stderr.write('shell env: ${SECRET_ASSIGNMENT}\\n');\n` : ''}process.stdout.write('specwitness-fixture 1.0.0\\n');
+function shellScript(seedSecret: boolean, projectSecret: boolean): string {
+  return `${projectSecret ? `process.stderr.write('shell issued ${PROJECT_SECRET}\\n');\n` : ''}${seedSecret ? `process.stderr.write('shell env: ${SECRET_ASSIGNMENT}\\n');\n` : ''}process.stdout.write('specwitness-fixture 1.0.0\\n');
 process.stdout.write(JSON.stringify(process.argv.slice(2)) + '\\n');
 process.exit(0);
 `;
 }
 
 /** Resets the counter — the data command (4.3), which produces no verdict. */
-function dataScript(seedSecret: boolean): string {
+function dataScript(seedSecret: boolean, projectSecret: boolean): string {
   return `const fs = require('node:fs');
 const path = require('node:path');
 fs.mkdirSync(path.join(__dirname, '..', 'app'), { recursive: true });
 fs.writeFileSync(path.join(__dirname, '..', 'app', 'counter.txt'), '0');
-${seedSecret ? `process.stdout.write('data env: ${SECRET_ASSIGNMENT}\\n');\n` : ''}process.stdout.write('reset ok\\n');
+${seedSecret ? `process.stdout.write('data env: ${SECRET_ASSIGNMENT}\\n');\n` : ''}${projectSecret ? `process.stdout.write('data issued ${PROJECT_SECRET}\\n');\n` : ''}process.stdout.write('reset ok\\n');
 process.exit(0);
 `;
 }
 
-function gateScript(passes: boolean, seedSecret: boolean): string {
-  const secret = seedSecret ? `process.stdout.write('gate env: ${SECRET_ASSIGNMENT}\\n');\n` : '';
+function gateScript(passes: boolean, seedSecret: boolean, projectSecret: boolean): string {
+  const secret =
+    (seedSecret ? `process.stdout.write('gate env: ${SECRET_ASSIGNMENT}\\n');\n` : '') +
+    (projectSecret ? `process.stdout.write('gate issued ${PROJECT_SECRET}\\n');\n` : '');
   return passes
     ? `${secret}process.stdout.write('gate ok\\n');\nprocess.exit(0);\n`
     : `${secret}process.stdout.write('GATE-FAILED-MARKER\\n');\nprocess.exit(1);\n`;
@@ -317,6 +344,7 @@ function config(extras: {
   readonly service: boolean;
   readonly fakePlanAuthor: boolean;
   readonly fakeExplainer: boolean;
+  readonly declareProjectPattern: boolean;
 }): string {
   const lines = ['version: 1', '', 'project:', '  baseBranch: master', ''];
 
@@ -355,6 +383,11 @@ function config(extras: {
     '    run: node commands/version.cjs',
     '',
   );
+
+  if (extras.declareProjectPattern) {
+    // Story 7.4: the one shape the key has.
+    lines.push('redaction:', '  extraPatterns:', `    - '${PROJECT_PATTERN}'`, '');
+  }
 
   if (extras.fakePlanAuthor || extras.fakeExplainer) {
     // ONE `ai:` block whichever roles are wanted. Emitting two would be invalid YAML, and
@@ -607,6 +640,7 @@ export async function buildProbeFixture(
   const statusCode = options.statusCode ?? 200;
   const human = options.human ?? false;
   const seedSecret = options.seedSecret ?? false;
+  const projectSecret = options.seedProjectSecret ?? false;
   const service = options.service ?? true;
   const plannedNeedsHuman = options.plannedNeedsHuman ?? false;
   const writePlan = options.plan ?? true;
@@ -631,23 +665,31 @@ export async function buildProbeFixture(
     await mkdir(join(root, 'commands'), { recursive: true });
     await writeFile(
       join(root, 'app', 'server.cjs'),
-      serviceScript(port, statusCode, seedSecret),
+      serviceScript(port, statusCode, seedSecret, projectSecret),
       'utf8',
     );
     await writeFile(join(root, 'app', 'counter.txt'), '0', 'utf8');
     await writeFile(
       join(root, 'commands', 'rowcount.cjs'),
-      observationScript(options.brokenObservation ?? false, seedSecret),
+      observationScript(options.brokenObservation ?? false, seedSecret, projectSecret),
       'utf8',
     );
-    await writeFile(join(root, 'commands', 'version.cjs'), shellScript(seedSecret), 'utf8');
-    await writeFile(join(root, 'commands', 'reset.cjs'), dataScript(seedSecret), 'utf8');
+    await writeFile(
+      join(root, 'commands', 'version.cjs'),
+      shellScript(seedSecret, projectSecret),
+      'utf8',
+    );
+    await writeFile(
+      join(root, 'commands', 'reset.cjs'),
+      dataScript(seedSecret, projectSecret),
+      'utf8',
+    );
 
     if (gates.length > 0) {
       await mkdir(join(root, 'gates'), { recursive: true });
       for (const gate of gates) {
         const path = join(root, 'gates', `${gate.id}.cjs`);
-        await writeFile(path, gateScript(gate.passes, seedSecret), 'utf8');
+        await writeFile(path, gateScript(gate.passes, seedSecret, projectSecret), 'utf8');
         await chmod(path, 0o644);
       }
     }
@@ -661,7 +703,14 @@ export async function buildProbeFixture(
 
     await writeFile(
       join(root, '.specwitness', 'config.yaml'),
-      config({ gates, port, service, fakePlanAuthor, fakeExplainer: options.fakeExplainer !== undefined }),
+      config({
+        gates,
+        port,
+        service,
+        fakePlanAuthor,
+        fakeExplainer: options.fakeExplainer !== undefined,
+        declareProjectPattern: options.declareProjectPattern ?? false,
+      }),
       'utf8',
     );
 

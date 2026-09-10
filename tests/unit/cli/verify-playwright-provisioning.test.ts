@@ -470,11 +470,10 @@ describe('resolveBrowserEnvironment, when the operator points the cache inside t
     // MORE durable sink — the aggregate timeline detail, persisted inside `result.json` —
     // would be the less protected one.
     //
-    // NOTE, and it is why this test supplies the pattern itself: nothing in production
-    // produces `extraPatterns` today. There is no key for them in the Project Config schema
-    // and `verify.ts` binds `redaction` nowhere, so the executor receives `undefined` as well.
-    // This pins that the parameter is HONOURED when it exists, which is what makes the wiring
-    // correct by construction the day that surface lands.
+    // This test supplies the pattern itself because it pins this module in isolation. Since
+    // story 7.4 production supplies it too: `verify.ts` passes the loaded `config.redaction`
+    // (the project's `redaction.extraPatterns`), which `verify-extra-patterns.test.ts` drives
+    // end to end through the built binary.
     const project = await tempRoot();
     const home = await tempRoot();
     const { runner } = fakeRunner([ok()]);

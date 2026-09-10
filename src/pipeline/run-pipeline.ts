@@ -39,7 +39,7 @@
  * reused.
  */
 
-import { redactText } from '../domain/evidence.js';
+import { redactText, type RedactionOptions } from '../domain/evidence.js';
 import {
   ConfigError,
   InfraError,
@@ -106,6 +106,15 @@ export interface RunPipelineInput {
    * `persist` timeline entry instead, which is the honest place for it.
    */
   readonly onComplete?: (result: RunResult) => Promise<void>;
+  /**
+   * The run's config-declared extra redaction patterns (AD-10, story 7.4), applied to every
+   * timeline detail and hint alongside the built-in rules.
+   *
+   * A timeline entry is persisted in `result.json` and printed through `printError`, so it is
+   * capture. Before story 7.4 the recorder applied the built-ins only, which left the most
+   * durable artifact of a run the least protected one for a project's own secret shapes.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /**
@@ -210,8 +219,8 @@ export async function runPipeline(input: RunPipelineInput): Promise<RunResult> {
     // and a convention.
     // The hint is redacted for the same reason the detail is: both are persisted and
     // rendered, and a hint can quote a path or a command.
-    const safeDetail = detail === undefined ? undefined : redactText(detail);
-    const safeHint = hint === undefined ? undefined : redactText(hint);
+    const safeDetail = detail === undefined ? undefined : redactText(detail, input.redaction);
+    const safeHint = hint === undefined ? undefined : redactText(hint, input.redaction);
     timeline.set(stage, {
       stage,
       status,

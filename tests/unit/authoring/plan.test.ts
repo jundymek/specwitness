@@ -421,10 +421,10 @@ describe('compilation refuses a contract that cannot gate verification', () => {
  * *config-declared extra* patterns, which are exactly the shapes a project adds because the
  * built-ins do not recognise its own secrets.
  *
- * The seam is now continuous through the whole of `src/authoring/**`. It is still not fed
- * from the CLI edge, because **nothing in this product constructs a `RedactionOptions` from
- * config anywhere** — see the PR body. That remaining half is a feature, not a refactor, and
- * it is outside this story's layer.
+ * The seam is continuous through the whole of `src/authoring/**`, and since story 7.4 it is
+ * fed from the CLI edge: `plan` and `verify` pass the loaded `config.redaction` (the
+ * project's `redaction.extraPatterns`). This test pins the builder half in isolation;
+ * `tests/integration/authoring-extra-patterns.test.ts` pins the edge through the binary.
  */
 describe('the run redaction options reach the prompt (story 6.8, AD-10)', () => {
   it('applies a config-declared extra pattern to the criterion statement', async () => {

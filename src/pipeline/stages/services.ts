@@ -134,7 +134,7 @@ import {
   type SpecwitnessConfig,
 } from '../../config/index.js';
 import { ConfigError, InfraError } from '../../domain/errors.js';
-import { commandEvidence, redactText } from '../../domain/evidence.js';
+import { commandEvidence, redactText, type RedactionOptions } from '../../domain/evidence.js';
 import type { ProcessResult, ProcessRunner } from '../../domain/process-runner.js';
 import type { Stage, StageContext, StageResult } from '../stage.js';
 import { stageOk } from '../stage.js';
@@ -422,6 +422,12 @@ export interface ServicesStageDeps {
    * constant for why this one is not the injected `sleep`.
    */
   readonly settleGraceMs?: number;
+  /**
+   * The run's config-declared extra redaction patterns (AD-10, story 7.4), applied with the
+   * built-ins to a service's evidence and every message quoting its command or its output.
+   * `createStages` binds it from `StageDependencies.redaction`.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /**
@@ -484,10 +490,11 @@ function splitDeclared(
   serviceId: string,
   declared: DeclaredCommand,
   what: 'run' | 'ready.command',
+  redaction: RedactionOptions | undefined,
 ): { binary: string; args: readonly string[] } {
   const text = commandText(declared);
   const where = `services.${serviceId}.${what}`;
-  const safe = (): string => redactText(text, { shellCommand: true });
+  const safe = (): string => redactText(text, { ...redaction, shellCommand: true });
 
   if (usesUnsupportedEscaping(text)) {
     throw new InfraError(
@@ -562,7 +569,7 @@ function startService(
   service: ServiceConfig,
   cwd: string,
 ): HeldSpawn {
-  const { binary, args } = splitDeclared(serviceId, service.run, 'run');
+  const { binary, args } = splitDeclared(serviceId, service.run, 'run', deps.redaction);
   const state: { result?: ProcessResult; error?: unknown } = {};
 
   let announce: () => void = () => undefined;
@@ -656,7 +663,7 @@ async function pollReadiness(
         '.specwitness/config.yaml — this is a SpecWitness defect if the config loaded cleanly',
     );
   }
-  const { binary, args } = splitDeclared(serviceId, declared, 'ready.command');
+  const { binary, args } = splitDeclared(serviceId, declared, 'ready.command', deps.redaction);
   const result = await deps.runner.run({
     binary,
     args,
@@ -693,7 +700,7 @@ async function pollReadiness(
         // Redacted at the point captured output enters the message: this reaches
         // `printError`, which writes to stderr verbatim.
         `service '${serviceId}' cannot be checked: its readiness command could not be spawned: ` +
-          (redactText(result.stderr).trim() || 'the process did not start'),
+          (redactText(result.stderr, deps.redaction).trim() || 'the process did not start'),
         'check that the verification worktree exists and is readable, then rerun',
       );
 
@@ -728,6 +735,7 @@ function recordServiceOutput(
   serviceId: string,
   service: ServiceConfig,
   result: ProcessResult | undefined,
+  redaction: RedactionOptions | undefined,
 ): void {
   if (result === undefined || (result.stdout === '' && result.stderr === '')) {
     return;
@@ -742,7 +750,7 @@ function recordServiceOutput(
       stdout: result.stdout,
       stderr: result.stderr,
       durationMs: result.durationMs,
-    }),
+    }, redaction),
   );
 }
 
@@ -792,7 +800,7 @@ async function awaitReadiness(
     // migration, a bad env var) and the exit code plus the output IS the answer.
     if (spawn.state.result !== undefined) {
       const result = spawn.state.result;
-      recordServiceOutput(context, serviceId, service, result);
+      recordServiceOutput(context, serviceId, service, result, deps.redaction);
       throw new InfraError(
         `service '${serviceId}' exited before it became ready (${describeExit(result)})`,
         `check the captured output for services.${serviceId} in the run directory, then fix ` +
@@ -894,7 +902,7 @@ async function failReadinessTimeout(
     teardownNote = `; its process group could not be torn down (${reasonOf(error)})`;
   }
 
-  recordServiceOutput(context, serviceId, service, spawn.state.result);
+  recordServiceOutput(context, serviceId, service, spawn.state.result, deps.redaction);
 
   throw new InfraError(
     `service '${serviceId}' did not become ready within ${timeoutMs}ms (${lastDetail})` +
@@ -993,7 +1001,7 @@ export function resolveServiceBaseUrl(config: SpecwitnessConfig, serviceId: stri
       return new URL(readinessUrl).origin;
     } catch {
       throw new ConfigError(
-        `services.${serviceId}.ready.url is not a valid URL: '${redactText(readinessUrl)}'`,
+        `services.${serviceId}.ready.url is not a valid URL: '${redactText(readinessUrl, config.redaction)}'`,
         `write an absolute URL such as http://127.0.0.1:3000/health in services.${serviceId}.ready.url`,
       );
     }
