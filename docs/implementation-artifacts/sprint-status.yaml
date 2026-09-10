@@ -165,7 +165,7 @@ development_status:
   # test enforcing the convention it measured. A fifth declarative `file` surface makes those
   # five scripts declarations, so the logic is tested once in the product instead of rewritten
   # per project. Widening the closed union is what ADR-009 exists to authorise.
-  7-8-declarative-file-surface: review
+  7-8-declarative-file-surface: done
   epic-7-retrospective: optional
 
 # Appended per the workflow note above; established at the Epic 3 retrospective
