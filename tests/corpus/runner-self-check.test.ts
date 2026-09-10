@@ -209,3 +209,24 @@ describe('the package-registry tripwires are real (story 7.0)', () => {
     60_000,
   );
 });
+
+describe('persistedAbsent is real (story 7.4)', () => {
+  it('goes red, naming the persisted files, when the fixture stops declaring its pattern', async () => {
+    // The config edit stands in for every way a declared pattern can stop reaching its sinks —
+    // an edge binding reverted, a stage that stops threading it. The expectation is untouched
+    // and correct, the run still PASSES, and only what it persisted differs: which is exactly
+    // the regression `persistedAbsent` exists to see and `stderrAbsent` alone could not.
+    const { root, directory } = await cloneFixture('redaction-extra-patterns');
+    await patch(join(directory, 'project', '.specwitness', 'config.yaml'), (text) =>
+      text.slice(0, text.indexOf('redaction:\n')),
+    );
+
+    const run = await runOnly(root);
+    const problems = run.problems.join('\n');
+
+    expect(problems).toMatch(/persistedAbsent: \.specwitness\/runs\/\S+\/result\.json contains/);
+    expect(problems).toMatch(/persistedAbsent: \.specwitness\/runs\/\S+\/evidence\/gate-/);
+    // A leak, not a behavioural regression: the verdict is untouched.
+    expect(problems).not.toContain('outcome');
+  }, 180_000);
+});

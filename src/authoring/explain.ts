@@ -241,14 +241,12 @@ export interface ExplainRequest {
   /**
    * The run's redaction options (AD-10), forwarded to the shared prompt assembly.
    *
-   * OPTIONAL AND CURRENTLY UNSET BY EVERY CALLER, which is worth stating rather than
-   * leaving for a reader to discover: nothing at the CLI edge builds a `RedactionOptions`
-   * today — `src/cli/commands/verify.ts` composes the probe dispatcher with no `redaction`
-   * key. The built-in patterns always apply; what this seam adds is the config-declared
-   * EXTRA patterns, for the day something wires them. That is exactly the posture
-   * `RedactionOptions` documents for itself in `src/domain/evidence.ts`: the parameter
-   * exists so that when a caller needs it there is nowhere new to put it, and no second
-   * redaction entry point gets invented. Wiring it at the edge is not story 6.8's scope.
+   * Set by `src/cli/verify/explain.ts` from the loaded `config.redaction` since story 7.4;
+   * before that every caller left it unset, because nothing at the CLI edge built a
+   * `RedactionOptions` at all. The built-in patterns always apply; what this adds is the
+   * project's config-declared EXTRA patterns (`redaction.extraPatterns`), the only rules that
+   * can recognise its own secret shapes. Story 6.8 added the seam so that no second redaction
+   * entry point would be invented; story 7.4 fed it.
    */
   readonly redaction?: RedactionOptions;
 }

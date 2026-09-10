@@ -133,11 +133,17 @@ export function evidenceRef(kind: EvidenceKind, path: string): EvidenceRef {
 
 export interface RedactionOptions {
   /**
-   * Extra patterns from the Project Config (AD-10: "config-declared extra patterns").
+   * Extra patterns from the Project Config (AD-10: "config-declared extra patterns"),
+   * declared as `redaction.extraPatterns` in `.specwitness/config.yaml` and compiled by the
+   * loader. The CLI edge passes `config.redaction` — which IS a `RedactionOptions` — to
+   * every sink that redacts: the capturing stages, the timeline recorder, all five
+   * surfaces, browser provisioning and every provider prompt.
    *
-   * Epic 3 wires none — the parameter exists now so that when 4.x needs it there is
-   * nowhere new to put it, and no second redaction entry point gets invented. A pattern
-   * is applied globally whether or not the caller remembered the `g` flag.
+   * Epic 3 put the parameter here so that no second redaction entry point would be
+   * invented when a caller needed one. It then received `undefined` in production for four
+   * epics, because no config key existed to fill it, until story 7.4 added the key and
+   * wired the edges. A pattern is applied globally whether or not its author wrote the `g`
+   * flag.
    */
   readonly extraPatterns?: readonly RegExp[];
   /**

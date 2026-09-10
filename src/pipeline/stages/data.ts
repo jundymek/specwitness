@@ -104,7 +104,12 @@
 
 import { commandText, type DeclaredCommand } from '../../config/index.js';
 import { InfraError } from '../../domain/errors.js';
-import { commandEvidence, redactText, type Evidence } from '../../domain/evidence.js';
+import {
+  commandEvidence,
+  redactText,
+  type Evidence,
+  type RedactionOptions,
+} from '../../domain/evidence.js';
 import type {
   ProcessResult,
   ProcessRunner,
@@ -171,6 +176,12 @@ export interface DataStageDeps {
    * `specwitness clean` reap a run killed mid-reset.
    */
   readonly onProcessGroup?: (pgid: number) => void | Promise<void>;
+  /**
+   * The run's config-declared extra redaction patterns (AD-10, story 7.4), applied with the
+   * built-ins to each command's evidence, its full-output files and every message quoting the
+   * command or its output. `createStages` binds it from `StageDependencies.redaction`.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /**
@@ -267,9 +278,10 @@ function assertDeclarationOrderIsHonoured(ids: readonly string[]): void {
 function splitDeclared(
   dataId: string,
   command: DeclaredCommand,
+  redaction: RedactionOptions | undefined,
 ): { binary: string; args: string[] } {
   const declared = commandText(command);
-  const shown = (): string => redactText(declared, { shellCommand: true });
+  const shown = (): string => redactText(declared, { ...redaction, shellCommand: true });
 
   if (usesUnsupportedEscaping(declared)) {
     throw new InfraError(
@@ -331,7 +343,10 @@ async function persistStream(
   if (raw === '' || deps.writeEvidence === undefined) {
     return undefined;
   }
-  return await deps.writeEvidence(dataEvidenceRelativePath(dataId, index, stream), redactText(raw));
+  return await deps.writeEvidence(
+    dataEvidenceRelativePath(dataId, index, stream),
+    redactText(raw, deps.redaction),
+  );
 }
 
 /** The relative paths of whichever full-output files were written. */
@@ -414,7 +429,7 @@ async function record(
     stderr: result.stderr,
     durationMs: result.durationMs,
     ...paths,
-  });
+  }, deps.redaction);
 
   context.run.evidence.push(evidence);
 }
@@ -429,7 +444,11 @@ async function record(
  * and telling them to fix their PATH would send them to edit a shell profile over a file that is
  * simply not in the commit under verification.
  */
-function notFoundError(dataId: string, binary: string): InfraError {
+function notFoundError(
+  dataId: string,
+  binary: string,
+  redaction: RedactionOptions | undefined,
+): InfraError {
   const isPath = binary.includes('/') || binary.includes('\\');
 
   // REDACTED, for the reason `gates.ts` records at its own `notFoundError`: under AD-3 there is
@@ -440,7 +459,7 @@ function notFoundError(dataId: string, binary: string): InfraError {
   //
   // Found during story 6.11 and fixed here as owner-authorised follow-up work rather than
   // silently, because this file belongs to story 4.3.
-  const shown = redactText(binary, { shellCommand: true });
+  const shown = redactText(binary, { ...redaction, shellCommand: true });
 
   return isPath
     ? new InfraError(
@@ -493,7 +512,7 @@ async function classify(
       );
 
     case 'not-found':
-      throw notFoundError(dataId, binary);
+      throw notFoundError(dataId, binary, deps.redaction);
 
     case 'timed-out':
       throw new InfraError(
@@ -513,7 +532,7 @@ async function classify(
         // clean while the terminal showed the secret. Redacting where the untrusted text ENTERS
         // the message closes that wherever the message is later printed.
         `data command '${dataId}' could not be spawned: ` +
-          `${redactText(result.stderr).trim() || 'the process did not start'}`,
+          `${redactText(result.stderr, deps.redaction).trim() || 'the process did not start'}`,
         'check that the verification worktree exists and is readable, then rerun',
       );
 
@@ -575,7 +594,7 @@ export function createDataStage(deps?: DataStageDeps): Stage {
       }
 
       for (const [index, [dataId, command]] of entries.entries()) {
-        const { binary, args } = splitDeclared(dataId, command);
+        const { binary, args } = splitDeclared(dataId, command, deps.redaction);
 
         const options: ProcessRunOptions = {
           binary,

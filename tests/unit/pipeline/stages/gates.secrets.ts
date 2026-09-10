@@ -34,6 +34,23 @@ export const SEEDED_COOKIE = 'session=deadbeefcafe';
  * and gate output is precisely where such lines live, because gates ARE
  * `npm test` and `pnpm build`.
  */
+/**
+ * Story 7.4. A secret NO built-in rule recognises: no assignment name, no header, no vendor
+ * shape. Only a config-declared extra pattern (AD-10) can redact it, so a test that finds it
+ * absent has proved the DECLARED pattern ran — and a control run without the pattern must find
+ * it present, or the test proves nothing. Not credential-shaped, so it is a literal.
+ */
+export const EXTRA_PATTERN_SECRET = 'wombat-7x3k9q2m4p';
+
+/** The options a project declaring `redaction.extraPatterns: ['wombat-[a-z0-9]+']` loads to. */
+export const EXTRA_REDACTION = { extraPatterns: [/wombat-[a-z0-9]+/] } as const;
+
+/** Output carrying that secret the way a project prints its own handles: bare, mid-line. */
+export const PROJECT_SHAPED_OUTPUT = [
+  `issued ${EXTRA_PATTERN_SECRET} for this build`,
+  `2026-09-10T00:00:00Z INFO  release handle ${EXTRA_PATTERN_SECRET} accepted`,
+].join('\n');
+
 export const NOISY_GATE_OUTPUT = [
   `ANTHROPIC_API_KEY=${SEEDED_API_KEY}`,
   `> Authorization: Bearer ${SEEDED_API_KEY}`,

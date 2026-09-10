@@ -1,0 +1,77 @@
+# Hand-written Verification Plan for the corpus fixture `redaction-extra-patterns`.
+#
+# PRECOMPILED AND CHECKED IN, which is what makes this fixture AI-free: with a
+# plan on disk `verify` compiles nothing, so no provider is ever in scope
+# (FR-18). The `contract.fingerprint` below must match the frozen contract
+# beside it; a re-freeze means this line is re-copied by hand.
+#
+# Three surfaces, and none of their assertions targets the release handle: the
+# http probe reads `state`, the shell probe reads stdout, the file probe counts
+# release notes. Each of them still CAPTURES the handle — a response header and
+# body, a stderr stream, and the one path the file glob matched (a passing file
+# read persists matched paths, not content) — which is what this fixture pins.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: 27a8bd1faf3039789ae10a82f8b02cebdfd4daee12ffb3a3ca939f267e42eb5a
+  data:
+    seed: corpusseed074001
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: release-status
+          surface: http
+          mechanics:
+            serviceId: app
+            method: GET
+            path: /release
+          assertions:
+            - description: the release endpoint answers 200
+              target: { source: status }
+              comparison: equals
+              expected: "200"
+            - description: the release reads published
+              target: { source: jsonPath, path: state }
+              comparison: equals
+              expected: published
+    - criterionId: E1-02
+      disposition: automated
+      probes:
+        - id: version-probe
+          surface: shell
+          mechanics:
+            commandId: version
+            args: ["--version"]
+            argumentAllowlist: ["--version"]
+          assertions:
+            - description: the command exits zero
+              target: { source: exitCode }
+              comparison: equals
+              expected: "0"
+            - description: it prints its own name and version
+              target: { source: stdout }
+              comparison: contains
+              expected: redaction-fixture-app 1.0.0
+    - criterionId: E1-03
+      disposition: automated
+      probes:
+        - id: release-notes
+          surface: file
+          mechanics:
+            path: releases/*.md
+          assertions:
+            - description: exactly one release has release notes
+              target: { source: fileCount }
+              comparison: equals
+              expected: "1"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-10T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

@@ -12,6 +12,7 @@
  * pipeline unit-testable with zero I/O.
  */
 
+import type { RedactionOptions } from '../../domain/evidence.js';
 import type { Stage } from '../stage.js';
 import { createAggregateStage } from './aggregate.js';
 import { createDataStage } from './data.js';
@@ -172,27 +173,47 @@ export interface StageDependencies {
    * stage is where it has to be seen, and what goes wrong when nothing sees it.
    */
   readonly browserEnvironmentUnavailable?: string;
+  /**
+   * The run's config-declared extra redaction patterns (AD-10, story 7.4), bound ONCE here and
+   * handed by `createStages` to every stage that captures text: setup, gates, services, data,
+   * probes and aggregate. When present it replaces any `redaction` a stage's own deps carry,
+   * so there is one answer to "which patterns does this run redact" rather than six.
+   *
+   * ONE BINDING, NOT SIX, is the point. Every capturing stage accepted no options at all until
+   * this story, and a per-stage key at the edge would be one more place for the next stage to
+   * forget — which is exactly how config-declared patterns reached nothing for four epics.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /** The eleven stages, in the frozen spine order. */
 export function createStages(deps: StageDependencies): Stage[] {
+  // Story 7.4: the run's extra patterns reach every capturing stage from the one binding above.
+  const withRedaction = <T extends { readonly redaction?: RedactionOptions }>(stageDeps: T): T =>
+    deps.redaction === undefined ? stageDeps : { ...stageDeps, redaction: deps.redaction };
+  const probes = deps.probes === undefined ? undefined : withRedaction(deps.probes);
+
   return [
     createResolveStage(),
     createIntegrityStage(deps.assertVerifiableContract),
     createWorktreeStage(deps.worktree),
-    createSetupStage(deps.setup),
-    deps.gates === undefined ? createUnwiredGatesStage() : createGatesStage(deps.gates),
-    createServicesStage(deps.services),
-    createDataStage(deps.data),
-    createProbesStage(deps.probes),
+    createSetupStage(deps.setup === undefined ? undefined : withRedaction(deps.setup)),
+    deps.gates === undefined
+      ? createUnwiredGatesStage()
+      : createGatesStage(withRedaction(deps.gates)),
+    createServicesStage(deps.services === undefined ? undefined : withRedaction(deps.services)),
+    createDataStage(deps.data === undefined ? undefined : withRedaction(deps.data)),
+    createProbesStage(probes),
     // Handed the SAME plan the probes stage receives, so a criterion this stage has to
     // materialise carries the reviewer guidance the probes stage would have given it.
     // ADR-003 makes that necessary rather than tidy: a gate failure skips `probes`
     // entirely, and without this a human criterion in a gate-failed run reaches its
     // reviewer with no guidance at all (story 5.3).
     createAggregateStage({
-      criteria: deps.probes?.criteria,
-      redaction: deps.probes?.redaction,
+      criteria: probes?.criteria,
+      // The top-level binding first: a gates-only run binds no probes stage, and its aggregate
+      // timeline detail is persisted all the same.
+      redaction: deps.redaction ?? probes?.redaction,
       // Story 7.0. Spread, so a run that needs no browser (or got one) hands this stage NO
       // key rather than an explicit `undefined` — the difference is what makes "this run
       // could adjudicate everything its plan asked for" true of the object itself.

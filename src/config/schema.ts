@@ -18,6 +18,7 @@
  *      planning | setup | services | data | observations | ai = {}  (whole block)
  *      gates                            = []
  *      services.<name>.ready.timeoutSec = 60   (addendum section D example value)
+ *      redaction.extraPatterns          = []   (story 7.4: "no extra patterns")
  *
  *    `project.baseBranch` deliberately has NO default: addendum section D
  *    annotates it "never assumed", and defaulting it is exactly the assumption
@@ -230,6 +231,65 @@ const retriesShape: Record<ProbeSurface, typeof retryCount> = {
 
 const retriesSchema = z.strictObject(retriesShape);
 
+/**
+ * ============================================================================
+ * `redaction:` — story 7.4. The key AD-10 named and no project could write.
+ * ============================================================================
+ *
+ * AD-10's redaction rule has three parts: sensitive headers, sensitive assignments, and
+ * "config-declared extra patterns". The first two are built in. The third is the only one that
+ * can recognise a project's OWN secret shapes, and from Epic 3 to story 7.4 it had a parameter
+ * (`RedactionOptions.extraPatterns`) threaded through every sink and no key here to fill it, so
+ * every sink received `undefined` in production.
+ *
+ * `extraPatterns` mirrors `RedactionOptions.extraPatterns` by name, and the validated block IS a
+ * `RedactionOptions`, so the edge passes `config.redaction` down with no translation layer.
+ *
+ * COMPILED HERE, WITH NO FLAGS. `redactText` rebuilds every pattern with `g` and a fresh
+ * `lastIndex` (`domain/evidence.ts`), so a pattern applies to every occurrence whether or not
+ * its author could write a flag; compiling with `g` here would hand every consumer a stateful
+ * regex instead.
+ *
+ * TWO REFUSALS, BOTH FAIL-CLOSED. Each is a `ConfigError` (exit 3) naming the YAML path, and the
+ * run does not start:
+ *
+ *   - An INVALID regex. Skipping it would run the verification while the very secret the project
+ *     declared the pattern for went to providers and into persisted artifacts, and a warning on a
+ *     prompt-free path is read by nobody.
+ *   - A pattern that MATCHES THE EMPTY STRING (`''`, `x*`, `(a|)`). A zero-width global match
+ *     makes `replace` insert the marker between every character of every captured text: the run
+ *     would destroy its own evidence rather than protect it, which cannot be what was meant.
+ */
+const extraPattern = (): z.ZodType<RegExp, string> =>
+  z.string().transform((source, ctx): RegExp => {
+    let compiled: RegExp;
+    try {
+      compiled = new RegExp(source);
+    } catch (error) {
+      ctx.addIssue({
+        code: 'custom',
+        input: source,
+        message: `not a valid regular expression (${(error as Error).message})`,
+      });
+      return z.NEVER;
+    }
+    if (compiled.test('')) {
+      ctx.addIssue({
+        code: 'custom',
+        input: source,
+        message:
+          'matches the empty string, so it would redact between every character of every ' +
+          'captured text; make it match at least one character',
+      });
+      return z.NEVER;
+    }
+    return compiled;
+  });
+
+const redactionSchema = z.strictObject({
+  extraPatterns: z.array(extraPattern()).default([]),
+});
+
 const baseConfigSchema = z.strictObject({
   version: z.literal(1),
   project: projectSchema,
@@ -256,6 +316,11 @@ const baseConfigSchema = z.strictObject({
    * read would be `undefined` rather than 0 — a silently policy-free retry policy.
    */
   retries: retriesSchema.prefault({}),
+  /**
+   * Config-declared extra redaction patterns (AD-10, story 7.4). `prefault` for the reason
+   * `planning` states: an absent block must still yield `extraPatterns: []`, not a bare `{}`.
+   */
+  redaction: redactionSchema.prefault({}),
   ai: aiSchema.default({}),
 });
 

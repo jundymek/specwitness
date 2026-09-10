@@ -147,7 +147,7 @@ development_status:
   # extraPatterns path in the domain, the four surfaces and the authoring path has been dead
   # in production since Epic 3. Recorded as finding 17 in 7.0's Dev Agent Record. Unassigned:
   # writing the spec schedules nothing, and which wave it lands in is the owner's call.
-  7-4-redaction-extra-patterns-config-surface: ready-for-dev
+  7-4-redaction-extra-patterns-config-surface: review
   # Written 2026-09-09 by the SUPERVISOR of epic/7-dogfooding-repairs, with the owner's
   # agreement, from evidence found while reviewing story 7.5 (PR #86, e039add): the doctor
   # integration test asserting a playwright-capability WARNING fails on any machine that has

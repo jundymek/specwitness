@@ -93,12 +93,13 @@ export interface CompilePlanInput {
    * *config-declared extra* patterns, i.e. the shapes a project adds precisely because the
    * built-ins do not recognise its own secrets.
    *
-   * The seam is now continuous through the whole of `src/authoring/**`. It is still not fed,
-   * because **nothing in this product constructs a `RedactionOptions` from config anywhere**
-   * — `src/cli/commands/verify.ts` composes its probe dispatcher without one. Building that
-   * value is a feature (AD-10's config-declared patterns are unimplemented product-wide),
-   * not a refactor, and it is outside story 6.8's layer. When someone does wire it, this is
-   * the one place per flow that has to receive it.
+   * The seam is continuous through the whole of `src/authoring/**`, and since story 7.4 it is
+   * FED: `src/cli/commands/plan.ts`, and `verify`'s compile-when-no-plan-exists path, pass the
+   * loaded `config.redaction` (the project's `redaction.extraPatterns`) here. Until then
+   * nothing in the product built a `RedactionOptions` from config at all, so this parameter
+   * was reachable only from tests one level up as well.
+   * `tests/integration/authoring-extra-patterns.test.ts` now drives it through the built
+   * binary and inspects the prompt the provider actually received.
    */
   readonly redaction?: RedactionOptions;
 }

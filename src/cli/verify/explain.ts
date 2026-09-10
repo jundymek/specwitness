@@ -137,6 +137,9 @@ export async function explainVerifiedRun(
       clock,
       model: provenance.model,
       providerCliVersion: provenance.providerCliVersion,
+      // The project's declared extra patterns (story 7.4, AD-10), read from the config this
+      // edge already holds rather than passed in beside it.
+      redaction: config.redaction,
     });
 
     return {

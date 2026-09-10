@@ -154,11 +154,10 @@ export interface BrowserEnvironmentInputs {
    * sink must not be the less protected one: the reason reaches the aggregate stage's
    * timeline detail, which is persisted inside `result.json`.
    *
-   * NOTHING IN PRODUCTION SUPPLIES THIS YET, and that is not this story's to change: the
-   * Project Config schema has no key for extra patterns and `verify.ts` binds `redaction`
-   * nowhere, so the executor receives `undefined` too (`domain/evidence.ts:134-141`: *"Epic 3
-   * wires none"*, still true three epics later). Threaded here so the wiring is correct by
-   * construction the day that surface lands, rather than needing a second look then.
+   * `verify.ts` supplies the loaded `config.redaction` here (the project's
+   * `redaction.extraPatterns`) since story 7.4, and the browser executor receives the same
+   * value through the probe dispatcher. Before that the config had no key for extra patterns
+   * and both received `undefined` in production.
    */
   readonly redaction?: RedactionOptions;
   /** Overridable for tests. Defaults to `PROVISION_TIMEOUT_MS`. */

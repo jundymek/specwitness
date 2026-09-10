@@ -227,6 +227,13 @@ async function verify(
   // Loaded once, at the edge, and passed down (spine Consistency Conventions).
   const config = loadConfig(projectRoot);
 
+  // `config.redaction` IS this run's `RedactionOptions` (story 7.4, AD-10): the project's own
+  // extra patterns, compiled at load. Every sink below that redacts receives it — the stages
+  // (one binding, fanned out by `createStages`), the timeline recorder, the probe dispatcher and
+  // through it all five surfaces, browser provisioning, and every provider prompt this command
+  // can send: plan compilation, adaptation and explanation. Until story 7.4 nothing here passed
+  // one, so every one of those paths received `undefined` in production.
+
   // Read and PARSED here, verified inside the pipeline. Parsing at the edge is
   // what lets the integrity stage receive a plain closure; a contract file that
   // is not valid YAML, or not a contract, fails here as an IntegrityError from
@@ -422,6 +429,7 @@ async function verify(
     declaredServiceIds,
     runner,
     onProcessGroup: recordProcessGroup,
+    redaction: config.redaction,
   });
 
   // ⚠️ THE RUN COULD NOT BUILD WHAT ITS PLAN REQUIRES, and the aggregate stage has to know.
@@ -446,8 +454,12 @@ async function verify(
     clock,
     // Empty on every AI-free run, which is every run with a plan already committed.
     providerUsage: planning.providerUsage,
+    // The timeline recorder's half: a stage detail or hint is persisted in `result.json`.
+    redaction: config.redaction,
     stages: createStages({
       assertVerifiableContract: () => assertVerifiableContract(loaded),
+      // ONE binding, handed by `createStages` to every stage that captures text (story 7.4).
+      redaction: config.redaction,
       // Spread, so a run that needs no browser or got one hands the stage NO key rather
       // than an explicit `undefined` (`exactOptionalPropertyTypes`).
       ...(browserEnvironmentUnavailable === undefined ? {} : { browserEnvironmentUnavailable }),
@@ -529,6 +541,8 @@ async function verify(
                 // checked nothing must not report PASS.
                 playwright,
                 onProcessGroup: recordProcessGroup,
+                // Spread by the dispatcher into all five surface executors (story 7.4).
+                redaction: config.redaction,
               }),
               // Story 5.4. Zero for every surface unless the project declared otherwise,
               // so a run stays deterministic unless somebody asked for repetition (AD-9).
@@ -903,7 +917,7 @@ function buildMechanicsAdapter(config: SpecwitnessConfig, clock: Clock): Mechani
     );
   }
 
-  return createMechanicsAdapter({ provider, clock });
+  return createMechanicsAdapter({ provider, clock, redaction: config.redaction });
 }
 
 async function resolvePlan(input: {
@@ -1006,6 +1020,7 @@ async function resolvePlan(input: {
     providerName: resolvedProvider.name,
     model: provenance.model,
     providerCliVersion: provenance.providerCliVersion,
+    redaction: config.redaction,
   });
 
   // WRITTEN TO DISK, not held in memory. A plan is a committed, reviewed artifact (Q11),

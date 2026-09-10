@@ -334,8 +334,9 @@
  * three of the four targets here are anonymous — a URL, a title and an element's text have
  * no key whose name could make them sensitive — so they take the ordinary text redaction,
  * exactly as http's `status` and `body` targets do. A project that knows the shape of its
- * own secrets declares `extraPatterns` (AD-10), and those are threaded into every
- * constructor call here.
+ * own secrets declares them under `redaction.extraPatterns` in `.specwitness/config.yaml`
+ * (AD-10; wired from the config to this executor by story 7.4), and those are threaded into
+ * every constructor call here.
  *
  * ============================================================================
  * THE PARAMS SHAPE, AND THE DEBT IT CONFORMS TO
@@ -1240,7 +1241,7 @@ export class BrowserSurfaceExecutor implements SurfaceExecutor {
     // HONEST LIMIT, the same one the module header states for page text: a `fill` value
     // with no assignment shape around it (a bare password, rather than `password=...`) is
     // not something `redactText` can recognise. A project that knows the shape of its own
-    // secrets declares `extraPatterns`, which is threaded through here like everywhere else.
+    // secrets declares `redaction.extraPatterns`, threaded through here like everywhere else.
     const payloadJson = `${JSON.stringify(payload, null, 2)}\n`;
     const payloadPath = join(workspace, 'payload.json');
     await writeFile(payloadPath, payloadJson, 'utf8');
@@ -1572,7 +1573,8 @@ function validateParams(
   // a SELECTOR and a BASE URL — strings the caller supplied — and they reach stderr through
   // `printError` verbatim. A bare `redactText(value)` applies only the BUILT-IN rules, so a
   // secret shaped like nothing the built-ins recognise (precisely the case a project
-  // declares `extraPatterns` for) would be printed in full. `http.ts` learned this in review.
+  // declares `redaction.extraPatterns` for) would be printed in full. `http.ts` learned this
+  // in review.
   const redact = (value: string): string => redactText(value, redaction);
 
   const fail = (why: string, hint: string): never => {

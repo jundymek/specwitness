@@ -611,7 +611,8 @@ function enforceAllowlist(
   // copy stayed clean.
   //
   // THE OPTIONS ARE PASSED, and that is the whole point of threading them here.
-  // AD-10's "config-declared extra patterns" are the ONLY thing that can redact
+  // AD-10's "config-declared extra patterns" (`redaction.extraPatterns`, wired from the
+  // config to this executor by story 7.4) are the ONLY thing that can redact
   // a project's own secret shapes — a bearer token format the built-in rules do
   // not recognise. Calling `redactText(value)` bare, as an earlier revision did,
   // silently applied the built-in rules only, so a secret covered exclusively by

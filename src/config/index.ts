@@ -38,6 +38,7 @@ export {
   type ProjectConfig,
   type ProviderConfig,
   type ReadinessConfig,
+  type RedactionConfig,
   type ResolvedProvider,
   type RetriesConfig,
   type ServiceConfig,

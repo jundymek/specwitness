@@ -1,0 +1,46 @@
+# SpecWitness Project Config for the corpus fixture `redaction-extra-patterns`.
+#
+# ⚠️ THIS FILE DECLARES COMMANDS THAT WILL BE EXECUTED (AD-3). Every command here
+# is `node <relative path inside this fixture>`: argv, never a shell line, with
+# nothing to quote and nothing for a shell to interpret. None of them reads
+# anything from the machine running the suite.
+#
+# EVERY DECLARED COMMAND, AND THE SERVICE, PRINTS THE SAME PROJECT-SHAPED SECRET:
+# a release handle with no assignment name, header name or vendor shape around
+# it, so no built-in redaction rule can recognise it. The `redaction:` block at
+# the bottom is the only thing standing between it and the run directory.
+#
+# `{{PORT:app}}` is substituted by the corpus runner with a freshly allocated
+# loopback port; see `fixtures/corpus/README.md`.
+
+version: 1
+
+project:
+  baseBranch: master
+
+setup:
+  install: node scripts/prepare.cjs
+
+gates:
+  - { id: build, run: node gates/build.cjs }
+
+services:
+  app:
+    run: node app/server.cjs {{PORT:app}}
+    port: {{PORT:app}}
+    ready:
+      url: http://127.0.0.1:{{PORT:app}}/health
+      timeoutSec: 30
+
+data:
+  reset: node commands/reset.cjs
+
+observations:
+  version:
+    run: node commands/version.cjs
+
+# THE KEY THIS FIXTURE EXISTS FOR (story 7.4). One pattern, as a string; the
+# loader compiles it and it is applied to every occurrence without a `g` flag.
+redaction:
+  extraPatterns:
+    - 'wombat-[a-z0-9]+'

@@ -152,13 +152,12 @@ export interface AdaptationDeps {
   /**
    * The run's redaction options (AD-10), forwarded to the shared prompt assembly.
    *
-   * OPTIONAL AND CURRENTLY UNSET BY ITS CALLER, which is worth stating rather than leaving
-   * for a reader to discover. `src/pipeline/stages/probes.ts` already redacts every
-   * candidate field WITH the run's options before building one, so the config-declared
-   * extra patterns do reach this flow's content — they simply arrive already applied. This
-   * seam exists so the builder's own pass uses the same options rather than only the
-   * built-in patterns, which matters the moment anything constructs a candidate by another
-   * route. Story 6.8; wiring it at the edge is not that story's scope.
+   * Set by `verify --adapt` from the loaded `config.redaction` since story 7.4 (the
+   * project's `redaction.extraPatterns`). `src/pipeline/stages/probes.ts` also redacts every
+   * candidate field with the same options before building one, so the patterns reach this
+   * flow's content twice; the builder's own pass is defence in depth, which matters the moment
+   * anything constructs a candidate by another route. Story 6.8 added the seam; story 7.4 fed
+   * both halves, which until then each received `undefined` in production.
    */
   readonly redaction?: RedactionOptions;
 }
