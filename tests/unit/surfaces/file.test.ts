@@ -485,6 +485,26 @@ describe('comment stripping reads code, not comment-shaped text inside code', ()
     expect(await count('a/* x */b\n', 'ab')).toBe('0');
   });
 
+  it('tracks ${} nesting, so a template inside an interpolation cannot end the outer one', async () => {
+    // Raised by the codex review of this branch, and it was right: the inner backtick used to
+    // end the outer template, the rest of the line was then read as a `//` comment, and the
+    // code after it vanished from the count — an UNDERcount, the direction that passes.
+    expect(await count('const s = `${`http://x`}`; forbidden();\n', 'forbidden()')).toBe('1');
+  });
+
+  it('strips a comment inside an interpolation, and keeps an object literal inside one', async () => {
+    expect(await count('const s = `a ${ x /* "__key" */ } b`;\n', '"__key"')).toBe('0');
+    expect(await count('const s = `${ {a: 1}.a } // "__key"`;\n', '"__key"')).toBe('1');
+  });
+
+  it('refuses an unterminated template literal as an execError rather than guessing where it ends', async () => {
+    await tree({ 'src/a.ts': 'const t = `never closed "__key";\n' });
+    const { attempt } = await run(
+      probe({ path: 'src/a.ts' }, { target: { source: 'occurrences', text: '"__key"', ignoreComments: 'c-like' }, expected: '0' }),
+    );
+    expect(attempt.execError?.message).toMatch(/unterminated template literal/);
+  });
+
   it('refuses an unterminated block comment as an execError rather than guessing where it ends', async () => {
     await tree({ 'src/a.ts': 'const k = "__key"; /* never closed\n' });
     const { attempt } = await run(

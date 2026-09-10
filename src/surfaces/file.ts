@@ -923,6 +923,10 @@ function scanRegex(text: string, start: number): number {
   return -1;
 }
 
+type Stripped =
+  | { readonly ok: true; readonly text: string }
+  | { readonly ok: false; readonly line: number; readonly what: string };
+
 /**
  * Blanks `//` and `/* *\/` comments with spaces, keeping every newline, for `c-like` source.
  *
@@ -933,20 +937,73 @@ function scanRegex(text: string, start: number): number {
  * So strings, template literals and regex literals are recognised and kept. Comments become
  * SPACES rather than nothing, so `a/* x *\/b` cannot turn into a match for `ab`.
  *
- * Where it is uncertain it errs toward KEEPING text, which can only over-count — a FAIL a
- * reader can check, never a silent pass. The one case with no safe reading, an unterminated
- * block comment, is refused (`ok: false`). Known limit, stated: `${}` interpolation inside a
- * template literal is not tracked, so a backtick inside one ends the literal early.
+ * TEMPLATE LITERALS NEST, and the lexer tracks it: `${` opens code inside a template, that
+ * code can hold strings, comments, object literals and further templates, and only the `}`
+ * that balances it returns to the template. The first version did not, and the codex review
+ * of this branch showed what that cost: in `` `${`http://x`}`; forbidden(); `` the inner
+ * backtick ended the outer template, the `//` became a comment, and `forbidden()` was hidden
+ * — an undercount, which is the direction that passes over unmet work.
+ *
+ * Where no safe reading exists — an unterminated block comment, template literal or
+ * interpolation — the file is refused (`ok: false`), which becomes an execError. Guessing
+ * where a construct ends is how code disappears from a count. A quote that is not closed by
+ * the end of its LINE ends there, as it does in every c-like language, which can only keep
+ * text and so only over-count.
  */
-function stripCLikeComments(
-  text: string,
-): { readonly ok: true; readonly text: string } | { readonly ok: false; readonly line: number } {
+function stripCLikeComments(text: string): Stripped {
   const out: string[] = [];
+  // One entry per open `${`: the brace depth of the code that was interrupted, so the `}`
+  // closing the interpolation can be told from the `}` closing an object literal inside it.
+  const interpolations: number[] = [];
+  let depth = 0;
   let index = 0;
   let previous = '';
   let word = '';
 
   const blank = (chunk: string): string => chunk.replace(/[^\n]/g, ' ');
+  const lineAt = (at: number): number => text.slice(0, at).split('\n').length;
+
+  /**
+   * Copies template text from `from` (just past a backtick or an interpolation's `}`) up to
+   * and including the closing backtick or the next `${`. `undefined` when the file ends first.
+   */
+  const templateText = (from: number): { readonly end: number; readonly opens: boolean } | undefined => {
+    let at = from;
+    while (at < text.length) {
+      const char = text.charAt(at);
+      if (char === '\\') {
+        at += 2;
+        continue;
+      }
+      if (char === '`') {
+        return { end: at + 1, opens: false };
+      }
+      if (char === '$' && text.charAt(at + 1) === '{') {
+        return { end: at + 2, opens: true };
+      }
+      at += 1;
+    }
+    return undefined;
+  };
+
+  /** Consumes template text starting at `start`; returns a refusal when it never ends. */
+  const inTemplate = (start: number): Stripped | undefined => {
+    const scanned = templateText(start + 1);
+    if (scanned === undefined) {
+      return { ok: false, line: lineAt(start), what: 'template literal' };
+    }
+    out.push(text.slice(start, scanned.end));
+    index = scanned.end;
+    word = '';
+    if (scanned.opens) {
+      interpolations.push(depth);
+      depth = 0;
+      previous = '{';
+    } else {
+      previous = '`';
+    }
+    return undefined;
+  };
 
   while (index < text.length) {
     const char = text.charAt(index);
@@ -965,20 +1022,44 @@ function stripCLikeComments(
     if (char === '/' && next === '*') {
       const close = text.indexOf('*/', index + 2);
       if (close === -1) {
-        return { ok: false, line: text.slice(0, index).split('\n').length };
+        return { ok: false, line: lineAt(index), what: 'block comment' };
       }
       out.push(blank(text.slice(index, close + 2)));
       index = close + 2;
       continue;
     }
 
-    if (char === '"' || char === "'" || char === '`') {
-      const end = scanQuoted(text, index, char, char !== '`');
+    if (char === '"' || char === "'") {
+      const end = scanQuoted(text, index, char, true);
       out.push(text.slice(index, end));
       previous = char;
       word = '';
       index = end;
       continue;
+    }
+
+    if (char === '`') {
+      const refused = inTemplate(index);
+      if (refused !== undefined) {
+        return refused;
+      }
+      continue;
+    }
+
+    if (char === '}' && depth === 0 && interpolations.length > 0) {
+      // This `}` closes an interpolation: back into the template it interrupted.
+      depth = interpolations.pop() as number;
+      const refused = inTemplate(index);
+      if (refused !== undefined) {
+        return refused;
+      }
+      continue;
+    }
+
+    if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth = Math.max(0, depth - 1);
     }
 
     if (char === '/') {
@@ -1007,6 +1088,9 @@ function stripCLikeComments(
     index += 1;
   }
 
+  if (interpolations.length > 0) {
+    return { ok: false, line: lineAt(text.length), what: 'template literal' };
+  }
   return { ok: true, text: out.join('') };
 }
 
@@ -1176,7 +1260,7 @@ export class FileSurfaceExecutor implements SurfaceExecutor {
     const stripped = stripCLikeComments(text);
     if (!stripped.ok) {
       throw new Unreadable(
-        `'${entry.rel}' has an unterminated block comment (line ${stripped.line}), so its ` +
+        `'${entry.rel}' has an unterminated ${stripped.what} (line ${stripped.line}), so its ` +
           'comments cannot be told from its code',
         "fix the file, or drop 'ignoreComments' from this probe",
       );
