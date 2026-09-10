@@ -1,0 +1,23 @@
+# SpecWitness Project Config for the corpus fixture `file-surface-path-escape`.
+#
+# ⚠️ THIS FILE DECLARES A COMMAND THAT WILL BE EXECUTED (AD-3), and it is the
+# whole mechanism of the fixture, so it is stated plainly: `setup.install` runs
+# `node setup/link-outside.cjs` inside the verification worktree, and that script
+# does exactly one thing — it creates the symbolic link `docs/handbook.md`
+# pointing two directories UP, out of the worktree. It reads nothing, fetches
+# nothing and writes nothing else.
+#
+# WHY THE LINK IS MADE AT SETUP RATHER THAN COMMITTED. A branch under
+# verification can commit a symlink, and git will check it out; that is the real
+# threat. But the corpus runner refuses a symlink inside a fixture — rightly, it
+# would be copied into the executable project and skipped by every hermeticity
+# scan. So the link is created in the WORKTREE, after checkout and before the
+# probes, which is the same tree state a committed link would produce.
+
+version: 1
+
+project:
+  baseBranch: master
+
+setup:
+  install: node setup/link-outside.cjs

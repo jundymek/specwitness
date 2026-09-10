@@ -484,7 +484,7 @@ function readParams(request: ProbeRequest): ObservationParams {
 /* ── JSON reading ────────────────────────────────────────────────────────────────────── */
 
 /** A value read out of a snapshot: present with a rendered string, or absent. */
-type Read = { readonly found: true; readonly value: string } | { readonly found: false };
+export type Read = { readonly found: true; readonly value: string } | { readonly found: false };
 
 const ABSENT = 'absent';
 
@@ -525,8 +525,12 @@ function render(value: unknown): string {
  * throw. That absence is the single most important behaviour in this function: defaulting a
  * missing count to `0` makes `0 - 0 == 0` satisfy a delta assertion, reporting a green
  * criterion for a command that produced nothing.
+ *
+ * EXPORTED FOR THE `file` SURFACE (story 7.8), and only exported: the behaviour is unchanged.
+ * A plan's `jsonPath` and its comparisons must mean one thing on every surface that reads
+ * them, and a second copy in `file.ts` would be the second dialect.
  */
-function readPath(root: unknown, path: string): Read {
+export function readPath(root: unknown, path: string): Read {
   const trimmed = path.trim();
   const body = trimmed.startsWith('$') ? trimmed.slice(1) : trimmed;
 
@@ -606,8 +610,16 @@ function numeric(text: string): number | undefined {
  * A numeric comparison whose operands do not both parse is UNSATISFIED, never a crash —
  * `ASSERTION_COMPARISONS` states exactly that: "both sides must parse as finite numbers,
  * and an actual value that does not is an unsatisfied assertion, never a crash."
+ *
+ * EXPORTED FOR THE `file` SURFACE (story 7.8), and only exported: the behaviour is unchanged.
+ * A plan's `jsonPath` and its comparisons must mean one thing on every surface that reads
+ * them, and a second copy in `file.ts` would be the second dialect.
  */
-function compare(comparison: AssertionComparison, actual: string, expected: string): boolean {
+export function compare(
+  comparison: AssertionComparison,
+  actual: string,
+  expected: string,
+): boolean {
   switch (comparison) {
     case 'equals':
       return actual === expected;
@@ -730,7 +742,8 @@ function observedAnything(result: ProcessResult): boolean {
 /** Budget for each id-derived portion, in characters. Generous next to a real id. */
 const SLUG_MAX_CHARS = 48;
 
-function slugify(id: string): string {
+/** Exported for the `file` surface's evidence stems (story 7.8); behaviour unchanged. */
+export function slugify(id: string): string {
   const substituted = id
     .replace(/[^A-Za-z0-9._-]+/g, '-')
     .replace(/-{2,}/g, '-')
@@ -806,7 +819,7 @@ function slugify(id: string): string {
  * `slugify` substitutes everything outside `[A-Za-z0-9._-]`, so every byte is single-byte by
  * construction and bytes equal characters — the assumption that would otherwise break this sum.
  */
-function discriminator(criterionId: string, probeId: string): string {
+export function discriminator(criterionId: string, probeId: string): string {
   // The separator is a character `Identifier` forbids, so the concatenation is unambiguous.
   return createHash('sha256').update(`${criterionId} ${probeId}`, 'utf8').digest('hex');
 }

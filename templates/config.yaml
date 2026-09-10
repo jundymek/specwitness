@@ -68,6 +68,78 @@ project:
 # observations:
 #   company-count: { run: ./scripts/specwitness/company-count.sh }
 
+# ── Checking files, without writing any code ────────────────────────────────
+#
+# Many acceptance criteria are facts about the repository itself: a document
+# exists, a README mentions something, a package.json script is declared, a
+# forbidden spelling is gone from the source. For those you need NOTHING in
+# this file — no command and no script. A `file` probe reads the checked-out
+# tree directly, runs nothing, and cannot read outside the repository.
+#
+# File probes live in the PLAN (.specwitness/plans/<epic>.yaml), which
+# `specwitness plan <epic>` writes for you. The examples below are what they
+# look like, so you can read the plan it wrote, correct a probe, or add one by
+# hand: copy one under a criterion's `probes:` list, uncomment it and edit it.
+#
+#   - id: changelog-records-release
+#     surface: file
+#     mechanics:
+#       path: CHANGELOG.md                  # relative to the repository root
+#     assertions:
+#       - description: the changelog exists
+#         target: { source: exists }        # reads "true" or "false"
+#         comparison: equals
+#         expected: "true"
+#       - description: it records this release
+#         target: { source: content }       # the text of ONE file
+#         comparison: contains
+#         expected: "## 1.2.0"
+#
+#   - id: design-note-present               # a document ANYWHERE under docs/
+#     surface: file
+#     mechanics:
+#       path: "docs/**/*.md"                # ** = any depth; * and ? within a name
+#     assertions:
+#       - description: some document covers both the cache and its eviction policy
+#         target: { source: filesContaining, texts: [cache, eviction], ignoreCase: true }
+#         comparison: greaterThan
+#         expected: "0"
+#
+#   - id: default-tests-stay-fast           # a value inside a JSON file
+#     surface: file
+#     mechanics:
+#       path: package.json
+#     assertions:
+#       - description: the default test command does not start the browser suite
+#         target: { source: jsonPath, path: $.scripts.test }
+#         comparison: notContains
+#         expected: playwright
+#
+#   - id: no-hardcoded-handle               # count a literal, ignoring comments
+#     surface: file
+#     mechanics:
+#       path: "src/**/*.ts"
+#       exclude: [src/handle.ts, "src/**/*.test.ts"]  # the definition, and the test forbidding it
+#     assertions:
+#       - description: no source file spells the handle key in code, in any quote style
+#         target: { source: occurrences, text: __handle, ignoreComments: c-like }
+#         comparison: equals
+#         expected: "0"
+#
+# Count the bare name, never one quoted spelling of it: a census of "__handle"
+# passes over '__handle' and `__handle`. Exclude the file that defines the
+# name and the test that forbids it, and let ignoreComments drop the rest.
+#
+# The other read is `fileCount`: how many files a path or glob matched.
+#
+# When the path is missing, `exists` reads "false" and `fileCount` reads "0" —
+# values you can compare. Every other read (`content`, `jsonPath`,
+# `occurrences`, `filesContaining`) is simply NOT MET, even with `notContains`
+# or `equals "0"`: text that does not exist satisfies nothing. Matching is
+# literal, never a regular expression. A file probe tells you what the files
+# SAY, not what the software DOES — for behaviour, use an http, browser or
+# observation probe.
+
 # Bounded retries per probe class, for environments that are genuinely flaky.
 # EVERY SURFACE DEFAULTS TO 0 and the whole block is optional, because a run
 # must be deterministic unless you asked otherwise. A probe that fails and then
@@ -80,6 +152,7 @@ project:
 #   browser: 0
 #   observation: 0
 #   shell: 0
+#   file: 0          # reading the tree is deterministic; a retry changes nothing
 
 # Local AI CLIs used to AUTHOR verification artifacts. Verdicts are always
 # computed mechanically — no model is ever asked whether your epic passes.

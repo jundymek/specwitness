@@ -36,6 +36,15 @@
  *     natural thing for a model to do and the resulting plan would silently verify less
  *     than the contract requires.
  *
+ *  5. **THE FILE SURFACE IS NAMED WITH ITS LIMIT, NOT JUST ITS EXISTENCE** (story 7.8,
+ *     ADR-009). A `file` probe is the cheapest probe there is to write, and ADR-009 records
+ *     the cost that follows: it is also the cheapest way to write a probe that passes over
+ *     unmet work. So the prompt says what it can decide (what the tree CONTAINS) and what it
+ *     cannot (what the software DOES, and whether a document EXPLAINS something), and it
+ *     says so in the fixed head, before the contract, where no bound can reach it. Property
+ *     4 is left word for word: a cheap probe is not a reason to stop handing a criterion to
+ *     a human.
+ *
  * Pure and deterministic: same contract and same declared ids, same prompt. AD-1 —
  * application layer, imports domain only.
  */
@@ -94,11 +103,30 @@ export function buildPlanPrompt(
     '                around another probe in the same criterion.',
     '- shell       — a DECLARED COMMAND whose exit code and output you assert on.',
     '- browser     — a scripted browser interaction. Expensive and slow.',
+    '- file        — reads the CHECKED-OUT TREE under verification: whether a path exists,',
+    '                what one file says, a value in one JSON file, or how often a literal',
+    '                text occurs across files. It runs no command and needs no declared id.',
     '',
     'CHOOSE THE LOWEST ADEQUATE SURFACE. If a criterion can be checked over HTTP, compile an',
     'http probe — NOT a browser probe. Use browser only when the criterion is genuinely',
     'about what a user sees or does in a page and nothing cheaper can decide it. A browser',
     'probe where an http probe would do is a wrong answer even when it passes.',
+    '',
+    'A FILE PROBE ANSWERS WHAT THE TREE CONTAINS, NEVER WHAT THE SOFTWARE DOES.',
+    '',
+    'Use file only when the criterion is itself about the static content of the repository:',
+    'a document exists, a configuration value is set, a script is declared, a forbidden',
+    'spelling is absent from the source code. Never use it to decide a criterion about behaviour:',
+    'finding "200" in a route handler does not show that the endpoint answers 200 - an http',
+    'probe does. A phrase in a document is a NECESSARY condition for that document explaining',
+    'something, and never proof that it does. A criterion asking whether a document explains,',
+    'justifies or describes something is a judgement: carry it as needs-human with reason',
+    '"not-safely-automatable" unless the criterion asks only that the document exist or',
+    'mention the subject. That a file probe is cheap to write does not make it adequate.',
+    '',
+    'A file path is written relative to the repository root with "/" separators, and "**"',
+    'matches any depth, for example "docs/**/*.md". Never ".." and never an absolute path -',
+    'they are rejected.',
     '',
     'COMMANDS AND SERVICES ARE REFERENCED BY ID, NEVER BY COMMAND LINE.',
     '',

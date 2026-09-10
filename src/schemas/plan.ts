@@ -95,6 +95,8 @@ import {
   type Assertion,
   type BrowserAssertionTarget,
   type DataBinding,
+  FILE_COMMENT_SYNTAXES,
+  type FileAssertionTarget,
   type HttpAssertionTarget,
   type ObservationAssertionTarget,
   type Plan,
@@ -102,6 +104,7 @@ import {
   type ProbeSpec,
   type ShellAssertionTarget,
 } from '../domain/plan.js';
+import { isTreeGlob, treePatternProblem } from '../domain/tree-path.js';
 import { schemaVersionFor } from './versions.js';
 
 /** Current plan schema version, from the AD-5 registry. */
@@ -433,6 +436,110 @@ const ShellProbeSchema = z
   });
 
 /**
+ * A path or glob inside the worktree — story 7.8, ADR-009 §3.
+ *
+ * The grammar is `domain/tree-path.ts`'s, not restated here, because the executor refuses
+ * with the same function at run time and two definitions of "a legal path" is how the
+ * schema and the executor would come to disagree.
+ */
+const TreePattern = z.string().superRefine((value, ctx) => {
+  const problem = treePatternProblem(value);
+  if (problem !== undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      message: `must be a path inside the repository, relative to its root: this one ${problem}`,
+    });
+  }
+});
+
+/**
+ * A LITERAL text a file read counts or looks for. Never a pattern — see `FileAssertionTarget`.
+ *
+ * Non-empty, because the empty string occurs everywhere and a count of it measures nothing.
+ * NUL refused, since no text file carries one. Newlines are allowed: after CRLF is folded to
+ * LF, `"## Context\n"` is a meaningful thing for a document to contain.
+ */
+const FileText = z
+  .string()
+  .min(1, { message: 'must not be empty — the empty text occurs everywhere and measures nothing' })
+  .max(4096)
+  .regex(/^[^\u0000]*$/, { message: 'must not contain a NUL byte' });
+
+const FileCommentSyntaxSchema = z.enum(FILE_COMMENT_SYNTAXES);
+
+const FileAssertionTargetSchema = z.discriminatedUnion('source', [
+  z.strictObject({ source: z.literal('exists') }),
+  z.strictObject({ source: z.literal('fileCount') }),
+  z.strictObject({
+    source: z.literal('content'),
+    ignoreCase: z.boolean().optional(),
+    ignoreComments: FileCommentSyntaxSchema.optional(),
+  }),
+  z.strictObject({ source: z.literal('jsonPath'), path: Prose }),
+  z.strictObject({
+    source: z.literal('occurrences'),
+    text: FileText,
+    ignoreCase: z.boolean().optional(),
+    ignoreComments: FileCommentSyntaxSchema.optional(),
+  }),
+  z.strictObject({
+    source: z.literal('filesContaining'),
+    texts: z.array(FileText).min(1).max(20),
+    ignoreCase: z.boolean().optional(),
+    ignoreComments: FileCommentSyntaxSchema.optional(),
+  }),
+]);
+
+/**
+ * The fifth probe surface (story 7.8, ADR-009): a reader of the checked-out tree.
+ *
+ * **Nowhere in this shape can a command live**, and there is no id that resolves to one —
+ * the module header's first property holds for this surface by having nothing to hold. What
+ * a hostile draft could still reach for is a path outside the worktree, and `TreePattern`
+ * refuses every spelling of one the TEXT can carry. A symlink is the spelling it cannot
+ * see; `src/surfaces/file.ts` refuses that one.
+ */
+const FileProbeSchema = z
+  .strictObject({
+    id: Identifier,
+    surface: z.literal('file'),
+    mechanics: z.strictObject({
+      path: TreePattern,
+      exclude: z.array(TreePattern).max(50).optional(),
+    }),
+    assertions: assertions(FileAssertionTargetSchema),
+  })
+  .superRefine((probe, ctx) => {
+    // THE READ AND THE PATH ARE ONE FACT, so they must agree — the same move as the
+    // observation's phase/wrap pairing above. `content` and `jsonPath` read ONE file; over a
+    // glob they would have to pick one silently, and whichever they picked, the plan's
+    // reviewer would not know which file had been judged.
+    const glob = isTreeGlob(probe.mechanics.path);
+
+    if (!glob && probe.mechanics.exclude !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['mechanics', 'exclude'],
+        message: `exclusions apply to a glob, and '${probe.mechanics.path}' names one path — there is nothing to exclude from it`,
+      });
+    }
+
+    if (!glob) {
+      return;
+    }
+    probe.assertions.forEach((assertion, index) => {
+      const { source } = assertion.target;
+      if (source === 'content' || source === 'jsonPath') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['assertions', index, 'target', 'source'],
+          message: `'${source}' reads exactly one file, but '${probe.mechanics.path}' is a glob — name the file, or read many with 'occurrences' or 'filesContaining'`,
+        });
+      }
+    });
+  });
+
+/**
  * The CLOSED probe union (AD-3, AD-13), discriminated by `surface`.
  *
  * `tests/unit/schemas/plan-surfaces.test.ts` pins this list against the merged
@@ -444,6 +551,8 @@ const ProbeSchema = z.discriminatedUnion('surface', [
   BrowserProbeSchema,
   ObservationProbeSchema,
   ShellProbeSchema,
+  // ADR-009 (story 7.8) is the ADR this union's doc comment requires for a widening.
+  FileProbeSchema,
 ]);
 
 /* ── criteria ───────────────────────────────────────────────────────────────────────── */
@@ -823,7 +932,11 @@ function orderedProbe(probe: ProbeSpec): Record<string, unknown> {
     assertions: probe.assertions.map((assertion) =>
       orderedAssertion(
         assertion as Assertion<
-          HttpAssertionTarget | BrowserAssertionTarget | ObservationAssertionTarget | ShellAssertionTarget
+          | HttpAssertionTarget
+          | BrowserAssertionTarget
+          | ObservationAssertionTarget
+          | ShellAssertionTarget
+          | FileAssertionTarget
         >,
       ),
     ),
@@ -855,6 +968,11 @@ function orderedProbe(probe: ProbeSpec): Record<string, unknown> {
         commandId: probe.mechanics.commandId,
         args: [...probe.mechanics.args],
         argumentAllowlist: [...probe.mechanics.argumentAllowlist],
+      });
+    case 'file':
+      return tail({
+        path: probe.mechanics.path,
+        exclude: probe.mechanics.exclude === undefined ? undefined : [...probe.mechanics.exclude],
       });
     default: {
       // Compile-time exhaustiveness: a surface added to the union must be given a
@@ -1056,6 +1174,11 @@ export function planDraftSchemaFor(
           if (!commands.has(probe.mechanics.commandId)) {
             unknown('commandId', probe.mechanics.commandId, 'observation', declared.commandIds);
           }
+          break;
+        case 'file':
+          // Nothing to check, and that is the surface's whole design (ADR-009 §2): a file
+          // probe names a path, never a declared id. Its path is refused by `TreePattern`
+          // above, which the persisted schema and this draft schema share.
           break;
         default: {
           const unreachable: never = probe;

@@ -11,6 +11,7 @@ import {
 import { PlanSchema } from '../../../src/schemas/plan.js';
 import {
   BROWSER_PROBE,
+  FILE_PROBE,
   HTTP_PROBE,
   OBSERVATION_PROBE,
   SHELL_PROBE,
@@ -61,6 +62,7 @@ describe('the probe union agrees with AD-13’s PROBE_SURFACES (run time)', () =
     browser: BROWSER_PROBE,
     observation: OBSERVATION_PROBE,
     shell: SHELL_PROBE,
+    file: FILE_PROBE,
   };
 
   const CONTRACT = frozenContract([criterion('E7-01')]);
@@ -76,11 +78,12 @@ describe('the probe union agrees with AD-13’s PROBE_SURFACES (run time)', () =
   });
 
   it('has exactly one representative probe per declared surface', () => {
-    // Guards against this file passing because it looked at nothing: if a fifth surface is
+    // Guards against this file passing because it looked at nothing: if a sixth surface is
     // added and no probe is written for it, `PROBES` stops compiling — and if a probe is
-    // added for a surface that is not declared, this count disagrees.
+    // added for a surface that is not declared, this count disagrees. The fifth, `file`,
+    // arrived with ADR-009 (story 7.8).
     expect(Object.keys(PROBES).sort()).toEqual([...PROBE_SURFACES].sort());
-    expect(PROBE_SURFACES).toHaveLength(4);
+    expect(PROBE_SURFACES).toHaveLength(5);
   });
 
   it('rejects a probe naming a surface outside the closed union', () => {

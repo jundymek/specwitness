@@ -1,0 +1,17 @@
+{
+  "expectedVersion": 1,
+  "fixture": "file-surface-path-escape",
+  "why": "Story 7.8 / ADR-009 §3, AC2 and AC7: a file probe never reads outside the tree under verification, and when the tree tries to make it, the answer is an InfraError at exit 3 -- never PASS and never FAIL. The plan is innocent: it names docs/handbook.md, which the plan schema accepts because nothing in the TEXT leaves the repository. What escapes is the tree: the branch's setup step makes docs/handbook.md a symbolic link to '../..', the directory containing the worktree. That is the one spelling of a path escape the schema structurally cannot see, and the executor must: it resolves the link, finds it lands outside the worktree root, and refuses before reading a byte. A surface that followed the link would read the machine running verification and adjudicate on it, which is the door ADR-009 says this surface must not reopen from the other side; a surface that treated the escape as an absence would report FAIL (exists expected 'true'), blaming the branch for something SpecWitness declined to do. So exitCode 3 and outcome infraError. 'criteria' is exact-and-empty for the reason fixture 08 gives: an InfraError breaks the stage loop, the aggregate stage never runs, and no criterion result is materialised -- a criterion appearing here would mean the pipeline kept going after refusing to read. The link is created by setup.install rather than committed because the corpus runner rightly refuses a symlink inside a fixture; the worktree the probe reads is in the same state a committed link would leave it.",
+  "proves": ["AC2", "AC7", "ADR-009", "AD-3", "ADR-002", "AD-6", "NFR-10", "AD-12"],
+  "command": ["verify", "epic-1", "--json"],
+  "exitCode": 3,
+  "outcome": { "infraError": "infra" },
+  "criteria": {
+    "assertion": "exact",
+    "statuses": {}
+  },
+  "stderrContains": [
+    "\"docs/handbook.md\" is a symbolic link that resolves outside the verification worktree, so it was not read"
+  ],
+  "stderrAbsent": ["FAIL"]
+}

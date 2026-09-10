@@ -1,0 +1,40 @@
+# Hand-written Verification Plan for the corpus fixture `file-surface-path-escape`.
+#
+# The plan is innocent: it names `docs/handbook.md`, a path inside the
+# repository that the schema accepts. What escapes is the TREE — the branch
+# under verification has made that path a symbolic link out of the worktree —
+# which is exactly the case only the executor can see. `contract.fingerprint`
+# repeats the frozen contract's.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: da03abd9400bf61eca0946e9947f30239de1e2042df781982368e5aa80a0300d
+  data:
+    seed: corpusseed000080
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: handbook-published
+          surface: file
+          mechanics:
+            path: docs/handbook.md
+          assertions:
+            - description: the handbook exists
+              target: { source: exists }
+              comparison: equals
+              expected: "true"
+            - description: and is the operator handbook
+              target: { source: content }
+              comparison: contains
+              expected: Handbook
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-10T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

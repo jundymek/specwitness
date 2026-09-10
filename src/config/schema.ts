@@ -222,6 +222,10 @@ const retriesShape: Record<ProbeSurface, typeof retryCount> = {
   browser: retryCount,
   observation: retryCount,
   shell: retryCount,
+  // Story 7.8. A file read is deterministic, so retrying one changes nothing — but the
+  // record is exhaustive by construction, and a surface a project cannot name here would be
+  // the one exception to a rule stated for every surface.
+  file: retryCount,
 };
 
 const retriesSchema = z.strictObject(retriesShape);

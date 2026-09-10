@@ -68,10 +68,10 @@ describe('retries: — the default (AD-9, Q43)', () => {
 
   it('reads a declared value for each surface independently', () => {
     const config = loadBody(
-      `${MINIMAL}retries:\n  http: 1\n  browser: 2\n  observation: 0\n  shell: 3\n`,
+      `${MINIMAL}retries:\n  http: 1\n  browser: 2\n  observation: 0\n  shell: 3\n  file: 4\n`,
     )
 
-    expect(config.retries).toEqual({ http: 1, browser: 2, observation: 0, shell: 3 })
+    expect(config.retries).toEqual({ http: 1, browser: 2, observation: 0, shell: 3, file: 4 })
   })
 
   it('accepts the ceiling itself — the bound is inclusive', () => {

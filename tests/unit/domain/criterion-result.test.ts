@@ -34,8 +34,8 @@ function attempt(overrides: Partial<ProbeAttempt> = {}): ProbeAttempt {
 }
 
 describe('PROBE_SURFACES', () => {
-  it('is the four AD-13 surfaces', () => {
-    expect([...PROBE_SURFACES]).toEqual(['http', 'browser', 'observation', 'shell']);
+  it('is the five AD-13 surfaces — file joined with ADR-009 (story 7.8)', () => {
+    expect([...PROBE_SURFACES]).toEqual(['http', 'browser', 'observation', 'shell', 'file']);
   });
 });
 

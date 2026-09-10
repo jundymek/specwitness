@@ -1,0 +1,7 @@
+{
+  "name": "@gitnebula/cli",
+  "private": true,
+  "scripts": {
+    "test": "vitest run"
+  }
+}

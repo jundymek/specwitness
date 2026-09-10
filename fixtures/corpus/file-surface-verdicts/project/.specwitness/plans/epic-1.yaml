@@ -1,0 +1,110 @@
+# Hand-written Verification Plan for the corpus fixture `file-surface-verdicts`.
+#
+# Every probe is a `file` probe (story 7.8). The plan asks what the contract
+# requires; the APPLICATION beside it is what carries the defects (no changelog,
+# no migration guide, a module spelling the handle key in code).
+# `contract.fingerprint` repeats the frozen contract's.
+plan:
+  epic: epic-1
+  contract:
+    version: 1
+    fingerprint: f2a7c6f20abd8375f4b8819202c4e671a25816a25dec68fb4e271247f596278f
+  data:
+    seed: corpusseed000079
+    bindings: []
+  criteria:
+    - criterionId: E1-01
+      disposition: automated
+      probes:
+        - id: readme-present
+          surface: file
+          mechanics:
+            path: README.md
+          assertions:
+            - description: the README exists
+              target: { source: exists }
+              comparison: equals
+              expected: "true"
+    - criterionId: E1-02
+      disposition: automated
+      probes:
+        - id: changelog-present
+          surface: file
+          mechanics:
+            path: CHANGELOG.md
+          assertions:
+            - description: the changelog exists
+              target: { source: exists }
+              comparison: equals
+              expected: "true"
+    - criterionId: E1-03
+      disposition: automated
+      probes:
+        - id: readme-installation
+          surface: file
+          mechanics:
+            path: README.md
+          assertions:
+            - description: the README has an installation section
+              target: { source: content }
+              comparison: contains
+              expected: "## Installation"
+    - criterionId: E1-04
+      disposition: automated
+      probes:
+        - id: migration-guide-finished
+          surface: file
+          mechanics:
+            path: docs/MIGRATION.md
+          assertions:
+            - description: the migration guide carries no TODO marker
+              target: { source: content }
+              comparison: notContains
+              expected: TODO
+    - criterionId: E1-05
+      disposition: automated
+      probes:
+        - id: legacy-config-removed
+          surface: file
+          mechanics:
+            path: legacy/settings.ini
+          assertions:
+            - description: the legacy configuration file is gone
+              target: { source: exists }
+              comparison: equals
+              expected: "false"
+    # The census counts the BARE name with comments stripped and the defining module
+    # excluded, so every quote style in code is caught and none in a comment is.
+    - criterionId: E1-06
+      disposition: automated
+      probes:
+        - id: handle-key-census
+          surface: file
+          mechanics:
+            path: src/**/*.ts
+            exclude: [src/handle.ts]
+          assertions:
+            - description: no source outside the defining module spells the handle key in code
+              target: { source: occurrences, text: __handle, ignoreComments: c-like }
+              comparison: equals
+              expected: "0"
+    - criterionId: E1-07
+      disposition: automated
+      probes:
+        - id: clean-module-census
+          surface: file
+          mechanics:
+            path: src/clean.ts
+          assertions:
+            - description: the clean module spells the handle key only in comments
+              target: { source: occurrences, text: __handle, ignoreComments: c-like }
+              comparison: equals
+              expected: "0"
+meta:
+  schemaVersion: 1
+  compiledAt: 2026-09-10T09:30:00.000Z
+  provenance:
+    provider: null
+    model: null
+    providerCliVersion: null
+    generatedAt: null

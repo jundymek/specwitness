@@ -134,6 +134,32 @@ export const BROWSER_PROBE = {
   ],
 } satisfies ProbeSpec;
 
+/**
+ * Story 7.8's representative `file` probe: a document that must exist and say something.
+ *
+ * Reads the verification worktree only — no service, no command id — which is the whole
+ * point of the surface (ADR-009 §2).
+ */
+export const FILE_PROBE = {
+  id: 'changelog-present',
+  surface: 'file',
+  mechanics: { path: 'CHANGELOG.md' },
+  assertions: [
+    {
+      description: 'the changelog exists',
+      target: { source: 'exists' },
+      comparison: 'equals',
+      expected: 'true',
+    },
+    {
+      description: 'the changelog records this release',
+      target: { source: 'content' },
+      comparison: 'contains',
+      expected: '## 1.2.0',
+    },
+  ],
+} satisfies ProbeSpec;
+
 export function automated(criterionId: string, ...probes: readonly ProbeSpec[]): PlanCriterion {
   return {
     criterionId,

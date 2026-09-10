@@ -68,6 +68,7 @@ import {
 import { resolveServiceBaseUrl } from '../../pipeline/stages/services.js';
 import type { ProbeDispatch, ProbeDispatcher, RetryPolicy } from '../../pipeline/stages/probes.js';
 import { BrowserSurfaceExecutor } from '../../surfaces/browser.js';
+import { FileSurfaceExecutor } from '../../surfaces/file.js';
 import type { BrowserRuntimeEnvironment } from '../../surfaces/browser.js';
 import { HttpSurfaceExecutor } from '../../surfaces/http.js';
 import { ObservationSurfaceExecutor } from '../../surfaces/observation.js';
@@ -256,8 +257,18 @@ export function createProbeDispatcher(deps: ProbeDispatchDeps): ProbeDispatcher 
           },
         };
 
+      case 'file':
+        // Story 7.8 (ADR-009). The one arm with NO runner and NO resolution. A file probe
+        // names no service and no command id, so this composition root has nothing to look
+        // up — only the worktree to read, which is `cwd`. `runner` is deliberately not
+        // passed, and `FileExecutorDeps` has no field that could take one.
+        return {
+          executor: new FileSurfaceExecutor({ clock: deps.clock, root: cwd, ...evidence }),
+          params: { ...probe, attempt },
+        };
+
       default: {
-        // Compile-time exhaustiveness: a fifth surface must be routed here rather than
+        // Compile-time exhaustiveness: a sixth surface must be routed here rather than
         // falling through to a probe that runs nothing and reports nothing.
         const unreachable: never = probe;
         return unreachable;
