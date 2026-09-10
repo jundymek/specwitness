@@ -119,12 +119,16 @@ project:
 #     surface: file
 #     mechanics:
 #       path: "src/**/*.ts"
-#       exclude: ["src/**/*.test.ts"]       # e.g. the test that forbids the spelling
+#       exclude: [src/handle.ts, "src/**/*.test.ts"]  # the definition, and the test forbidding it
 #     assertions:
-#       - description: no source file spells the handle key literally
-#         target: { source: occurrences, text: '"__handle"', ignoreComments: c-like }
+#       - description: no source file spells the handle key in code, in any quote style
+#         target: { source: occurrences, text: __handle, ignoreComments: c-like }
 #         comparison: equals
 #         expected: "0"
+#
+# Count the bare name, never one quoted spelling of it: a census of "__handle"
+# passes over '__handle' and `__handle`. Exclude the file that defines the
+# name and the test that forbids it, and let ignoreComments drop the rest.
 #
 # The other read is `fileCount`: how many files a path or glob matched.
 #

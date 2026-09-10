@@ -1,7 +1,7 @@
 {
   "expectedVersion": 1,
   "fixture": "file-surface-verdicts",
-  "why": "Story 7.8 / ADR-009, AC4 and AC7: the file surface's FAIL direction, and what an absence means per source, through the real binary. Five criteria are decided by reading the tree and nothing else. E1-01 (a README exists) is a satisfied existence check. E1-02 (a changelog exists) is a FAILED existence check: the file is missing, which an existence read reports as the value false, and expected 'true' is not met. E1-03 (the README documents installation) is a content match. E1-04 (the migration guide has no TODO markers) is the case a careless surface gets wrong: the guide does not exist, and a content read of a missing file is unsatisfied for EVERY comparison including notContains -- text that does not exist cannot meet an expectation about text -- so it FAILS rather than passing vacuously; the stderrContains line pins that the report says so in words. E1-05 (the legacy config was removed) is the mirror of E1-02: an existence read expecting 'false' on a missing path PASSES, because for existence an absence is a value. So the fixture pins both halves of the rule in one run: absence is a fact for exists, and a failure for content. Verdict FAIL at exit 1 and never 3: every read succeeded, nothing was unreadable, so this is a product verdict about the branch and must not surface as infrastructure.",
+  "why": "Story 7.8 / ADR-009, AC4 and AC7: the file surface's FAIL direction, and what an absence means per source, through the real binary. Seven criteria are decided by reading the tree and nothing else. E1-01 (a README exists) is a satisfied existence check. E1-02 (a changelog exists) is a FAILED existence check: the file is missing, which an existence read reports as the value false, and expected 'true' is not met. E1-03 (the README documents installation) is a content match. E1-04 (the migration guide has no TODO markers) is the case a careless surface gets wrong: the guide does not exist, and a content read of a missing file is unsatisfied for EVERY comparison including notContains -- text that does not exist cannot meet an expectation about text -- so it FAILS rather than passing vacuously; the stderrContains line pins that the report says so in words. E1-05 (the legacy config was removed) is the mirror of E1-02: an existence read expecting 'false' on a missing path PASSES, because for existence an absence is a value. So the fixture pins both halves of the rule in one run: absence is a fact for exists, and a failure for content. Verdict FAIL at exit 1 and never 3: every read succeeded, nothing was unreadable, so this is a product verdict about the branch and must not surface as infrastructure. E1-06 and E1-07 pin the census rule the supervisor review of PR #89 caught in this story's first draft: a census counting only the DOUBLE-QUOTED spelling \"__handle\" passes over the key spelled in code as '__handle' or in a template literal, and the gitnebula script it replaces counted all three quote styles. Counting the bare name __handle with comments stripped, and the defining module excluded by name, E1-06 FAILS with a count of 2 (src/violation.ts spells it once in single quotes and once in a template literal), while E1-07 PASSES because src/clean.ts spells it in all three quote styles only inside line and block comments. A double-quoted-only census reports 0 for E1-06 and passes it -- that is the red this pair exists to show.",
   "proves": [
     "AC4",
     "AC7",
@@ -28,7 +28,9 @@
       "E1-02": "fail",
       "E1-03": "pass",
       "E1-04": "fail",
-      "E1-05": "pass"
+      "E1-05": "pass",
+      "E1-06": "fail",
+      "E1-07": "pass"
     }
   },
   "evidence": {
@@ -38,7 +40,8 @@
     ]
   },
   "stderrContains": [
-    "actual:   absent: 'docs/MIGRATION.md' does not exist"
+    "actual:   absent: 'docs/MIGRATION.md' does not exist",
+    "actual:   2"
   ],
   "stderrAbsent": [
     "could not be read",

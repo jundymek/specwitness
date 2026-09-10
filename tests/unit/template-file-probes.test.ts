@@ -65,6 +65,25 @@ describe('the template teaches file probes that the plan schema accepts (AC6)', 
     },
   );
 
+  it('counts the bare name in its census example, so no quote style escapes it', () => {
+    // Raised by the supervisor review of PR #89. The example counted the DOUBLE-QUOTED spelling
+    // only, under a description promising that no file spells the key at all — so
+    // `t['__handle']` and a template literal passed it. The script it teaches a project to
+    // replace counted all three quote styles. Comments are stripped and the definition is
+    // excluded, so the bare name is both strict and honest.
+    const census = probes.find(
+      (probe) => (probe as { id?: unknown }).id === 'no-hardcoded-handle',
+    ) as { assertions: { target: { source: string; text?: string } }[] } | undefined;
+    expect(census, 'the template keeps its census example').toBeDefined();
+    const texts = (census?.assertions ?? [])
+      .filter((assertion) => assertion.target.source === 'occurrences')
+      .map((assertion) => assertion.target.text ?? '');
+    expect(texts.length).toBeGreaterThan(0);
+    for (const text of texts) {
+      expect(text, 'a quoted census text misses the other two quote styles').not.toMatch(/["'`]/);
+    }
+  });
+
   it('names every read a file probe offers, so none is undiscoverable', () => {
     for (const source of FILE_PROBE_SOURCES) {
       expect(TEMPLATE, source).toContain(source);

@@ -116,7 +116,9 @@ plan:
               - packages/viz/ui/handle-key.test.ts
           assertions:
             - description: no remaining UI source spells the handle key in code
-              target: { source: occurrences, text: '"__gitnebula"', ignoreComments: c-like }
+              # The BARE name, not one quoted spelling: the script counted all three quote
+              # styles, and a census of '"__gitnebula"' alone passes over t['__gitnebula'].
+              target: { source: occurrences, text: __gitnebula, ignoreComments: c-like }
               comparison: equals
               expected: "0"
             - description: the suite imports the constant instead

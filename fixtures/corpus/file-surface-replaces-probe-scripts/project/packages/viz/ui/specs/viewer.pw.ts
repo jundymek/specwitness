@@ -6,6 +6,7 @@ import { HARNESS_HANDLE_KEY } from '../support/handle.js';
 
 // Never spell "__gitnebula" in a spec — import HARNESS_HANDLE_KEY instead.
 /* A block comment quoting it too: "__gitnebula" */
+// Nor '__gitnebula', nor `__gitnebula` — no quote style belongs in code.
 const docs = 'see a // inside a string: it is not a comment'; // this one is
 
 export function readHandle(target: Record<string, unknown>): unknown {

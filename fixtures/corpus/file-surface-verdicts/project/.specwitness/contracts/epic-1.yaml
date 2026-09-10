@@ -1,8 +1,10 @@
 # Hand-written Verification Contract for the corpus fixture `file-surface-verdicts`.
 #
-# Five criteria about the repository's own files. The application beside this
+# Seven criteria about the repository's own files. The application beside this
 # file is what carries the defects: it has a README that documents installation,
-# no changelog, no migration guide, and no legacy configuration.
+# no changelog, no migration guide, no legacy configuration — and one source
+# module that spells the handle key in code, in single quotes and in a template
+# literal, beside a clean module that spells it only in comments.
 #
 # The `spec:` half was written by hand. `meta.frozen`, `meta.fingerprint` and
 # `meta.frozenAt` were produced ONCE by the shipped `specwitness contract epic-1
@@ -36,10 +38,20 @@ spec:
       kind: structural
       severity: normal
       verifiability: automated
+    - id: E1-06
+      statement: Outside the module that defines HANDLE_KEY, no source file spells the handle key "__handle" in code, in any quote style.
+      kind: structural
+      severity: normal
+      verifiability: automated
+    - id: E1-07
+      statement: The clean module reads the handle through HANDLE_KEY and spells the key only in comments.
+      kind: structural
+      severity: normal
+      verifiability: automated
 meta:
   schemaVersion: 1
   frozen: true
-  fingerprint: 408ffed27fbb0faccb3fe50a69938f336ebc5ab73face154d5261f79e4ea84b1
+  fingerprint: f2a7c6f20abd8375f4b8819202c4e671a25816a25dec68fb4e271247f596278f
   createdAt: 2026-09-10T09:00:00.000Z
   frozenAt: 2026-09-10T09:15:00.000Z
   provenance:
