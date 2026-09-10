@@ -86,6 +86,15 @@ describe('redaction: — refusals are ConfigError and the run does not start (AC
     expect(exitCodeForError(error)).toBe(3)
   })
 
+  it('the refusal never echoes the pattern: a project may declare a LITERAL secret as its pattern', () => {
+    // A project that wants one token redacted plausibly writes the token itself as the pattern,
+    // and a token can contain `(`. The engine's own message quotes the source (`/…/`), and this
+    // error reaches stderr and CI logs through `printError`. The YAML path is enough to find it.
+    const error = errorFor(`${MINIMAL}redaction:\n  extraPatterns:\n    - 'tok3n-literal-(value'\n`)
+    expect(error.message).toContain('redaction.extraPatterns[0]')
+    expect(`${error.message}\n${error.hint ?? ''}`).not.toContain('tok3n-literal')
+  })
+
   it('a pattern that matches the empty string is refused rather than garbling all evidence', () => {
     for (const pattern of ["''", "'x*'", "'(a|)'"]) {
       const error = errorFor(`${MINIMAL}redaction:\n  extraPatterns:\n    - ${pattern}\n`)

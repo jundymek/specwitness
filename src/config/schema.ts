@@ -268,15 +268,13 @@ const extraPattern = (): z.ZodType<RegExp, string> =>
     } catch (error) {
       ctx.addIssue({
         code: 'custom',
-        input: source,
-        message: `not a valid regular expression (${(error as Error).message})`,
+        message: `not a valid regular expression (${compileFailureReason(error)})`,
       });
       return z.NEVER;
     }
     if (compiled.test('')) {
       ctx.addIssue({
         code: 'custom',
-        input: source,
         message:
           'matches the empty string, so it would redact between every character of every ' +
           'captured text; make it match at least one character',
@@ -285,6 +283,22 @@ const extraPattern = (): z.ZodType<RegExp, string> =>
     }
     return compiled;
   });
+
+/**
+ * Why a pattern failed to compile, WITHOUT the pattern.
+ *
+ * The engine's message quotes the source (`Invalid regular expression: /…/: Unterminated
+ * group`), and a project may well declare a LITERAL secret as its pattern — the obvious way to
+ * redact one known token. This refusal reaches stderr and every CI log through `printError`, so
+ * echoing the source would print the secret the pattern exists to hide. The YAML path in the
+ * error is how the author finds the entry; the reason says what is wrong with it. Wording the
+ * engine does not match falls back to a reason that quotes nothing.
+ */
+function compileFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  const reason = message.replace(/^Invalid regular expression: \/.*\/[a-z]*: /su, '');
+  return reason !== message && reason !== '' ? reason : 'the pattern could not be compiled';
+}
 
 const redactionSchema = z.strictObject({
   extraPatterns: z.array(extraPattern()).default([]),
