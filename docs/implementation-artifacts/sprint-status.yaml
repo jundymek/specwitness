@@ -114,7 +114,7 @@ development_status:
   6-11-setup-stage-executes-configured-install: done
   epic-6-retrospective: done
 
-  epic-7: backlog
+  epic-7: in-progress
   # Repair story written 2026-09-06 from the FIRST REAL DOGFOODING RUN (gitnebula Epic 6),
   # not from planning; it is not in epics.md. Numbered 7.0 because it precedes 7.1's
   # completion: the harness integration it belongs to is the run that found it. Recorded as
@@ -144,10 +144,13 @@ development_status:
   # Written 2026-09-07 by the SUPERVISOR of epic/7-dogfooding-repairs, with the owner's
   # agreement, from evidence found while reviewing story 7.0's follow-up: AD-10's
   # config-declared extra redaction patterns have no configuration surface at all, so every
-  # extraPatterns path in the domain, the four surfaces and the authoring path has been dead
-  # in production since Epic 3. Recorded as finding 17 in 7.0's Dev Agent Record. Unassigned:
-  # writing the spec schedules nothing, and which wave it lands in is the owner's call.
-  7-4-redaction-extra-patterns-config-surface: review
+  # extraPatterns path in the domain, the five surfaces (`file` arrived with story 7.8) and the
+  # authoring path has been dead in production since Epic 3. Recorded as finding 17 in 7.0's
+  # Dev Agent Record.
+  # DONE 2026-09-10 as a solo cohort on story/7.4-redaction-extra-patterns-config-surface
+  # (PR #91, e5ce0b3): `redaction.extraPatterns` is bound at every sink, including all five
+  # surfaces and the contract and plan edges.
+  7-4-redaction-extra-patterns-config-surface: done
   # Written 2026-09-09 by the SUPERVISOR of epic/7-dogfooding-repairs, with the owner's
   # agreement, from evidence found while reviewing story 7.5 (PR #86, e039add): the doctor
   # integration test asserting a playwright-capability WARNING fails on any machine that has
@@ -166,6 +169,13 @@ development_status:
   # five scripts declarations, so the logic is tested once in the product instead of rewritten
   # per project. Widening the closed union is what ADR-009 exists to authorise.
   7-8-declarative-file-surface: done
+  # Written 2026-09-11 by the SUPERVISOR of epic/7-dogfooding-repairs, with the owner's
+  # agreement, from evidence found while reviewing story 7.4 (PR #91, e5ce0b3): the services
+  # stage's readiness `not-found` arm prints the declared binary UNREDACTED in its message and
+  # hint (services.ts:684-693). Story 6.11 closed the same hole in setup, gates and data and
+  # never listed this one. Reported by 7.4's agent as finding 2 and verified at e5ce0b3.
+  # Unassigned: writing the spec schedules nothing, and which wave it lands in is the owner's call.
+  7-9-readiness-not-found-is-redacted: ready-for-dev
   epic-7-retrospective: optional
 
 # Appended per the workflow note above; established at the Epic 3 retrospective
