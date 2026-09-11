@@ -288,6 +288,12 @@ describe('scaffold on a fresh repository (AC1)', () => {
     const nested = await readFile(join(root, '.specwitness', '.gitignore'), 'utf8');
     expect(nested).toContain('runs/');
     expect(nested).toContain('scorecard.jsonl');
+    // Story 6.6's attribution log. It joins on (runId, criterionId), and both
+    // halves live in files ignored above, so tracking it would cite runs no
+    // other clone has. Dogfooding report 001 §8.4 found it untracked AND
+    // unignored in gitnebula, one `git clean` away from losing pure human
+    // judgement that no re-run can reproduce.
+    expect(nested).toContain('attributions.jsonl');
 
     // The project's own .gitignore is untouched, byte for byte.
     expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('node_modules/\n');

@@ -37,8 +37,17 @@ const SUBDIRECTORIES = ['contracts', 'plans', 'runs'] as const;
 
 /**
  * Local-only artifacts (spine "Git vs local"). config.yaml, contracts/ and
- * plans/ are reviewable product artifacts and stay committed; run evidence and
- * the scorecard are machine-local.
+ * plans/ are reviewable product artifacts and stay committed; run evidence,
+ * the scorecard and the attribution log are machine-local.
+ *
+ * `attributions.jsonl` joins its findings on `(runId, criterionId)`, and both
+ * halves of that key live in files listed here. A tracked attribution log would
+ * therefore cite runs no other clone has, which `scorecard summary` counts as
+ * `orphanedAttributions`. Its `--note` is operator free text too: redaction
+ * recognises secrets by shape, so a bare token in prose survives it.
+ * Added 2026-09-11 from dogfooding report 001 §8.4 — story 6.6 minted the file
+ * and nothing taught `init` about it, so it sat untracked AND unignored in the
+ * only client project.
  */
 const GITIGNORE_CONTENTS = [
   '# Local-only SpecWitness artifacts — evidence of runs on THIS machine.',
@@ -46,6 +55,7 @@ const GITIGNORE_CONTENTS = [
   '# reviewable product artifacts and belong in version control.',
   'runs/',
   'scorecard.jsonl',
+  'attributions.jsonl',
   '',
 ].join('\n');
 
