@@ -166,6 +166,13 @@ development_status:
   # five scripts declarations, so the logic is tested once in the product instead of rewritten
   # per project. Widening the closed union is what ADR-009 exists to authorise.
   7-8-declarative-file-surface: done
+  # Written 2026-09-11 by the SUPERVISOR of epic/7-dogfooding-repairs, with the owner's
+  # agreement, from evidence found while reviewing story 7.4 (PR #91, e5ce0b3): the services
+  # stage's readiness `not-found` arm prints the declared binary UNREDACTED in its message and
+  # hint (services.ts:684-693). Story 6.11 closed the same hole in setup, gates and data and
+  # never listed this one. Reported by 7.4's agent as finding 2 and verified at e5ce0b3.
+  # Unassigned: writing the spec schedules nothing, and which wave it lands in is the owner's call.
+  7-9-readiness-not-found-is-redacted: ready-for-dev
   epic-7-retrospective: optional
 
 # Appended per the workflow note above; established at the Epic 3 retrospective
