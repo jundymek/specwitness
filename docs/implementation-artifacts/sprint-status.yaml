@@ -138,6 +138,27 @@ development_status:
   # difference between that epic passing and failing. Spec in
   # docs/implementation-artifacts/epic-7-dogfooding-repairs/.
   7-5-absent-element-is-not-a-product-failure: done
+  # ── The PLANNED Epic 7 (epics.md:997-1050). These three are OPERATOR-LED and have
+  # no spec file, by design: epics.md says they are "executed by the author WITH
+  # SpecWitness, not by coding agents writing SpecWitness code". Every file in
+  # docs/implementation-artifacts/epic-7-dogfooding-repairs/ is a brief for a coding
+  # agent; 7.1-7.3 have no such addressee, so do not go looking for 7.1-*.md.
+  # Everything else numbered 7.x in that directory (7.0, 7.4, 7.5, 7.7, 7.8, 7.9) is a
+  # REPAIR story written from the road as dogfooding exposed defects, and appears in no
+  # epics.md.
+  #
+  # 7.1 and 7.2 happened in substance without being ticked: two runs against gitnebula's
+  # Epic 6, contract frozen before the implementation existed, repair loop driven to a
+  # verdict. They stay `backlog` because nobody walked the acceptance criteria as
+  # written -- notably "every friction point captured as a GitHub issue on specwitness",
+  # which was captured as action items d1-d8 here instead.
+  #
+  # 7.3's artifact is docs/dogfooding-report-001.md (committed 2026-09-11, 642659d), NOT
+  # a spec file: eleven attributions recorded, `scorecard summary` answered, and a
+  # continue/adjust/stop verdict written. `review` rather than `done` because sections 1
+  # and 9 are the owner's position to confirm, not the author's to assert. Closing it
+  # closes criteria 17-18 of brief §67 -- the last open item on roadmap.md's
+  # "MVP READY WHEN" list.
   7-1-harness-integration-first-real-contract: backlog
   7-2-first-real-epic-verification-repair-loop: backlog
   7-3-hypothesis-verdict-report: review
