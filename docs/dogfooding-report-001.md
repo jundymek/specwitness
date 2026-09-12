@@ -109,7 +109,7 @@ But a gate that hands back half its criteria to a human is not yet a merge gate.
 
 **Continue, in this order:**
 
-1. **Close the onboarding cost before the next target.** ADR-009's declarative `file` surface (story 7.8) exists precisely because seven of gitnebula's eight scripts only read files — and E6-23/E6-28, two of the three client-script failures, are a report-file lookup a `file` probe expresses without JavaScript. The next dogfooding run should need **zero** bespoke `.mjs`. If it does, `d8` is answered by measurement rather than assertion.
+1. **Close the onboarding cost before the next target.** ADR-009's declarative `file` surface (story 7.8) exists precisely because seven of gitnebula's eight scripts only read files — and E6-23/E6-28, two of the three client-script failures, are a report-file lookup a `file` probe expresses without JavaScript. ~~The next dogfooding run should need **zero** bespoke `.mjs`.~~ **Corrected 2026-09-12 by the §10 measurement: "zero" was too strong, and the honest target is "fewer scripts and fewer chances to get one wrong".**
 2. **Calibrate on a second project.** One project cannot separate "this contract was untuned" from "contracts are like this". The next target should be a **new** codebase whose criteria are drafted with mechanical verifiability as an explicit goal, so the needs_human ratio becomes a measurement instead of an accident.
 3. **Do not gate unattended yet.** At 2 artifacts per real signal a FAIL still needs a human before it blocks a merge. Revisit when a contract drafted deliberately reaches roughly one artifact per signal.
 4. **Fix the three reporting defects in §8** — cheap, and each one cost time during this analysis.
@@ -117,6 +117,32 @@ But a gate that hands back half its criteria to a human is not yet a merge gate.
 **What would change this verdict.** A second project where the tool finds zero real defects would put the hypothesis in serious doubt. A second project needing hundreds of lines of bespoke probe code would mean ADR-009 did not solve `d8`. Both are cheap to test and neither has been tested.
 
 ---
+
+## 10. Addendum 2026-09-12 — how far the `file` surface actually gets, measured
+
+§9's first recommendation was tested before acting on it, by converting gitnebula's eight probe scripts on paper against the `file` surface's real capability envelope. Two of its claims did not survive.
+
+**"815 lines" was the wrong denominator.** `serve-bundle.mjs` (80 lines) is a `services:` entry — it starts an HTTP server so five browser probes have a stable URL. A surface that "runs no command, spawns no process, and opens no socket" was never going to replace it. The real pool is **735 lines**, of which roughly **350 (~48%) convert**. The rest stays by design: ADR-009 §6 already names `analysis-shape.mjs` and `ui-config-shape.mjs` as scripts that must remain, and `ui-source-census.mjs`'s `expect`-argument parser needs bracket matching — "when a check needs a parser, it needs code".
+
+So **"zero bespoke `.mjs`" was too strong** and is withdrawn. The honest target is fewer scripts and fewer chances to get one wrong.
+
+**The stronger result is not about line count.** Of the three defects ADR-009 measured in those scripts, the `file` surface closes **one structurally and one by construction**:
+
+| defect | closed? | why |
+|---|---|---|
+| non-recursive `findReport` (broke E6-23, E6-28) | **yes, structurally** | a `docs/**/*.md` glob cannot fail to recurse |
+| literal counted inside comments (broke E6-09) | **yes, by construction** | `ignoreComments: c-like` is in the product, with tests |
+| hand-picked phrases that miss the real documents | **no** | `contains` takes literal text, so the phrase-choice problem is identical |
+
+**And the third one is why this stops here rather than converting gitnebula for real.** The corpus fixture `file-surface-replaces-probe-scripts` already carries this conversion for eight criterion ids including E6-09, E6-23 and E6-28 — on a synthetic tree built to reproduce the defects. Run against the *real* gitnebula, its phrase sets do match: `[validator, unchanged, future]` occurs in three documents, `[content length, viewport height, unreachable]` in one. **E6-23 and E6-28 would flip from fail to pass.**
+
+That flip is not evidence, and converting them would have manufactured a result. The script those criteria came from says so at the point where a maintainer would be tempted:
+
+> Fixing the walk does NOT by itself make those two criteria pass, and that is deliberate: the search terms below are still hand-picked phrases, and the documents that satisfy the criteria use different words. **Widening the regexes to match the documents now known to exist would be fitting the instrument to a result already seen — the one thing a verifier must never do.**
+
+A `contains` list chosen after reading those same documents is the same move in a different syntax. E6-09 offers nothing either: it already passes, since gitnebula's own `ffe12fc` fixed the census, so a conversion would only show the product agreeing with a repaired script.
+
+**What this leaves.** `d8` is *partly* answered — half the script volume is removable, and two defect classes become unavailable to the next client. The part that stays open is the one no surface can close: choosing what text to look for. That needs a project whose documents nobody has read yet, with criteria written **before** the implementation exists — which is exactly what §9's second recommendation calls for, and is now its sharper justification. Filed as `d13`.
 
 ## Appendix: the eleven attributions
 
