@@ -66,6 +66,7 @@ import { ingestEpic } from '../../ingest/index.js';
 import { providerForRole } from '../../providers/index.js';
 import { SystemClock } from '../../infra/clock.js';
 import { createProcessRunner } from '../../infra/process-runner.js';
+import { findUnmeasurableCriteria } from '../../authoring/measurability.js';
 import { freeze, parseContract, serializeContract } from '../../schemas/contract.js';
 import {
   integrityFor,
@@ -293,6 +294,21 @@ async function freezeContract(projectRoot: string, epic: string, clock: Clock): 
     );
   }
 
+  // Refuse shapes whose verdict would mean nothing, BEFORE the fingerprint
+  // exists. After freezing, ADR-005 makes the only change path an amendment,
+  // so this is the last moment an edit is cheap — and the tenstandard
+  // dogfooding run is what says the check is needed: eleven of its criteria
+  // across two epics were red or green for reasons unrelated to the product,
+  // including one that would have passed against a build doing nothing at all.
+  //
+  // Skipped for an already-frozen contract: re-freezing is idempotent by
+  // story 2.2, and refusing there would turn a no-op into a failure for a
+  // contract whose criteria were accepted under an earlier version of these
+  // rules.
+  if (contractStatusState(loaded) === 'draft') {
+    assertMeasurableCriteria(epic, loaded.contract.spec.criteria);
+  }
+
   // Throws IntegrityError when a frozen contract's content changed — that is a
   // tamper, not a re-freeze, and story 2.7's --amend is the way to record a
   // legitimate change.
@@ -309,6 +325,49 @@ async function freezeContract(projectRoot: string, epic: string, clock: Clock): 
   process.stderr.write(
     `Froze ${contractRelativePath(epic)} at version ${frozen.spec.version} ` +
       `(${frozen.spec.criteria.length} criteria).\n`,
+  );
+}
+
+/**
+ * Refuses a freeze whose criteria carry shapes that cannot produce a
+ * meaningful verdict.
+ *
+ * THE MESSAGE IS THE FEATURE. A refusal that only said "criterion E-07 is not
+ * measurable" would send the operator back to a 90-criterion YAML file with no
+ * idea what to change, and the likeliest response would be to delete the
+ * criterion — losing the requirement rather than fixing its wording. So each
+ * finding quotes the text that triggered it and names what to write instead.
+ *
+ * `UsageError`, not `IntegrityError`: nothing is corrupt, tampered with, or
+ * inconsistent. The draft is intact and the operator is being asked to edit a
+ * sentence.
+ */
+function assertMeasurableCriteria(
+  epic: string,
+  criteria: readonly { readonly id: string; readonly statement: string }[],
+): void {
+  const unmeasurable = findUnmeasurableCriteria(criteria);
+
+  if (unmeasurable.length === 0) {
+    return;
+  }
+
+  const noun = unmeasurable.length === 1 ? 'criterion' : 'criteria';
+  const lines = [
+    `${unmeasurable.length} ${noun} cannot produce a meaningful verdict:`,
+    '',
+  ];
+
+  for (const criterion of unmeasurable) {
+    for (const finding of criterion.findings) {
+      lines.push(`  ${criterion.id}  [${finding.kind}]  ${finding.match}`);
+      lines.push(`      ${finding.remedy}`);
+    }
+  }
+
+  throw new UsageError(
+    lines.join('\n'),
+    `edit the statements in ${contractRelativePath(epic)}, then freeze again — a frozen criterion can only be changed by an audited amendment, so this is the last cheap moment to fix one`,
   );
 }
 
