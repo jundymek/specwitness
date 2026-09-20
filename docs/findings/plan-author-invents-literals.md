@@ -3,7 +3,8 @@
 **Found:** 2026-09-20, while building the freeze-time measurability check.
 **Severity:** this is the product's own failure mode, one layer below where it
 was being looked for.
-**Status:** diagnosed, not fixed.
+**Status:** diagnosed, not fixed. **Deferred deliberately on 2026-09-20**, with
+a deadline rather than an intention — see "When this has to be fixed".
 
 ## What happened
 
@@ -94,3 +95,32 @@ moment the cost was one edit.
   criterion as `needs-human` (`src/authoring/plan-prompt.ts`). It is an
   instruction with no verification behind it, which is the general shape of
   every defence this product exists to replace.
+
+## When this has to be fixed
+
+**Before the epic-6 plan is compiled**, and that is a real date rather than a
+preference.
+
+A plan is compiled on the way to `verify`, not at freeze time:
+`.specwitness/plans/epic-6.yaml` did not exist when this was found, and will not
+until tenstandard's epic 6 closes both its waves. So nothing is burning — the
+running agents cannot be harmed by a plan that has not been written.
+
+The consequence of missing the window is precise and already known, because it
+has happened: the compiler invents literals, three criteria go red on a correct
+implementation, and the operator spends a retrospective deciding whether to
+believe the gate. Epic 5 paid that cost once and concluded the gate was "not yet
+worth trusting unread". Paying it twice, with the diagnosis already written
+down, would be the expensive kind of deferral.
+
+**The fix stays narrow.** A `file` surface assertion with `comparison: contains`
+and a literal `expected` is checkable against the repository the plan was
+compiled from. Warn — do not refuse — naming every literal that does not occur
+in its target file, because "the implementation does not exist yet" is a
+legitimate answer for a gate compiled before the work, and only the operator can
+tell that apart from an invention.
+
+**What to measure afterwards.** Epic 5's plan carries 383 `expected:` literals.
+Counting how many of them occur in their target files, before and after, is the
+honest test of whether the warning earns its place — and it is a number, not an
+impression.
