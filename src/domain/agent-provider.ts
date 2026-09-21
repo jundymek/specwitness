@@ -96,6 +96,23 @@ export interface AgentPrompt {
   /** Paths an adapter may reference; how they reach the CLI is the adapter's call. */
   readonly contextFiles?: readonly string[];
   readonly jsonSchema?: unknown;
+  /**
+   * How many independent items this response must cover — criteria, for a plan.
+   *
+   * **A hint about SIZE, never about content**, and adapters are free to ignore
+   * it: it exists so a time bound can follow the work instead of a constant
+   * chosen against whatever contract happened to be at hand.
+   *
+   * The incident is recorded in `claude-code-cli.ts`'s timeout constant, twice
+   * now. A five-minute bound was calibrated, then found too small at 40
+   * criteria; the replacement fifteen-minute bound was found too small at 91,
+   * on tenstandard's epic 6 — three attempts, each ~20 minutes, each dying on
+   * the same wall rather than on anything recoverable. A plan emits probes,
+   * assertions and reviewer guidance for EVERY criterion in one response, so
+   * the work is linear in this number and a constant cannot be right for both
+   * ends of the range.
+   */
+  readonly workUnits?: number;
 }
 
 /**

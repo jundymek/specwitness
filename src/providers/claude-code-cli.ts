@@ -101,6 +101,47 @@ const PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_INVOCATION_TIMEOUT_MS = 900_000;
 
 /**
+ * Per-item allowance above the base bound, when a request declares its size.
+ *
+ * **The constant above was calibrated twice and outgrown twice**, which is the
+ * argument for not calibrating a third time. Five minutes was right until a
+ * 40-criterion contract; fifteen was right until tenstandard's epic 6 arrived
+ * with **91** — 2.3x — and compilation failed three times, each attempt
+ * spending ~20 minutes to die on the same wall rather than on anything a retry
+ * could recover from. That is the exact failure the fifteen-minute comment
+ * describes, one scale up, and a fourth constant would meet the same end.
+ *
+ * So the bound follows the work: a plan emits probes, assertions and reviewer
+ * guidance for every criterion in one response, so its cost is linear in the
+ * criterion count. Twelve seconds each is deliberately generous — the cost of
+ * being too high is a slow failure an operator can interrupt, while the cost of
+ * being too low is what this replaces: a run that cannot finish at all, and
+ * whose retries make it worse.
+ *
+ * `MAX_INVOCATION_TIMEOUT_MS` keeps "bounded" true. A bound that scales without
+ * a ceiling is not a bound, and a wedged CLI must still surface as a timeout
+ * rather than as a process nobody is watching.
+ */
+const PER_WORK_UNIT_TIMEOUT_MS = 12_000;
+
+/** One hour. Above this, a stuck CLI is likelier than a large contract. */
+const MAX_INVOCATION_TIMEOUT_MS = 3_600_000;
+
+/**
+ * The time bound for one invocation, given what the request says about its size.
+ *
+ * Returns the configured base when a request declares nothing, so every caller
+ * that has not been taught to measure its work keeps today's behaviour exactly.
+ */
+export function invocationTimeoutMs(baseMs: number, workUnits: number | undefined): number {
+  if (workUnits === undefined || !Number.isFinite(workUnits) || workUnits <= 0) {
+    return baseMs;
+  }
+
+  return Math.min(baseMs + Math.ceil(workUnits) * PER_WORK_UNIT_TIMEOUT_MS, MAX_INVOCATION_TIMEOUT_MS);
+}
+
+/**
  * Above this many bytes the prompt travels on stdin instead of argv.
  *
  * Chosen from a measurement, not a guess. macOS here reports `ARG_MAX` of 1 MiB
@@ -544,18 +585,22 @@ export function createClaudeCodeCliProvider(
       const args = oversized ? [...BASELINE_ARGS] : [...BASELINE_ARGS, text];
       const input = oversized ? text : '';
 
+      // The bound follows the request's declared size; see
+      // PER_WORK_UNIT_TIMEOUT_MS for the two calibrations this replaces.
+      const effectiveTimeoutMs = invocationTimeoutMs(timeoutMs, prompt.workUnits);
+
       const result = await deps.processRunner.run({
         binary: BINARY,
         args,
         cwd,
-        timeoutMs,
+        timeoutMs: effectiveTimeoutMs,
         env: childEnvironment(billingEnvVars),
         input,
       });
 
       if (result.outcome === 'timed-out') {
         throw new ProviderError(
-          `${BINARY} timed out after ${String(timeoutMs)}ms while drafting for role "${prompt.role}"`,
+          `${BINARY} timed out after ${String(effectiveTimeoutMs)}ms while drafting for role "${prompt.role}"`,
           // Only remedies the operator can actually reach. The timeout is not a
           // configuration surface — the provider config is {adapter, mode} — so
           // telling them to raise it would be advice they cannot take, which is

@@ -132,6 +132,12 @@ export async function compilePlan(input: CompilePlanInput): Promise<CompilePlanR
     // `jsonSchema` is deliberately NOT set. The gate derives it from `responseSchema` in
     // exactly one place, so two sites cannot disagree about the shape the model is steered
     // toward versus validated against (ADR-001).
+    //
+    // The size of the job, so an adapter's time bound can follow the work. A plan
+    // emits probes, assertions and reviewer guidance for EVERY criterion in one
+    // response, so this is the number the cost is linear in — and a constant
+    // bound has now been outgrown twice, at 40 criteria and at 91.
+    workUnits: contract.spec.criteria.length,
   };
 
   const response = await invoke(request, { provider: input.provider, clock: input.clock });
