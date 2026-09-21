@@ -430,6 +430,11 @@ async function reportMeasurability(
       },
       provider,
       clock,
+      // Story 7.4's rule, applied to the freeze edge: a project's declared extra patterns
+      // must reach EVERY provider-facing prompt. This one was added later and was missed,
+      // so a criterion statement carrying a project's own secret shape went to the provider
+      // unredacted while the drafting prompt beside it was clean.
+      redaction: config.redaction,
     });
   } catch {
     // Deliberately swallowed; see the header. The freeze proceeds.

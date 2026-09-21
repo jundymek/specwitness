@@ -44,9 +44,11 @@
 
 import type { AgentPrompt, AgentProvider, ResponseValidator } from '../domain/agent-provider.js';
 import type { Contract } from '../domain/contract.js';
+import type { RedactionOptions } from '../domain/evidence.js';
 import type { DeclaredIds } from '../schemas/plan.js';
 import { invoke } from '../providers/invoke.js';
 import type { Clock } from '../domain/ports.js';
+import { assemblePrompt } from './prompt-assembly.js';
 
 /** One criterion's answer to "what would measure this?". */
 export interface MeasurabilityVerdict {
@@ -133,8 +135,23 @@ function preflightSchemaFor(contract: Contract): ResponseValidator<PreflightDraf
   };
 }
 
+/**
+ * The byte cap on the assembled preflight prompt.
+ *
+ * Larger than the 24 000 the verify-edge builders use, and smaller than the plan-author's
+ * 200 000, because the input is one line per criterion rather than an epic's prose or a
+ * whole plan. tenstandard's epic-6 contract — 91 criteria, the largest this tool has been
+ * asked to freeze — assembles to roughly 20 000 bytes here, so this leaves room for a
+ * contract several times that before it refuses.
+ */
+export const PREFLIGHT_PROMPT_CAP_BYTES = 120_000;
+
 /** The prompt. Fixed literals here; the variable half is the criteria below. */
-function buildPreflightPrompt(contract: Contract, declared: DeclaredIds): string {
+export function buildPreflightPrompt(
+  contract: Contract,
+  declared: DeclaredIds,
+  redaction?: RedactionOptions,
+): string {
   const head = [
     'For each acceptance criterion below, answer ONE question:',
     '',
@@ -171,13 +188,36 @@ function buildPreflightPrompt(contract: Contract, declared: DeclaredIds): string
     '',
     'CRITERIA:',
     '',
-  ].join('\n');
+  ];
 
-  const body = contract.spec.criteria
-    .map((criterion) => `${criterion.id} [${criterion.kind}] ${criterion.statement}`)
-    .join('\n\n');
+  // ⚠️ EVERYTHING BELOW THIS LINE IS UNTRUSTED, and the split is the same security decision
+  // `prompt.ts` records. `head` is fixed literals authored in this repository; a criterion
+  // statement is prose a person wrote in a planning artifact, and "the API accepts
+  // AUTH_TOKEN=hunter2" is careless rather than exotic.
+  //
+  // This builder first assembled its own string — `${head}${body}` — and so carried neither
+  // redaction nor a cap, while its four siblings carried both. That is precisely the
+  // divergence `tests/unit/authoring/prompt-redaction-parity.test.ts` exists to prevent, and
+  // it survived because the builder was not exported and had no row in that table. It is
+  // exported now so the table can reach it.
+  const body = contract.spec.criteria.map(
+    (criterion) => `${criterion.id} [${criterion.kind}] ${criterion.statement}`,
+  );
 
-  return `${head}${body}\n`;
+  return assemblePrompt({
+    head,
+    body,
+    // The trailing newline belongs inside the assembly, never appended after it — see the
+    // same note in `prompt.ts`, where a byte appended afterwards put the prompt over the cap
+    // it advertises.
+    tail: [''],
+    capBytes: PREFLIGHT_PROMPT_CAP_BYTES,
+    // REFUSE RATHER THAN TRUNCATE. A silently shortened prompt asks about fewer criteria
+    // than the contract has, and the answer would read as "the rest are measurable" — the
+    // false green this preflight exists to prevent, reintroduced by its own prompt.
+    onOverflow: 'refuse',
+    ...(redaction === undefined ? {} : { redaction }),
+  });
 }
 
 export interface PreflightInput {
@@ -185,6 +225,14 @@ export interface PreflightInput {
   readonly declared: DeclaredIds;
   readonly provider: AgentProvider;
   readonly clock: Clock;
+  /**
+   * The project's config-declared redaction (AD-10), forwarded to the prompt assembly.
+   *
+   * FED by `src/cli/commands/contract.ts` from the loaded `config.redaction`, exactly as the
+   * drafting path beside it has been since story 7.4. Optional only so that a caller with no
+   * config — a test — need not invent one; the built-in rules apply either way.
+   */
+  readonly redaction?: RedactionOptions;
 }
 
 /**
@@ -198,7 +246,7 @@ export interface PreflightInput {
 export async function preflightMeasurability(input: PreflightInput): Promise<MeasurabilityReport> {
   const request = {
     role: 'plan-author' as const,
-    prompt: buildPreflightPrompt(input.contract, input.declared),
+    prompt: buildPreflightPrompt(input.contract, input.declared, input.redaction),
     responseSchema: preflightSchemaFor(input.contract),
     // One line per criterion rather than a probe set, so the bound stays small
     // even on a large contract. See `workUnits` in `AgentPrompt`.

@@ -53,7 +53,11 @@ const CONTRACT_DRAFT = JSON.stringify({
       verifiability: 'human',
     },
     {
-      statement: 'The repository typechecks with no errors.',
+      // "typechecks with NO errors" was a pure absence-claim, and `1f0d7c7` taught
+      // `--freeze` to refuse that shape — a repository holding no TypeScript satisfies it.
+      // What the tests below actually want compiled is a gate that RUNS, which is the
+      // presence the absence can partner.
+      statement: 'The typecheck gate runs and exits 0, reporting no errors.',
       kind: 'structural',
       severity: 'normal',
       verifiability: 'automated',
@@ -326,7 +330,10 @@ describe('plan <epic> — refusals', () => {
     await writeFile(
       path,
       contract
-        .replace('The repository typechecks with no errors.', 'The repository typechecks cleanly.')
+        .replace(
+          'The typecheck gate runs and exits 0, reporting no errors.',
+          'The typecheck gate runs and exits 0, reporting a clean tree.',
+        )
         .replace(/fingerprint: [0-9a-f]{64}/, 'fingerprint: null')
         .replace('frozen: true', 'frozen: false')
         .replace(/frozenAt: \S+/, 'frozenAt: null'),

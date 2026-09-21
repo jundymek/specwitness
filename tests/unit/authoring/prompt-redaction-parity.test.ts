@@ -35,6 +35,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildAdaptationPrompt } from '../../../src/authoring/adaptation-prompt.js';
 import { explainableCriteria, buildExplainPrompt } from '../../../src/authoring/explain.js';
+import { buildPreflightPrompt } from '../../../src/authoring/measurability-preflight.js';
 import { buildPlanPrompt } from '../../../src/authoring/plan-prompt.js';
 import { buildContractPrompt } from '../../../src/authoring/prompt.js';
 import type { AdaptationCandidate } from '../../../src/domain/adaptation-port.js';
@@ -123,6 +124,21 @@ const BUILDERS: readonly {
       return buildAdaptationPrompt([candidate], redaction);
     },
   },
+  {
+    // ⚠️ THE ROW THIS FILE'S HEADER PREDICTED. `dc922f0` added a fifth provider-facing
+    // builder — `--freeze` now asks the plan-author what would measure each criterion — and
+    // assembled its prompt by hand (`${head}${body}`) rather than through `assemblePrompt`,
+    // so it carried neither redaction nor a byte cap. The criterion statements it
+    // interpolates are the same untrusted text every sibling redacts.
+    //
+    // No row existed for it, so nothing here failed: exactly the divergence the header says
+    // per-module tests cannot catch. It was found by an integration test that observes the
+    // real prompt from outside the process, one layer further out than this file.
+    name: 'measurability-preflight',
+    module: 'src/authoring/measurability-preflight.ts',
+    build: (statement, redaction) =>
+      buildPreflightPrompt(frozenContract([criterion('E7-01', { statement })]), DECLARED, redaction),
+  },
 ];
 
 /**
@@ -182,11 +198,16 @@ describe('AC2 — the contract statement passes the SAME boundary at every call 
   });
 
   it('covers every prompt builder the layer actually has', () => {
-    // A canary for the failure mode this story exists to prevent: a fifth provider-facing
-    // module added to `src/authoring/**` without a row here would leave this suite passing
-    // while proving nothing about it. It cannot be enforced mechanically — see the file
-    // header on what is enforced and what is conventional — so it is stated as a number a
-    // reader has to change deliberately.
-    expect(BUILDERS).toHaveLength(4);
+    // A canary for the failure mode this story exists to prevent: a provider-facing module
+    // added to `src/authoring/**` without a row here would leave this suite passing while
+    // proving nothing about it. It cannot be enforced mechanically — see the file header on
+    // what is enforced and what is conventional — so it is stated as a number a reader has
+    // to change deliberately.
+    //
+    // FOUR BECAME FIVE, and the canary earned its keep: `dc922f0` added the
+    // measurability-preflight builder, which assembled its prompt by hand and so sent
+    // criterion statements to the provider with neither redaction nor a cap. Raising this
+    // number is the deliberate act the comment above asks for — never the way to quiet it.
+    expect(BUILDERS).toHaveLength(5);
   });
 });

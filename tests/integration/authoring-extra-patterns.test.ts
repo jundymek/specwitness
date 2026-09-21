@@ -158,10 +158,20 @@ async function planPrompt(declare: boolean): Promise<string> {
     'utf8',
   );
 
-  const result = await run(root, shim, home, 'plan', '7');
+  // A SECOND SHIM, RECORDING ONLY THE `plan` INVOCATION, and the reason is a real change in
+  // the product rather than tidiness. `--freeze` used to reach no provider at all, so one
+  // shim across all three commands recorded the plan prompt and nothing else. Since
+  // `dc922f0` the freeze asks the plan-author what would measure each criterion — deliberately
+  // run above with the pattern NOT yet declared — so a single shim would collect that prompt
+  // too and report its secret as this edge's leak. The freeze edge has its own coverage in
+  // `tests/unit/authoring/prompt-redaction-parity.test.ts`.
+  const planShim = await writeClaudeShim('capable', { recordStdin: true });
+  shims.push(planShim);
+
+  const result = await run(root, planShim, home, 'plan', '7');
   expect(result.exitCode, result.stderr).toBe(3);
   expect(result.stderr).not.toContain(SECRET);
-  return await draftingPrompts(shim);
+  return await draftingPrompts(planShim);
 }
 
 describe('story 7.4 — the authoring edges apply the declared patterns to the prompt', () => {

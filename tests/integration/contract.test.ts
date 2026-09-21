@@ -24,7 +24,20 @@ afterEach(async () => {
   await Promise.all(created.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-/** A valid drafted response, as the fake provider replays it. */
+/**
+ * A valid drafted response, as the fake provider replays it.
+ *
+ * THE SECOND CRITERION IS PHRASED THE WAY `--freeze` NOW REQUIRES, and it was not always.
+ * It read "A frozen contract is never overwritten by a regeneration" — a pure absence-claim,
+ * true of a build that cannot regenerate at all. `1f0d7c7` taught `--freeze` to refuse that
+ * shape, and this fixture, written before the rule, then failed every test in this file and
+ * cascaded into `plan.test.ts`, whose setup cannot compile against a contract that will not
+ * freeze. Twenty-eight failures, one sentence.
+ *
+ * The repair is not a weaker rule but an honest statement: what the tests below actually
+ * assert is a refusal that EXITS 3 and NAMES the amend flow, which is a presence, and the
+ * file staying byte-for-byte identical, which is the absence it partners.
+ */
 const DRAFT = JSON.stringify({
   criteria: [
     {
@@ -34,7 +47,8 @@ const DRAFT = JSON.stringify({
       verifiability: 'automated',
     },
     {
-      statement: 'A frozen contract is never overwritten by a regeneration.',
+      statement:
+        'Regenerating a frozen contract exits 3 and names the amend flow, while the contract file stays byte-for-byte unchanged.',
       kind: 'invariant',
       severity: 'critical',
       verifiability: 'automated',
