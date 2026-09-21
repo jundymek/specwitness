@@ -303,6 +303,10 @@ describe('contract <epic> --status — AC3', () => {
       fingerprint: null,
       criteriaCount: null,
       frozenAt: null,
+      // Added with the plan-state field. `toEqual` over the whole document rather than
+      // `toMatchObject` is deliberate — the harness parses this, so a new field is a
+      // deliberate edit here rather than something a consumer discovers in production.
+      plan: 'not-applicable',
     });
   });
 
@@ -552,5 +556,59 @@ describe('contract <epic> --amend — AC2, the no-TTY refusal', () => {
     expect(result.exitCode).toBe(3);
     expect(result.stderr).toContain('--amend');
     expect(result.stderr).toContain('interactive terminal');
+  });
+});
+
+/**
+ * "A contract that cannot be compiled is not frozen — it is only written down."
+ *
+ * The epic-6 supervisor's sentence, and the state it describes was invisible. That contract
+ * was frozen on 2026-09-20 without a plan ever having been compiled against it; three
+ * compile attempts then failed on a size wall, and `--status` reported `frozen` throughout,
+ * identical to a contract whose plan compiles cleanly. The operator had no way to see the
+ * difference except by remembering.
+ *
+ * So the status now answers it. Not by compiling — that is `specwitness plan`, it costs
+ * provider quota, and a freeze must not depend on it — but by reporting whether a plan for
+ * this exact fingerprint exists.
+ */
+describe('contract <epic> --status — whether a plan has ever been compiled', () => {
+  it('reports a frozen contract with no plan as never compiled', async () => {
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+
+    const result = await run(root, 'contract', '7', '--status', '--json');
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ state: 'frozen', plan: 'absent' });
+  });
+
+  it('says so in the human rendering too, not only in --json', async () => {
+    const root = await project();
+    await run(root, 'contract', '7');
+    await run(root, 'contract', '7', '--freeze');
+
+    const result = await run(root, 'contract', '7', '--status');
+
+    expect(result.stdout).toMatch(/no plan has been compiled/i);
+  });
+
+  it('reports a draft contract as having no plan question to answer', async () => {
+    // A draft has no fingerprint, so "does a plan match it" is not yet a question.
+    const root = await project();
+    await run(root, 'contract', '7');
+
+    const result = await run(root, 'contract', '7', '--status', '--json');
+
+    expect(JSON.parse(result.stdout)).toMatchObject({ state: 'draft', plan: 'not-applicable' });
+  });
+
+  it('reports an absent contract as having no plan question to answer', async () => {
+    const root = await project();
+
+    const result = await run(root, 'contract', '7', '--status', '--json');
+
+    expect(JSON.parse(result.stdout)).toMatchObject({ state: 'absent', plan: 'not-applicable' });
   });
 });

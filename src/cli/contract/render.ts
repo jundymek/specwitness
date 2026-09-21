@@ -54,6 +54,27 @@ export type ContractStatusState = 'absent' | 'draft' | 'frozen' | 'tampered';
  */
 export type ContractIntegrity = 'ok' | 'mismatch' | 'not-frozen' | 'not-applicable';
 
+/**
+ * Whether a plan has ever been compiled against THIS contract.
+ *
+ * ⚠️ THE THIRD QUESTION, and it exists because of a sentence the epic-6 supervisor wrote:
+ * **"a contract that cannot be compiled is not frozen — it is only written down."** That
+ * contract was frozen on 2026-09-20 without a plan having been compiled against it once;
+ * three attempts then failed on a size wall, and `--status` said `frozen` throughout,
+ * indistinguishable from a contract whose plan compiles cleanly.
+ *
+ * - `compiled`      — a plan exists and names this contract's fingerprint.
+ * - `stale`         — a plan exists for an EARLIER fingerprint. It was compiled, then the
+ *                     contract was amended; the plan does not describe what is frozen now.
+ * - `absent`        — frozen, and no plan has ever been compiled. The epic-6 state.
+ * - `not-applicable`— there is no frozen fingerprint for a plan to match, so the question
+ *                     is not yet meaningful. A draft and an absent contract are both here.
+ *
+ * This is READ, never compiled: `contract --status` must not spend provider quota, and a
+ * freeze must not depend on a compile. It reports what is on disk.
+ */
+export type ContractPlanState = 'compiled' | 'stale' | 'absent' | 'not-applicable';
+
 /** The view model. Every field is always present; unknown values are `null`. */
 export interface ContractStatus {
   /** Canonical epic id, e.g. `epic-7`. */
@@ -69,6 +90,8 @@ export interface ContractStatus {
   readonly criteriaCount: number | null;
   /** ISO-8601 UTC; `null` unless frozen. */
   readonly frozenAt: string | null;
+  /** Whether a plan has been compiled against this exact contract. */
+  readonly plan: ContractPlanState;
 }
 
 /**
@@ -116,6 +139,10 @@ export function renderStatusJson(status: ContractStatus): string {
     fingerprint: status.fingerprint,
     criteriaCount: status.criteriaCount,
     frozenAt: status.frozenAt,
+    // Additive, as the header requires: a consumer reading the eight fields above is
+    // unaffected, and one that wants to know whether the definition of done has ever been
+    // compiled can now ask without shelling out to `plan`.
+    plan: status.plan,
   };
 
   return `${JSON.stringify(payload, null, 2)}\n`;
@@ -179,6 +206,10 @@ export function renderStatusHuman(status: ContractStatus): string {
     `Frozen at: ${status.frozenAt ?? '(not frozen)'}`,
   ];
 
+  if (status.plan !== 'not-applicable') {
+    lines.push(`Plan:      ${status.plan}`);
+  }
+
   if (status.state === 'tampered') {
     lines.push(
       '',
@@ -189,6 +220,26 @@ export function renderStatusHuman(status: ContractStatus): string {
     );
   } else if (status.state === 'draft') {
     lines.push('', `Not frozen yet. Freeze it with 'specwitness contract ${status.epic} --freeze'.`);
+  }
+
+  // Said in full rather than left to the one-word field above, because the one-word version
+  // reads as bookkeeping and this is not: an epic whose plan has never compiled has a
+  // definition of done nothing has ever been able to act on.
+  if (status.plan === 'absent') {
+    lines.push(
+      '',
+      'No plan has been compiled against this contract. A contract that cannot',
+      'be compiled is not frozen — it is only written down: nothing has yet',
+      'shown that these criteria can be turned into probes at all.',
+      `Compile one with 'specwitness plan ${status.epic}'.`,
+    );
+  } else if (status.plan === 'stale') {
+    lines.push(
+      '',
+      'The plan on disk was compiled against an EARLIER version of this',
+      'contract, so it does not describe what is frozen now.',
+      `Recompile it with 'specwitness plan ${status.epic}'.`,
+    );
   }
 
   return `${lines.join('\n')}\n`;

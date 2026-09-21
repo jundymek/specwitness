@@ -26,6 +26,7 @@ const FROZEN: ContractStatus = {
   fingerprint: 'a'.repeat(64),
   criteriaCount: 12,
   frozenAt: '2026-08-31T06:12:41.000Z',
+  plan: 'compiled',
 };
 
 const ABSENT: ContractStatus = {
@@ -37,6 +38,7 @@ const ABSENT: ContractStatus = {
   fingerprint: null,
   criteriaCount: null,
   frozenAt: null,
+  plan: 'not-applicable',
 };
 
 const DRAFT: ContractStatus = {
@@ -48,6 +50,7 @@ const DRAFT: ContractStatus = {
   fingerprint: null,
   criteriaCount: 5,
   frozenAt: null,
+  plan: 'not-applicable',
 };
 
 const TAMPERED: ContractStatus = {
@@ -59,6 +62,7 @@ const TAMPERED: ContractStatus = {
   fingerprint: 'b'.repeat(64),
   criteriaCount: 5,
   frozenAt: '2026-08-31T06:12:41.000Z',
+  plan: 'stale',
 };
 
 describe('integrityFor', () => {
@@ -82,6 +86,7 @@ describe('renderStatusJson', () => {
       fingerprint: 'a'.repeat(64),
       criteriaCount: 12,
       frozenAt: '2026-08-31T06:12:41.000Z',
+      plan: 'compiled',
     });
   });
 
@@ -99,6 +104,7 @@ describe('renderStatusJson', () => {
       fingerprint: null,
       criteriaCount: null,
       frozenAt: null,
+      plan: 'not-applicable',
     });
   });
 
@@ -120,6 +126,10 @@ describe('renderStatusJson', () => {
       'fingerprint',
       'criteriaCount',
       'frozenAt',
+      // Added with the plan-state field: "does a plan stand against this contract" is the
+      // third question the status answers, beside what the contract IS and whether it can
+      // be trusted.
+      'plan',
     ].sort();
 
     for (const status of [FROZEN, ABSENT, DRAFT, TAMPERED]) {
@@ -180,6 +190,29 @@ describe('renderStatusHuman', () => {
 
   it('ends with a newline', () => {
     expect(renderStatusHuman(FROZEN).endsWith('\n')).toBe(true);
+  });
+
+  it('says in full that a frozen contract has never had a plan compiled', () => {
+    // The epic-6 state, and it was invisible: frozen on 2026-09-20 with no plan ever
+    // compiled against it, reported identically to one whose plan compiles cleanly. The
+    // one-word `Plan: absent` field reads as bookkeeping, so the sentence is spelled out.
+    const text = renderStatusHuman({ ...FROZEN, plan: 'absent' });
+
+    expect(text.toLowerCase()).toContain('no plan has been compiled');
+    expect(text).toContain('specwitness plan epic-7');
+  });
+
+  it('distinguishes a plan compiled against an earlier contract from none at all', () => {
+    const text = renderStatusHuman({ ...FROZEN, plan: 'stale' }).toLowerCase();
+
+    expect(text).toContain('earlier version');
+    expect(text).not.toContain('no plan has been compiled');
+  });
+
+  it('says nothing about a plan when there is no frozen fingerprint to match', () => {
+    // A draft has no fingerprint, so "does a plan match it" is not a question yet, and
+    // printing a field about it would invite an operator to act on a non-answer.
+    expect(renderStatusHuman(DRAFT)).not.toContain('Plan:');
   });
 });
 

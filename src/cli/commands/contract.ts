@@ -69,11 +69,14 @@ import { createProcessRunner } from '../../infra/process-runner.js';
 import { findUnmeasurableCriteria } from '../../authoring/measurability.js';
 import { preflightMeasurability } from '../../authoring/measurability-preflight.js';
 import { freeze, parseContract, serializeContract } from '../../schemas/contract.js';
+import { readPlanFile, resolvePlanPath } from '../../authoring/plan-file.js';
+import { parsePlan } from '../../schemas/plan.js';
 import {
   integrityFor,
   renderCouplingWarnings,
   renderStatusHuman,
   renderStatusJson,
+  type ContractPlanState,
   type ContractStatus,
 } from '../contract/render.js';
 import { printWarning } from '../print-error.js';
@@ -242,6 +245,44 @@ async function load(projectRoot: string, epic: string): Promise<LoadedContract> 
 }
 
 /**
+ * Has a plan ever been compiled against THIS contract?
+ *
+ * READ ONLY, and that is the design rather than a shortcut. Compiling is `specwitness plan`:
+ * it costs provider quota and takes minutes, and `--status` is the command an operator runs
+ * to ask a question, not to start work. This opens the plan file and compares fingerprints.
+ *
+ * FAILS TO 'absent' RATHER THAN THROWING. An unreadable or malformed plan is not a fact
+ * about the CONTRACT, which is what this command reports on; refusing to answer a contract
+ * question because a different file is broken would be the wrong failure. "No plan is
+ * standing against this contract" is true in that case too, and it points at the same
+ * remedy.
+ */
+async function planStateFor(
+  projectRoot: string,
+  epic: string,
+  loaded: LoadedContract,
+): Promise<ContractPlanState> {
+  // Only a frozen contract has a fingerprint for a plan to match, so for anything else the
+  // question is not yet meaningful — not 'absent', which would read as a missing artifact.
+  if (!loaded.present || !loaded.contract.meta.frozen || loaded.contract.meta.fingerprint === null) {
+    return 'not-applicable';
+  }
+
+  let plan;
+  try {
+    const text = await readPlanFile(projectRoot, epic);
+    if (text === undefined) {
+      return 'absent';
+    }
+    plan = parsePlan(text, resolvePlanPath(projectRoot, epic));
+  } catch {
+    return 'absent';
+  }
+
+  return plan.plan.contract.fingerprint === loaded.contract.meta.fingerprint ? 'compiled' : 'stale';
+}
+
+/**
  * AC3 — report state without prompting.
  *
  * A tampered-but-parseable contract exits 0 with `integrity: "mismatch"`:
@@ -262,6 +303,7 @@ async function reportStatus(projectRoot: string, epic: string, json: boolean): P
     fingerprint: loaded.present ? loaded.contract.meta.fingerprint : null,
     criteriaCount: loaded.present ? loaded.contract.spec.criteria.length : null,
     frozenAt: loaded.present ? loaded.contract.meta.frozenAt : null,
+    plan: await planStateFor(projectRoot, epic, loaded),
   };
 
   if (json) {
