@@ -1,8 +1,12 @@
 # One response for a whole contract does not scale
 
 **Found:** 2026-09-21, compiling the plan for tenstandard's epic 6.
-**Partly fixed:** `08687b9` makes the time bound follow the work.
-**Still open:** batching, which is the actual remedy.
+**Fixed:** `cc33eda` compiles in batches of 15, which is the remedy below.
+**Also fixed there:** `08687b9`'s time bound never actually reached an adapter —
+`invoke` rebuilt the `AgentPrompt` field by field and dropped `workUnits`, so
+every adapter read `undefined` and fell back to the constant that fix replaced.
+The partial remedy was inert for as long as it existed; writing the batch test
+is what surfaced it.
 
 ## What happened
 
@@ -70,3 +74,25 @@ the failure this product exists to prevent.
 A reasonable batch size is 15–20 criteria: large enough that the per-call
 overhead is amortised, small enough that a batch is a few minutes rather than
 twenty.
+
+## What was built
+
+`compilePlan` asks for `PLAN_BATCH_SIZE` (15) criteria per invocation and
+assembles one plan. Each batch is gated by `planDraftSchemaFor` over a contract
+narrowed to that batch, so a batch draft is complete on its own terms and a
+rejection names the criteria that call missed rather than every criterion
+outside it.
+
+The three risks named above are answered rather than assumed, and the tests are
+in `tests/unit/authoring/plan.test.ts` under "a contract larger than one batch":
+
+- **Nothing dropped at a seam.** The union is read back criterion by criterion
+  from the whole contract in `assemble`, which fails closed on a missing id.
+- **No two batches disagreeing about a binding.** Identical bindings merge;
+  conflicting ones raise `ProviderError`, because keeping either would make the
+  plan depend on which batch answered first.
+- **Dispositions unchanged.** `needs-human` entries are copied verbatim.
+
+A contract ten times larger is now ten times as many batches of the same size,
+each bounded identically — the ceiling stops being reachable by growth, which
+was the point.
