@@ -720,3 +720,151 @@ describe('AD-13 — the same attempt shape as every other surface', () => {
     );
   });
 });
+
+/* ── dogfooding repairs, epic 7 ──────────────────────────────────────────────────────── */
+
+/**
+ * Two defects the tenstandard epic-6 verdict exposed, both in this module, both generic.
+ *
+ * Neither is a failure of the branch that was under verification. Both are ways a contract
+ * author cannot say what they plainly mean, and the shapes are reproduced here exactly as
+ * they occurred: a `fetch(` census that counted `refetch()`, and a list of forbidden
+ * spellings that could not fail.
+ */
+describe('whole-word matching — a substring of a longer identifier is not the word', () => {
+  it('does not count refetch() when the probe asks for whole-word fetch(', async () => {
+    // The epic-6 shape: React Query's `refetch()` is the OPPOSITE of the direct request
+    // path the criterion forbids, and the census reported six violations of a rule the
+    // branch had kept.
+    await tree({
+      'ui/list.ts': 'const { refetch } = useQuery();\nrefetch();\nvoid refetch();\n',
+    });
+
+    const { attempt } = await run(
+      probe(
+        { path: 'ui/*.ts' },
+        { target: { source: 'occurrences', text: 'fetch(', wholeWord: true }, expected: '0' },
+      ),
+    );
+
+    expect(evaluation(attempt).satisfied).toBe(true);
+    expect(evaluation(attempt).actual).toBe('0');
+  });
+
+  it('still counts a real fetch( call, so the rule is enforced rather than disabled', async () => {
+    await tree({ 'ui/list.ts': 'await fetch("/api");\nconst { refetch } = useQuery();\n' });
+
+    const { attempt } = await run(
+      probe(
+        { path: 'ui/*.ts' },
+        { target: { source: 'occurrences', text: 'fetch(', wholeWord: true }, expected: '1' },
+      ),
+    );
+
+    expect(evaluation(attempt).satisfied).toBe(true);
+  });
+
+  it('treats a trailing non-word character in the needle as its own boundary', async () => {
+    // `fetch(` ends in '(', which is not an identifier character. The boundary that matters
+    // is the one before `f`; requiring a word character after `(` would match nothing ever.
+    await tree({ 'ui/a.ts': 'fetch(1);\n' });
+
+    const { attempt } = await run(
+      probe(
+        { path: 'ui/*.ts' },
+        { target: { source: 'occurrences', text: 'fetch(', wholeWord: true }, expected: '1' },
+      ),
+    );
+
+    expect(evaluation(attempt).satisfied).toBe(true);
+  });
+
+  it('counts the substring when wholeWord is not asked for, as it always did', async () => {
+    await tree({ 'ui/list.ts': 'refetch();\n' });
+
+    const { attempt } = await run(
+      probe({ path: 'ui/*.ts' }, { target: { source: 'occurrences', text: 'fetch(' }, expected: '1' }),
+    );
+
+    expect(evaluation(attempt).satisfied).toBe(true);
+  });
+
+  it('applies wholeWord to filesContaining as well', async () => {
+    await tree({
+      'ui/a.ts': 'refetch();\n',
+      'ui/b.ts': 'fetch("/api");\n',
+    });
+
+    const { attempt } = await run(
+      probe(
+        { path: 'ui/*.ts' },
+        { target: { source: 'filesContaining', texts: ['fetch('], wholeWord: true }, expected: '1' },
+      ),
+    );
+
+    expect(evaluation(attempt).satisfied).toBe(true);
+  });
+});
+
+describe("filesContaining match mode — a list of forbidden spellings that cannot fail", () => {
+  it('counts a file holding ANY one of the texts when match is any', async () => {
+    // The epic-6 shape: three spellings of the same prohibition, of which the tree carried
+    // only one. `every` made the count 0 — an assertion that passes whatever the code says.
+    await tree({ 'ui/a.ts': 'function f(x: any) {}\n' });
+
+    const { attempt } = await run(
+      probe(
+        { path: 'ui/*.ts' },
+        {
+          target: { source: 'filesContaining', texts: [': any', 'as any', '<any>'], match: 'any' },
+          expected: '1',
+        },
+      ),
+    );
+
+    expect(evaluation(attempt).satisfied).toBe(true);
+  });
+
+  it('keeps requiring EVERY text by default, so existing plans mean what they meant', async () => {
+    await tree({ 'docs/a.md': 'mentions validator only\n' });
+
+    const { attempt } = await run(
+      probe(
+        { path: 'docs/*.md' },
+        { target: { source: 'filesContaining', texts: ['validator', 'widen'] }, expected: '0' },
+      ),
+    );
+
+    expect(evaluation(attempt).satisfied).toBe(true);
+  });
+
+  it('is explicit that match: all is the default spelled out', async () => {
+    await tree({ 'docs/a.md': 'mentions validator and widen both\n' });
+
+    const { attempt } = await run(
+      probe(
+        { path: 'docs/*.md' },
+        {
+          target: { source: 'filesContaining', texts: ['validator', 'widen'], match: 'all' },
+          expected: '1',
+        },
+      ),
+    );
+
+    expect(evaluation(attempt).satisfied).toBe(true);
+  });
+
+  it('records the match mode in the evidence, so a reader sees which question was asked', async () => {
+    await tree({ 'ui/a.ts': 'x: any\n' });
+
+    const { evidence } = await run(
+      probe(
+        { path: 'ui/*.ts' },
+        { target: { source: 'filesContaining', texts: [': any', 'as any'], match: 'any' }, expected: '1' },
+      ),
+    );
+
+    const read = evidence.files.find((file) => file.contents.includes('filesContaining'));
+    expect(read?.contents).toContain('"match": "any"');
+  });
+});

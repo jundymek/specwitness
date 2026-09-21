@@ -391,16 +391,28 @@ export type FileCommentSyntax = (typeof FILE_COMMENT_SYNTAXES)[number];
  *   deliberately tiny accessor, so a plan's `jsonPath` means one thing on every surface.
  * - `occurrences`     — non-overlapping occurrences of a LITERAL `text`, summed across every
  *   matched file.
- * - `filesContaining` — how many matched files contain EVERY one of `texts`. "A document
- *   that mentions both X and Y" is one file satisfying two conditions, which two separate
- *   assertions over a glob cannot express.
+ * - `filesContaining` — how many matched files contain the `texts`, `match` deciding whether
+ *   that means every one of them or any. "A document that mentions both X and Y" is one file
+ *   satisfying two conditions, which two separate assertions over a glob cannot express.
  *
  * `ignoreCase` folds both sides before matching; `ignoreComments` blanks comments before
  * matching. Both change WHAT is counted, so they sit on the target, beside the text they
- * qualify — never in `mechanics`, which a mechanics adaptation may rewrite.
+ * qualify — never in `mechanics`, which a mechanics adaptation may rewrite. `wholeWord` is
+ * the third of that kind and exists because of a verdict it produced: a `fetch(` census
+ * counted React Query's `refetch()` — the exact opposite of the request path the criterion
+ * forbade — and reported six violations against a branch that had kept the rule. Without it
+ * an author cannot say "the word", only "these characters somewhere".
+ *
+ * `match` exists for the mirror-image failure, and it is the worse one. A contract author
+ * listing the spellings of one prohibition (`: any`, `as any`, `<any>`) got EVERY, so a tree
+ * carrying one of the three counted zero: an assertion that passes whatever the code says.
+ * A false green is a gate that does not guard, where `wholeWord`'s absence only cost a false
+ * red. `all` stays the default so that every plan compiled before this means what it meant.
  *
  * THERE IS NO PATTERN MATCHING, for the reason `ASSERTION_COMPARISONS` records: a pattern
- * is an interpreter a provider could hand a hostile input. Every text here is a literal.
+ * is an interpreter a provider could hand a hostile input. Every text here is a literal, and
+ * `wholeWord` is a check on the characters ADJOINING a literal match rather than a pattern,
+ * so it adds no interpreter and cannot backtrack.
  */
 export type FileAssertionTarget =
   | { readonly source: 'exists' }
@@ -416,13 +428,24 @@ export type FileAssertionTarget =
       readonly text: string;
       readonly ignoreCase?: boolean;
       readonly ignoreComments?: FileCommentSyntax;
+      readonly wholeWord?: boolean;
     }
   | {
       readonly source: 'filesContaining';
       readonly texts: readonly string[];
       readonly ignoreCase?: boolean;
       readonly ignoreComments?: FileCommentSyntax;
+      readonly wholeWord?: boolean;
+      readonly match?: FileTextMatch;
     };
+
+/**
+ * Whether a file must carry every one of `texts` or any one of them. Absent means `all`,
+ * which is what the read meant before the mode existed.
+ */
+export const FILE_TEXT_MATCHES = Object.freeze(['all', 'any'] as const);
+
+export type FileTextMatch = (typeof FILE_TEXT_MATCHES)[number];
 
 /**
  * Which part of the checked-out tree to read (story 7.8 executes this).

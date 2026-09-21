@@ -96,6 +96,7 @@ import {
   type BrowserAssertionTarget,
   type DataBinding,
   FILE_COMMENT_SYNTAXES,
+  FILE_TEXT_MATCHES,
   type FileAssertionTarget,
   type HttpAssertionTarget,
   type ObservationAssertionTarget,
@@ -467,6 +468,8 @@ const FileText = z
 
 const FileCommentSyntaxSchema = z.enum(FILE_COMMENT_SYNTAXES);
 
+const FileTextMatchSchema = z.enum(FILE_TEXT_MATCHES);
+
 const FileAssertionTargetSchema = z.discriminatedUnion('source', [
   z.strictObject({ source: z.literal('exists') }),
   z.strictObject({ source: z.literal('fileCount') }),
@@ -481,12 +484,15 @@ const FileAssertionTargetSchema = z.discriminatedUnion('source', [
     text: FileText,
     ignoreCase: z.boolean().optional(),
     ignoreComments: FileCommentSyntaxSchema.optional(),
+    wholeWord: z.boolean().optional(),
   }),
   z.strictObject({
     source: z.literal('filesContaining'),
     texts: z.array(FileText).min(1).max(20),
     ignoreCase: z.boolean().optional(),
     ignoreComments: FileCommentSyntaxSchema.optional(),
+    wholeWord: z.boolean().optional(),
+    match: FileTextMatchSchema.optional(),
   }),
 ]);
 

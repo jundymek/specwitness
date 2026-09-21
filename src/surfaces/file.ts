@@ -95,9 +95,11 @@ import {
 import {
   ASSERTION_COMPARISONS,
   FILE_COMMENT_SYNTAXES,
+  FILE_TEXT_MATCHES,
   type AssertionComparison,
   type FileAssertionTarget,
   type FileCommentSyntax,
+  type FileTextMatch,
 } from '../domain/plan.js';
 import type { Clock } from '../domain/ports.js';
 import { isTreeGlob, treePatternProblem } from '../domain/tree-path.js';
@@ -325,11 +327,16 @@ function readFlags(target: Record<string, unknown>, at: string) {
   ) {
     malformed(`${at}.ignoreComments is not one of ${FILE_COMMENT_SYNTAXES.join(', ')}`);
   }
+  const wholeWord = own(target, 'wholeWord');
+  if (wholeWord !== undefined && typeof wholeWord !== 'boolean') {
+    malformed(`${at}.wholeWord is not a boolean`);
+  }
   return {
     ...(ignoreCase === undefined ? {} : { ignoreCase: ignoreCase as boolean }),
     ...(ignoreComments === undefined
       ? {}
       : { ignoreComments: ignoreComments as FileCommentSyntax }),
+    ...(wholeWord === undefined ? {} : { wholeWord: wholeWord as boolean }),
   };
 }
 
@@ -337,6 +344,9 @@ function readTarget(raw: unknown, at: string): FileAssertionTarget {
   const target = asRecord(raw, at);
   const source = own(target, 'source');
   const flagged = ['source', 'ignoreCase', 'ignoreComments'];
+  // `wholeWord` qualifies a NEEDLE, and only the two reads that carry one have a needle.
+  // `content` compares a whole file's text, where "is it a whole word" has no referent.
+  const needled = [...flagged, 'wholeWord'];
 
   switch (source) {
     case 'exists':
@@ -353,7 +363,7 @@ function readTarget(raw: unknown, at: string): FileAssertionTarget {
       return { source, path: asNonEmptyString(own(target, 'path'), `${at}.path`) };
 
     case 'occurrences':
-      onlyKeys(target, [...flagged, 'text'], at);
+      onlyKeys(target, [...needled, 'text'], at);
       return {
         source,
         text: asNonEmptyString(own(target, 'text'), `${at}.text`),
@@ -361,15 +371,20 @@ function readTarget(raw: unknown, at: string): FileAssertionTarget {
       };
 
     case 'filesContaining': {
-      onlyKeys(target, [...flagged, 'texts'], at);
+      onlyKeys(target, [...needled, 'texts', 'match'], at);
       const texts = own(target, 'texts');
       if (!Array.isArray(texts) || texts.length === 0) {
         return malformed(`${at}.texts is not a non-empty array`);
+      }
+      const match = own(target, 'match');
+      if (match !== undefined && !FILE_TEXT_MATCHES.includes(match as FileTextMatch)) {
+        return malformed(`${at}.match is not one of ${FILE_TEXT_MATCHES.join(', ')}`);
       }
       return {
         source,
         texts: texts.map((text, index) => asNonEmptyString(text, `${at}.texts[${index}]`)),
         ...readFlags(target, at),
+        ...(match === undefined ? {} : { match: match as FileTextMatch }),
       };
     }
 
@@ -1171,7 +1186,42 @@ interface ReadOutcome {
   readonly report: Record<string, unknown>;
 }
 
-function countOccurrences(haystack: string, needle: string): number {
+/**
+ * Is the match at `at` bounded by non-identifier characters on the sides that need it?
+ *
+ * ONLY THE SIDES THAT NEED IT, and that is the whole subtlety. `fetch(` ends in `(`, which is
+ * not an identifier character, so there is no identifier for the following character to
+ * extend — requiring a boundary there would reject `fetch(1)` and match nothing, ever. The
+ * boundary that carries the meaning is the one before `f`, which is exactly where `refetch(`
+ * differs. So each end is checked only when the needle's own character there could be part of
+ * a longer identifier.
+ *
+ * `$` and `_` count as identifier characters, as they do in every c-like language, so
+ * `fetch` does not match inside `$fetch` or `_fetch`.
+ */
+function boundedAt(haystack: string, needle: string, at: string | number): boolean {
+  const start = at as number;
+  const end = start + needle.length;
+
+  const startsWithWord = isIdentifierChar(needle.charAt(0));
+  const endsWithWord = isIdentifierChar(needle.charAt(needle.length - 1));
+
+  const before = start === 0 ? '' : haystack.charAt(start - 1);
+  const after = end >= haystack.length ? '' : haystack.charAt(end);
+
+  return (
+    (!startsWithWord || before === '' || !isIdentifierChar(before)) &&
+    (!endsWithWord || after === '' || !isIdentifierChar(after))
+  );
+}
+
+/**
+ * Non-overlapping occurrences of a literal. With `wholeWord`, a match whose adjoining
+ * characters would make it part of a longer identifier is skipped — and the scan resumes one
+ * character past where it STARTED, not past the whole needle: in `ffetch(x)` the rejected
+ * match at index 1 must not hide a real one that begins at index 2.
+ */
+function countOccurrences(haystack: string, needle: string, wholeWord = false): number {
   let count = 0;
   let from = 0;
   for (;;) {
@@ -1179,9 +1229,21 @@ function countOccurrences(haystack: string, needle: string): number {
     if (at === -1) {
       return count;
     }
-    count += 1;
-    from = at + needle.length;
+    if (!wholeWord || boundedAt(haystack, needle, at)) {
+      count += 1;
+      from = at + needle.length;
+    } else {
+      from = at + 1;
+    }
   }
+}
+
+/** Does the text contain the literal, as a whole word when asked? */
+function textContains(haystack: string, needle: string, wholeWord: boolean): boolean {
+  if (!wholeWord) {
+    return haystack.includes(needle);
+  }
+  return countOccurrences(haystack, needle, true) > 0;
 }
 
 function sha256(text: string): string {
@@ -1414,6 +1476,7 @@ export class FileSurfaceExecutor implements SurfaceExecutor {
           const count = countOccurrences(
             fold(await this.#prepared(reader, entry, target.ignoreComments)),
             needle,
+            target.wholeWord === true,
           );
           perFile[entry.rel] = count;
           total += count;
@@ -1432,18 +1495,28 @@ export class FileSurfaceExecutor implements SurfaceExecutor {
         }
         const fold = (text: string): string => (target.ignoreCase === true ? text.toLowerCase() : text);
         const needles = target.texts.map(fold);
+        const wholeWord = target.wholeWord === true;
+        const match: FileTextMatch = target.match ?? 'all';
         const perFile: Record<string, boolean> = {};
         let total = 0;
         for (const entry of files) {
           const text = fold(await this.#prepared(reader, entry, target.ignoreComments));
-          const all = needles.every((needle) => text.includes(needle));
-          perFile[entry.rel] = all;
-          total += all ? 1 : 0;
+          const has = (needle: string): boolean => textContains(text, needle, wholeWord);
+          const satisfies = match === 'any' ? needles.some(has) : needles.every(has);
+          perFile[entry.rel] = satisfies;
+          total += satisfies ? 1 : 0;
         }
         const value = String(total);
         return {
           read: { found: true, value },
-          report: { source: target.source, texts: target.texts, ...this.#flags(target), value, perFile },
+          report: {
+            source: target.source,
+            texts: target.texts,
+            match,
+            ...this.#flags(target),
+            value,
+            perFile,
+          },
         };
       }
 
@@ -1454,10 +1527,15 @@ export class FileSurfaceExecutor implements SurfaceExecutor {
     }
   }
 
-  #flags(target: { readonly ignoreCase?: boolean; readonly ignoreComments?: FileCommentSyntax }) {
+  #flags(target: {
+    readonly ignoreCase?: boolean;
+    readonly ignoreComments?: FileCommentSyntax;
+    readonly wholeWord?: boolean;
+  }) {
     return {
       ...(target.ignoreCase === undefined ? {} : { ignoreCase: target.ignoreCase }),
       ...(target.ignoreComments === undefined ? {} : { ignoreComments: target.ignoreComments }),
+      ...(target.wholeWord === undefined ? {} : { wholeWord: target.wholeWord }),
     };
   }
 
