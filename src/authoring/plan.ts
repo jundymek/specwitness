@@ -38,6 +38,7 @@
 import type { AgentProvider, AgentRequest } from '../domain/agent-provider.js';
 import type { RedactionOptions } from '../domain/evidence.js';
 import type { Contract } from '../domain/contract.js';
+import { ProviderError } from '../domain/errors.js';
 import type { Plan } from '../domain/plan.js';
 import type { Clock, Ids } from '../domain/ports.js';
 import { invoke } from '../providers/invoke.js';
@@ -125,27 +126,150 @@ export async function compilePlan(input: CompilePlanInput): Promise<CompilePlanR
   // reviewed.
   const contract = assertVerifiableContract(input.loadedContract);
 
-  const request: AgentRequest<PlanDraft> = {
-    role: 'plan-author',
-    prompt: buildPlanPrompt(contract, input.declared, input.redaction),
-    responseSchema: planDraftSchemaFor(contract, input.declared),
-    // `jsonSchema` is deliberately NOT set. The gate derives it from `responseSchema` in
-    // exactly one place, so two sites cannot disagree about the shape the model is steered
-    // toward versus validated against (ADR-001).
-    //
-    // The size of the job, so an adapter's time bound can follow the work. A plan
-    // emits probes, assertions and reviewer guidance for EVERY criterion in one
-    // response, so this is the number the cost is linear in — and a constant
-    // bound has now been outgrown twice, at 40 criteria and at 91.
-    workUnits: contract.spec.criteria.length,
-  };
+  const batches = batchCriteria(contract.spec.criteria, PLAN_BATCH_SIZE);
+  const drafts: PlanDraft[] = [];
+  let attempts = 0;
 
-  const response = await invoke(request, { provider: input.provider, clock: input.clock });
+  // SEQUENTIAL, not concurrent, and deliberately. Every batch goes to the same provider
+  // CLI under the same subscription; issuing them at once would multiply the peak load a
+  // provider sees for a job whose whole problem was already size. Compiling a plan is not
+  // latency-critical — it happens once per epic, before a cohort starts.
+  for (const batch of batches) {
+    const scope = withCriteria(contract, batch);
+    const response = await invoke(
+      {
+        role: 'plan-author',
+        prompt: buildPlanPrompt(scope, input.declared, input.redaction),
+        responseSchema: planDraftSchemaFor(scope, input.declared),
+        // `jsonSchema` is deliberately NOT set. The gate derives it from `responseSchema` in
+        // exactly one place, so two sites cannot disagree about the shape the model is
+        // steered toward versus validated against (ADR-001).
+        //
+        // THE SIZE OF THIS BATCH, never of the contract. A bound derived from the whole
+        // contract would grow with it and reintroduce exactly the ceiling batching exists to
+        // remove — the defect was outgrown twice already, at 40 criteria and at 91.
+        workUnits: batch.length,
+      } satisfies AgentRequest<PlanDraft>,
+      { provider: input.provider, clock: input.clock },
+    );
+
+    drafts.push(response.parsed);
+    // EVERY batch's attempts, summed. Reporting only the last would understate the cost of a
+    // compile in which an early batch was rejected twice, and the cost is the thing FR-14
+    // asks to be visible.
+    attempts += response.attempts.length;
+  }
 
   return {
-    plan: assemble(contract, response.parsed, input),
-    attempts: response.attempts.length,
+    plan: assemble(contract, mergeDrafts(drafts), input),
+    attempts,
   };
+}
+
+/**
+ * How many criteria one provider call is asked to plan.
+ *
+ * Fifteen, from `docs/findings/plan-compilation-does-not-scale.md`: large enough that the
+ * per-call overhead is amortised, small enough that a batch is a few minutes rather than
+ * twenty. It is a constant rather than config because it is a property of how long a model
+ * can work before a bound fires, not of any one project.
+ *
+ * ⚠️ A CONSTANT HERE IS NOT THE THING THAT WAS OUTGROWN. The bound that failed twice scaled
+ * with the CONTRACT; this scales with nothing — a contract ten times larger is ten times as
+ * many batches of the same size, each bounded identically.
+ */
+export const PLAN_BATCH_SIZE = 15;
+
+/** The criteria split into runs of at most `size`, in contract order. */
+function batchCriteria<T>(criteria: readonly T[], size: number): readonly (readonly T[])[] {
+  const batches: T[][] = [];
+  for (let index = 0; index < criteria.length; index += size) {
+    batches.push(criteria.slice(index, index + size));
+  }
+  // A contract with no criteria cannot be frozen, so this is a floor rather than a case:
+  // one empty batch would ask a provider to plan nothing.
+  return batches.length > 0 ? batches : [[]];
+}
+
+/**
+ * The same contract, narrowed to one batch's criteria.
+ *
+ * `meta` — the fingerprint included — is carried through UNCHANGED and that is correct
+ * rather than sloppy: this value never becomes an artifact and is never re-hashed. It exists
+ * so `planDraftSchemaFor` builds a gate for THIS batch, which is what lets a batch draft be
+ * complete on its own terms and lets the retry prompt name the criteria this call actually
+ * missed. The plan's fingerprint comes from the whole contract in `assemble`.
+ */
+function withCriteria(contract: Contract, criteria: readonly Contract['spec']['criteria'][number][]): Contract {
+  return { ...contract, spec: { ...contract.spec, criteria } };
+}
+
+/**
+ * One draft from many, checked for exactly the things a seam can break.
+ *
+ * The finding that prescribed batching names the risks, and each is answered here rather
+ * than trusted: a criterion silently dropped between batches, two batches disagreeing about
+ * a shared binding, and a `needs-human` disposition quietly changed. The first and third are
+ * covered by validating the union against the WHOLE contract — `assemble` re-reads every
+ * criterion from the contract and fails closed on a missing one, and dispositions are copied
+ * verbatim from the batch that produced them.
+ *
+ * What only this function can check is the SECOND, because no batch's own gate can see
+ * another batch's bindings.
+ */
+function mergeDrafts(drafts: readonly PlanDraft[]): PlanDraft {
+  const bindings = new Map<string, PlanDraft['data']['bindings'][number]>();
+
+  for (const draft of drafts) {
+    for (const binding of draft.data.bindings) {
+      const existing = bindings.get(binding.name);
+      if (existing === undefined) {
+        bindings.set(binding.name, binding);
+        continue;
+      }
+      // IDENTICAL IS FINE, CONFLICTING IS NOT. Two batches naming the same fixed value have
+      // agreed, and one entry is the honest merge. Two that disagree have not, and keeping
+      // either would make the plan depend on which batch answered first — a plan that is not
+      // a function of the contract. Refused loudly instead; `ProviderError` is the class the
+      // caller already propagates as exit 3 without writing anything.
+      if (!sameBinding(existing, binding)) {
+        throw new ProviderError(
+          `two batches of this plan disagree about the data binding '${binding.name}': ` +
+            `${describeBinding(existing)} and ${describeBinding(binding)}. A binding is ` +
+            'referenced by name across the whole plan, so it cannot mean two things',
+          'recompile the plan — the batches are drafted independently and the provider gave ' +
+            'inconsistent answers. If it recurs, the binding is probably named too generically ' +
+            'to be unambiguous from one batch at a time',
+        );
+      }
+    }
+  }
+
+  return {
+    data: { bindings: [...bindings.values()] },
+    // ORDER IS IRRELEVANT HERE and deliberately not sorted: `assemble` reorders the criteria
+    // to follow the contract, which is the order a reader diffs against.
+    criteria: drafts.flatMap((draft) => draft.criteria),
+  };
+}
+
+function sameBinding(
+  a: PlanDraft['data']['bindings'][number],
+  b: PlanDraft['data']['bindings'][number],
+): boolean {
+  if (a.kind === 'fixed' && b.kind === 'fixed') {
+    return a.value === b.value;
+  }
+  if (a.kind === 'volatile' && b.kind === 'volatile') {
+    return a.reason === b.reason;
+  }
+  return false;
+}
+
+function describeBinding(binding: PlanDraft['data']['bindings'][number]): string {
+  return binding.kind === 'fixed'
+    ? `fixed value ${JSON.stringify(binding.value)}`
+    : `volatile (${binding.reason})`;
 }
 
 /**

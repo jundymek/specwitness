@@ -431,3 +431,45 @@ describe('the failure envelope always agrees with its last attempt', () => {
     }
   });
 });
+
+describe('the gate hands the adapter every field the caller set', () => {
+  /**
+   * `workUnits` is a SIZE HINT an adapter may turn into a time bound, and it reached no
+   * adapter for as long as it existed. `08687b9` added it so a plan's bound could follow the
+   * criterion count — the constant had been outgrown twice, at 40 criteria and at 91 — and
+   * `compilePlan` set it faithfully. This assembly then rebuilt the `AgentPrompt` field by
+   * field and dropped it, so `claude-code-cli` read `undefined` and fell back to the very
+   * constant the fix replaced.
+   *
+   * A test calling the adapter directly saw the intended behaviour; production never did.
+   * This asserts the seam between the two, which is where it was lost.
+   */
+  it('forwards workUnits to the adapter', async () => {
+    const provider = scriptedProvider(VALID);
+
+    await attemptInvoke(request({ workUnits: 15 }), { provider, clock: steppingClock() });
+
+    expect(provider.prompts[0]?.workUnits).toBe(15);
+  });
+
+  it('forwards workUnits on a RETRY too, where the bound matters most', async () => {
+    // A retry re-sends the same job, so a bound that shrank back to the default on attempt 2
+    // would fire on exactly the work that already proved it needed longer.
+    const provider = failThenSucceed(1, VALID);
+
+    await attemptInvoke(request({ workUnits: 15 }), { provider, clock: steppingClock() });
+
+    expect(provider.prompts).toHaveLength(2);
+    for (const prompt of provider.prompts) {
+      expect(prompt.workUnits).toBe(15);
+    }
+  });
+
+  it('leaves workUnits absent when the caller set none', async () => {
+    const provider = scriptedProvider(VALID);
+
+    await attemptInvoke(request(), { provider, clock: steppingClock() });
+
+    expect(provider.prompts[0]?.workUnits).toBeUndefined();
+  });
+});

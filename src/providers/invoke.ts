@@ -216,6 +216,15 @@ export async function attemptInvoke<T>(
           : withRejectionFeedback(request.prompt, previous, attempt, totalAttempts),
       ...(request.contextFiles !== undefined ? { contextFiles: request.contextFiles } : {}),
       ...(jsonSchema !== undefined ? { jsonSchema } : {}),
+      // ⚠️ FORWARDED, AND IT WAS NOT. `08687b9` added `workUnits` so an adapter's time bound
+      // could follow the size of the job, and `compilePlan` set it — but this assembly
+      // rebuilds the `AgentPrompt` field by field and dropped it, so every adapter saw
+      // `undefined` and fell back to the very constant the fix existed to replace. The bound
+      // never changed in production; only a test calling an adapter directly ever saw it.
+      //
+      // The shape of this object is the reason it happened: listing the fields means a field
+      // added later is silently absent until someone remembers this line.
+      ...(request.workUnits !== undefined ? { workUnits: request.workUnits } : {}),
     };
 
     const generated = await generateOnce(provider, prompt);

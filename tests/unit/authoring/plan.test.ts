@@ -485,3 +485,147 @@ describe('the run redaction options reach the prompt (story 6.8, AD-10)', () => 
     expect(provider.prompts[0]?.prompt).not.toContain(SEEDED_SECRET);
   });
 });
+
+/* ── batched compilation ─────────────────────────────────────────────────────────────── */
+
+/**
+ * Compiling a whole contract in ONE response stopped scaling at 91 criteria: three attempts
+ * of roughly twenty minutes each died on the same time bound, so the retry budget went on
+ * re-hitting the wall rather than recovering from anything. `08687b9` made the bound follow
+ * the work, which unblocked that size without changing the shape;
+ * `docs/findings/plan-compilation-does-not-scale.md` records why the shape is the defect.
+ *
+ * These pin the properties that finding says batching must not break. Every one of them is
+ * about the SEAM between batches — a criterion lost there is a silently narrower gate, which
+ * is the failure this product exists to prevent.
+ */
+describe('a contract larger than one batch is compiled in batches', () => {
+  /** Criteria numbered E7-01.. so a batch boundary can be placed anywhere in them. */
+  function manyCriteria(count: number) {
+    return Array.from({ length: count }, (_, index) =>
+      criterion(`E7-${String(index + 1).padStart(2, '0')}`),
+    );
+  }
+
+  /** A draft covering exactly the ids given, every one automated with a trivial probe. */
+  function draftFor(ids: readonly string[], bindings: readonly unknown[] = []): string {
+    return JSON.stringify({
+      data: { bindings },
+      criteria: ids.map((criterionId) => ({
+        criterionId,
+        disposition: 'automated',
+        probes: [{ ...HTTP_PROBE_DRAFT, id: `probe-${criterionId.toLowerCase()}` }],
+      })),
+    });
+  }
+
+  it('asks the provider once per batch rather than once for the contract', async () => {
+    const contract = frozenContract(manyCriteria(20));
+    const provider = scripted(
+      draftFor(contract.spec.criteria.slice(0, 15).map((entry) => entry.id)),
+      draftFor(contract.spec.criteria.slice(15).map((entry) => entry.id)),
+    );
+
+    const { plan } = await compile(provider, contract);
+
+    expect(provider.prompts).toHaveLength(2);
+    expect(plan.plan.criteria).toHaveLength(20);
+  });
+
+  it('still compiles a small contract in a single call', async () => {
+    const provider = scripted(validDraft());
+
+    await compile(provider);
+
+    expect(provider.prompts).toHaveLength(1);
+  });
+
+  it('keeps every criterion, in contract order, across the batch seam', async () => {
+    const contract = frozenContract(manyCriteria(20));
+    const provider = scripted(
+      draftFor(contract.spec.criteria.slice(0, 15).map((entry) => entry.id)),
+      draftFor(contract.spec.criteria.slice(15).map((entry) => entry.id)),
+    );
+
+    const { plan } = await compile(provider, contract);
+
+    expect(plan.plan.criteria.map((entry) => entry.criterionId)).toEqual(
+      contract.spec.criteria.map((entry) => entry.id),
+    );
+  });
+
+  it('asks each batch only about its own criteria', async () => {
+    const contract = frozenContract(manyCriteria(20));
+    const provider = scripted(
+      draftFor(contract.spec.criteria.slice(0, 15).map((entry) => entry.id)),
+      draftFor(contract.spec.criteria.slice(15).map((entry) => entry.id)),
+    );
+
+    await compile(provider, contract);
+
+    // The last criterion belongs to batch 2 and must not be mentioned in batch 1's prompt,
+    // or the model is being asked for work that is then thrown away.
+    expect(provider.prompts[0]?.prompt).not.toContain('E7-20');
+    expect(provider.prompts[1]?.prompt).toContain('E7-20');
+  });
+
+  it('merges identical bindings from two batches into one', async () => {
+    const contract = frozenContract(manyCriteria(20));
+    const binding = { kind: 'fixed', name: 'companyName', value: 'Acme Test Ltd' };
+    const provider = scripted(
+      draftFor(contract.spec.criteria.slice(0, 15).map((entry) => entry.id), [binding]),
+      draftFor(contract.spec.criteria.slice(15).map((entry) => entry.id), [binding]),
+    );
+
+    const { plan } = await compile(provider, contract);
+
+    expect(plan.plan.data.bindings).toEqual([
+      { kind: 'fixed', name: 'companyName', value: 'Acme Test Ltd' },
+    ]);
+  });
+
+  it('refuses when two batches give one binding name different values', async () => {
+    // Silently keeping either one would make the plan depend on which batch answered first.
+    const contract = frozenContract(manyCriteria(20));
+    const provider = scripted(
+      draftFor(contract.spec.criteria.slice(0, 15).map((entry) => entry.id), [
+        { kind: 'fixed', name: 'companyName', value: 'Acme Test Ltd' },
+      ]),
+      draftFor(contract.spec.criteria.slice(15).map((entry) => entry.id), [
+        { kind: 'fixed', name: 'companyName', value: 'Other Ltd' },
+      ]),
+    );
+
+    await expect(compile(provider, contract)).rejects.toThrow(/companyName/);
+  });
+
+  it('tells each batch how large the job is, so a bound can follow the batch', async () => {
+    const contract = frozenContract(manyCriteria(20));
+    const provider = scripted(
+      draftFor(contract.spec.criteria.slice(0, 15).map((entry) => entry.id)),
+      draftFor(contract.spec.criteria.slice(15).map((entry) => entry.id)),
+    );
+
+    await compile(provider, contract);
+
+    // Not the contract's 20: a bound derived from the whole contract would reintroduce the
+    // defect batching exists to remove.
+    expect(provider.prompts[0]?.workUnits).toBe(15);
+    expect(provider.prompts[1]?.workUnits).toBe(5);
+  });
+
+  it('reports the attempts every batch spent, not just the last', async () => {
+    const contract = frozenContract(manyCriteria(20));
+    const ids = contract.spec.criteria.map((entry) => entry.id);
+    // Batch 1 is rejected once and then succeeds; batch 2 succeeds first time.
+    const provider = scripted(
+      '{"nope":true}',
+      draftFor(ids.slice(0, 15)),
+      draftFor(ids.slice(15)),
+    );
+
+    const { attempts } = await compile(provider, contract);
+
+    expect(attempts).toBe(3);
+  });
+});
