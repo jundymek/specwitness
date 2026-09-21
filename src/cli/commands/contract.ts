@@ -67,6 +67,7 @@ import { providerForRole } from '../../providers/index.js';
 import { SystemClock } from '../../infra/clock.js';
 import { createProcessRunner } from '../../infra/process-runner.js';
 import { findUnmeasurableCriteria } from '../../authoring/measurability.js';
+import { preflightMeasurability } from '../../authoring/measurability-preflight.js';
 import { freeze, parseContract, serializeContract } from '../../schemas/contract.js';
 import {
   integrityFor,
@@ -309,6 +310,12 @@ async function freezeContract(projectRoot: string, epic: string, clock: Clock): 
     assertMeasurableCriteria(epic, loaded.contract.spec.criteria);
   }
 
+  // "What will measure this?", asked of every criterion while the answer is
+  // still free to act on. Reports; never refuses — see reportMeasurability.
+  if (contractStatusState(loaded) === 'draft') {
+    await reportMeasurability(projectRoot, epic, loaded.contract, clock);
+  }
+
   // Throws IntegrityError when a frozen contract's content changed — that is a
   // tamper, not a re-freeze, and story 2.7's --amend is the way to record a
   // legitimate change.
@@ -369,6 +376,98 @@ function assertMeasurableCriteria(
     lines.join('\n'),
     `edit the statements in ${contractRelativePath(epic)}, then freeze again — a frozen criterion can only be changed by an audited amendment, so this is the last cheap moment to fix one`,
   );
+}
+
+/**
+ * Asks the plan provider which declared instrument would measure each criterion,
+ * and prints the ones nothing can see.
+ *
+ * **REPORTS, NEVER REFUSES**, and the asymmetry is deliberate. The answer comes
+ * from a model: one that says "nothing measures this" may simply be wrong, and a
+ * freeze blocked by a wrong model is worse than a contract carrying a criterion
+ * that compiles to `needs-human`. The operator decides; this makes sure they
+ * decide with the information rather than without it.
+ *
+ * **BEST EFFORT, AND SILENT WHEN IT CANNOT RUN.** No provider assigned, a CLI
+ * that is not installed, a timeout — none of those is a reason to stop a freeze.
+ * The check is an improvement on knowing nothing, not a precondition, and a
+ * freeze that depended on an AI call would put the product's own freeze path at
+ * the mercy of the thing it exists to be independent of.
+ *
+ * Why it is here at all: `plan-author` already answers this question, but it
+ * answers it AFTER the freeze, when ADR-005 has made the cheap fix unavailable.
+ * On tenstandard's epic 6 that cost 34 criteria of 91 — all of them true and
+ * important, none of them visible to any declared observation.
+ */
+async function reportMeasurability(
+  projectRoot: string,
+  epic: string,
+  contract: Contract,
+  clock: Clock,
+): Promise<void> {
+  let report;
+  try {
+    const config = loadConfig(projectRoot);
+    const resolved = resolveRoleProvider(config, 'plan-author');
+    if (resolved === undefined) {
+      return;
+    }
+
+    const provider = providerForRole(resolved, {
+      processRunner: createProcessRunner(clock),
+      clock,
+      warn: (message: string) => process.stderr.write(`${message}\n`),
+    });
+    if (provider === undefined) {
+      return;
+    }
+
+    report = await preflightMeasurability({
+      contract,
+      declared: {
+        serviceIds: Object.keys(config.services),
+        commandIds: Object.keys(config.observations),
+      },
+      provider,
+      clock,
+    });
+  } catch {
+    // Deliberately swallowed; see the header. The freeze proceeds.
+    return;
+  }
+
+  if (report.unmeasurable.length === 0) {
+    process.stderr.write(
+      `Every criterion maps to a declared instrument (${String(report.verdicts.length)} checked).\n`,
+    );
+    return;
+  }
+
+  const count = report.unmeasurable.length;
+  const noun = count === 1 ? 'criterion' : 'criteria';
+  const lines = [
+    '',
+    `${String(count)} of ${String(report.verdicts.length)} ${noun} have no declared instrument that can measure them:`,
+    '',
+  ];
+
+  for (const verdict of report.unmeasurable) {
+    lines.push(`  ${verdict.criterionId}  ${verdict.note}`);
+  }
+
+  lines.push(
+    '',
+    'Each will compile to NEEDS_HUMAN and the epic will end without a machine',
+    'verdict on it. **This is the last cheap moment to change that**: after the',
+    `freeze, ${contractRelativePath(epic)} can only be changed by an audited`,
+    'amendment. Either declare an observation that reports the facts these need,',
+    'or reword them to what an existing one can see — or accept them knowingly,',
+    'which is a legitimate answer as long as it is a decision rather than a',
+    'discovery.',
+    '',
+  );
+
+  process.stderr.write(`${lines.join('\n')}\n`);
 }
 
 /** AC1 — draft a contract, refusing rather than overwriting. */
