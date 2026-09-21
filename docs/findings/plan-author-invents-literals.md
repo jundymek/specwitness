@@ -3,8 +3,9 @@
 **Found:** 2026-09-20, while building the freeze-time measurability check.
 **Severity:** this is the product's own failure mode, one layer below where it
 was being looked for.
-**Status:** diagnosed, not fixed. **Deferred deliberately on 2026-09-20**, with
-a deadline rather than an intention — see "When this has to be fixed".
+**Status:** **fixed 2026-09-21** — `specwitness plan` now names every literal
+claim that does not hold against the tree it compiled from. See "The fix, and
+what it found" at the end.
 
 ## What happened
 
@@ -124,3 +125,47 @@ tell that apart from an invention.
 Counting how many of them occur in their target files, before and after, is the
 honest test of whether the warning earns its place — and it is a number, not an
 impression.
+
+## The fix, and what it found
+
+`src/authoring/literal-claims.ts` collects every claim of the form "this file
+contains this literal" — `file` surface, `target.source: content`,
+`comparison: contains`, a literal worth checking — and `specwitness plan`
+reports the ones that do not hold, to stderr, after the plan is written.
+
+**A warning, not a refusal, and the exit code is untouched.** A plan is
+deliberately compilable before the work exists; "this literal is not in the
+tree" therefore has two honest readings, and only a reader can separate them.
+Refusing would block the legitimate case, which is the common one early in an
+epic.
+
+**Measured on the real plans**, which is the test that mattered:
+
+| Plan | Checkable claims | Not holding |
+| --- | --- | --- |
+| epic-3 | 21 | 0 |
+| epic-4 | 30 | 0 |
+| epic-5 | 157 | **4** |
+
+```
+E5-24  pinned-counts  "assertNumQueries"  — not in backend/tests/cases/test_editorial_api.py
+E5-27  pinned-count   "assertNumQueries"  — not in backend/tests/cases/test_metrics.py
+E5-37  allowlist      "ordering_fields"   — not in backend/apps/cases/public_views.py
+E5-41  pinned-count   "assertNumQueries"  — not in backend/tests/cases/test_public_entities.py
+```
+
+Three are the incident this document was opened for. **The fourth was not
+known**: `E5-37` — already recorded as self-contradictory — also asserts
+`ordering_fields`, a DRF attribute that module does not use; its allowlist is a
+module-level map called `ORDERING_FIELDS`. So that criterion had two
+independent defects, and only one of them had been found by reading.
+
+Zero false positives across 208 checked claims in three plans. The detector was
+also shown to go quiet: given a file that really contains the literal it
+reports nothing, which is the both-directions rule this project holds its own
+observations to.
+
+**What is deliberately still unchecked:** globs (`occurrences`,
+`filesContaining`), whose members are a filesystem question; `equals` over file
+content, a whole-file claim a partial tree legitimately fails; and every
+non-file surface, whose truth is about a system that is not running yet.

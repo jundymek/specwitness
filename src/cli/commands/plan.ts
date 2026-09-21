@@ -44,6 +44,8 @@
  * `init`, `doctor`, `contract` and `report`.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Command } from 'commander';
 
 import {
@@ -53,6 +55,10 @@ import {
   resolvePlanPath,
   writePlanFileAtomically,
 } from '../../authoring/plan-file.js';
+import {
+  collectLiteralClaims,
+  findUnmetLiteralClaims,
+} from '../../authoring/literal-claims.js';
 import { compilePlan } from '../../authoring/plan.js';
 import {
   assertVerifiableContract,
@@ -195,6 +201,7 @@ export async function runPlan(
   });
 
   report(epic, plan, attempts);
+  reportUnmetLiteralClaims(projectRoot, plan);
 }
 
 /**
@@ -372,4 +379,70 @@ function report(epic: string, plan: Plan, attempts: number): void {
     // Retries cost real subscription quota, so the count is visible rather than invisible.
     process.stderr.write(`Compiled after ${attempts} provider attempts.\n`);
   }
+}
+
+/**
+ * Names every literal the plan claims a file contains, where the file does not.
+ *
+ * WHY THIS RUNS HERE, at the end of `plan`, and not at `verify`: this is the
+ * moment the claim is cheap to fix. By `verify` the same defect arrives as a
+ * red criterion on working code, and the operator spends a retrospective
+ * deciding whether to believe the gate — which is exactly what tenstandard's
+ * epic 5 did, concluding the gate was "not yet worth trusting unread" for a
+ * defect that was the compiler's, not the contract's.
+ *
+ * A WARNING, NOT A FAILURE, and the exit code is untouched. A plan is
+ * deliberately compilable before the work exists — that is what freezing a
+ * contract early is for — so "this literal is not in the tree" has two honest
+ * readings: the implementation is not written yet, or the compiler invented
+ * the string. Only a reader tells those apart. Refusing would block the
+ * legitimate case, which is the common one early in an epic.
+ *
+ * Reading the files happens HERE rather than in `src/authoring/`, because AD-1
+ * keeps the filesystem at the edge. Every read is wrapped: a checker that
+ * could throw would turn a diagnostic into a failed compilation, and the plan
+ * is already written by this point.
+ */
+function reportUnmetLiteralClaims(projectRoot: string, plan: Plan): void {
+  const claims = collectLiteralClaims(plan.plan);
+  if (claims.length === 0) {
+    return;
+  }
+
+  const unmet = findUnmetLiteralClaims(claims, (relative) => {
+    try {
+      // `TreePattern` already refuses a path that escapes the tree, and this
+      // only ever reads; the join is inside the project the plan is for.
+      return readFileSync(join(projectRoot, relative), 'utf8');
+    } catch {
+      return undefined;
+    }
+  });
+
+  if (unmet.length === 0) {
+    return;
+  }
+
+  const noun = unmet.length === 1 ? 'claim' : 'claims';
+  const lines = [
+    '',
+    `${unmet.length} literal ${noun} of ${claims.length} do not hold against this tree:`,
+    '',
+  ];
+
+  for (const claim of unmet) {
+    const why = claim.fileExists ? 'not in' : 'no such file';
+    lines.push(`  ${claim.criterionId}  ${claim.probeId}  "${claim.literal}" — ${why} ${claim.path}`);
+  }
+
+  lines.push(
+    '',
+    'Either the implementation does not exist yet — expected for a plan compiled',
+    'before the work — or the compiler invented the string. Only you can tell those',
+    'apart, and the second is worth catching now: an invented literal reports as a',
+    'red criterion against correct code, which reads like a product defect.',
+    '',
+  );
+
+  process.stderr.write(`${lines.join('\n')}\n`);
 }
